@@ -3,6 +3,12 @@ name = "speedy-mcp"
 version = "0.1.0"
 edition = "2021"
 description = "MCP server exposing Speedy semantic search as tools for AI coding agents"
+license = "MIT"
+repository = "https://github.com/elguala9/Speedy"
+homepage = "https://github.com/elguala9/Speedy"
+readme = "README.md"
+categories = ["development-tools", "command-line-utilities"]
+keywords = ["mcp", "semantic-search", "vector", "code-search", "ai"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
