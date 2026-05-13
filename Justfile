@@ -1,6 +1,8 @@
 # ───── Speedy – comandi rapidi ─────
 # richiede `just`: cargo install just
 
+set shell := ["powershell.exe", "-NoProfile", "-Command"]
+
 # default: test + build
 default: test build
 
@@ -63,3 +65,11 @@ docs:
 # fix: corregge warning automaticamente
 fix:
     cargo fix --workspace --allow-dirty
+
+# dist: build release dei 3 binari principali e copia in dist/
+dist:
+    powershell -NoProfile -File scripts/build-release.ps1
+
+# publish: build release, publish su crates.io, crea GitHub Release con .exe, aggiorna README
+publish:
+    powershell -NoProfile -File scripts/publish.ps1 

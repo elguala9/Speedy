@@ -204,6 +204,9 @@ struct ErrorObj {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn mock_runner(output: &'static str) -> impl Fn(&[&str]) -> Result<String, String> {
         move |args: &[&str]| {
@@ -440,6 +443,47 @@ mod tests {
         let json = process_line(line, &mock_runner(""));
         let resp: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
         assert!(resp["id"].is_null());
+    }
+
+    // ── run_speedy function ──────────────────────────
+
+    #[test]
+    fn test_run_speedy_uses_speedy_bin_env() {
+        // Temporarily set SPEEDY_BIN to a known non-existent path
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("SPEEDY_BIN").ok();
+        std::env::set_var("SPEEDY_BIN", "nonexistent-binary-12345");
+
+        let result = run_speedy(&["--version"]);
+        assert!(result.is_err(), "should error when binary not found");
+        let err = result.unwrap_err();
+        assert!(err.contains("nonexistent-binary-12345"), "error should mention the binary name: {err}");
+
+        if let Some(val) = original {
+            std::env::set_var("SPEEDY_BIN", val);
+        } else {
+            std::env::remove_var("SPEEDY_BIN");
+        }
+    }
+
+    #[test]
+    fn test_run_speedy_defaults_to_speedy() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("SPEEDY_BIN").ok();
+        std::env::remove_var("SPEEDY_BIN");
+
+        let result = run_speedy(&["--version"]);
+        // Should try to run "speedy" which may or may not exist
+        // Either way we get an error or output - just verify no crash
+        if let Err(e) = &result {
+            assert!(e.contains("speedy"), "default binary name should be 'speedy', got: {e}");
+        }
+
+        if let Some(val) = original {
+            std::env::set_var("SPEEDY_BIN", val);
+        } else {
+            std::env::remove_var("SPEEDY_BIN");
+        }
     }
 
     // ── runner function ─────────────────────────────────
