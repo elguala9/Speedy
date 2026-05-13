@@ -1,0 +1,10 @@
+[package]
+name = "speedy-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server exposing Speedy semantic search as tools for AI coding agents"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

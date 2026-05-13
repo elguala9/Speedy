@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/speedy-core",
+    "packages/testexe",
+    "packages/speedy-mcp",
+]
