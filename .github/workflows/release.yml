@@ -53,18 +53,22 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release -p speedy-mcp --target ${{ matrix.target }}
+      - name: Build all binaries
+        run: cargo build --release -p speedy -p speedy-daemon -p speedy-cli -p speedy-mcp --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf speedy-mcp-${{ matrix.target }}.tar.gz speedy-mcp${{ matrix.suffix }}
-          mv speedy-mcp-${{ matrix.target }}.tar.gz ../../../
+          tar czf speedy-${{ matrix.target }}.tar.gz \
+            speedy${{ matrix.suffix }} \
+            speedy-daemon${{ matrix.suffix }} \
+            speedy-cli${{ matrix.suffix }} \
+            speedy-mcp${{ matrix.suffix }}
+          mv speedy-${{ matrix.target }}.tar.gz ../../../
 
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
-          files: speedy-mcp-*.tar.gz
+          files: speedy-*.tar.gz
           generate_release_notes: true

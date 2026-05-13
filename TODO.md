@@ -1,61 +1,112 @@
-# TODO — Completion Status
+# TODO — Speedy
 
-## CLI alignment with `instructions.md` ✅
+## Architettura
 
-All top-level flags from `instructions.md` are now implemented:
+```
+speedy-core (lib)            — libreria leggera condivisa
+speedy      (bin worker)     — tutti i moduli pesanti inline
+speedy-daemon (bin manager)  — CentralDaemon + watchers + IPC
+speedy-cli  (bin thin)       — proxy TCP puro
+speedy-mcp  (bin mcp)        — server MCP per AI agents
+```
 
-| instructions.md | Status | Notes |
-|---|---|---|
-| `--daemons \| -d` | ✅ | `-d` shorthand added (`--detach` moved to long-only) |
-| `--daemon-stop \| -ds` | ✅ | `--daemon-stop <path>` + `--ds` alias |
-| `--daemon-restart \| -dr` | ✅ | `--daemon-restart <path>` + `--dr` alias |
-| `--daemon-delete \| -dd` | ✅ | `--daemon-delete <path>` + `--dd` alias |
-| `--daemon-create \| -dc` | ✅ | `--daemon-create <path>` + `--dc` alias |
-| `--force \| -f` | ✅ | `-f` moved from `--file` to `--force`, `--file` is now long-only |
-| `--workspaces \| -w` | ✅ | `-w` shorthand added |
-| `--workspace-create \| -wc` | ✅ | `--workspace-create <path>` + `--wc` alias |
-| `--workspace-delete` | ✅ | `--workspace-delete <path>` |
+> **Binaries**: `dist/speedy.exe`, `dist/speedy-daemon.exe`, `dist/speedy-cli.exe` compilati.
 
-## Missing features ✅
+| Package | Test | Copertura |
+|---------|------|-----------|
+| `speedy-core` | 24 ✅ | config, workspace, embedding, daemon_client (base) |
+| `speedy` | 111 ✅ | CLI parsing, text, document, ignore, embed, db, file, hash, daemon, watcher, ensure_daemon |
+| `speedy-daemon` | 22 ✅ | exec, reindex, double_add, remove_nonexistent, graceful_shutdown, watcher_lifecycle, PID, status_full, dispatch tests, port_in_use, port_fallback |
+| `speedy-cli` | 33 ✅ (24 inline + 9 e2e) | CLI parsing (tutti subcomandi), --json, --path, --daemon-port, ping/pong, status, stop, workspace add/remove, index/query/context/sync via daemon, force reindex |
+| `speedy-mcp` | 33 ✅ | JSON-RPC protocol, tool schemas, lifecycle, SPEEDY_BIN env var |
 
-- [x] **Global `-p` path flag** — resolved: subcommands use `-p` short only (no `--path` long to avoid collision)
-- [x] **`--daemon-status` flag** — added as `--daemon-status <path>`
-- [x] **Daemon requires workspace validation** — `install()` now checks `workspace::is_registered()`
-- [x] **`-d` flag collision** — resolved: `--detach` is long-only, `-d` = `--daemons`
+---
 
-## Code quality ✅
+## Test da scrivere
 
-- [x] **Mock TCP server** (`server.rs`, `handler.rs`, `router.rs`) — removed entirely
-- [x] **Demo CLI binary** (`bin/cli.rs`) — removed entirely
-- [x] **`CachedEntry.id` field** (db.rs) — removed (unused)
-- [x] **`daemon.rs` `task_name` variable** — now used in Windows uninstall path
-- [x] **`handler.rs` unused `HashMap` import** — file removed
-- [x] **`Cargo.lock` in `.gitignore`** — removed from `.gitignore`
-- [x] **`now_rfc3339()`** — now uses `chrono::Utc::now().to_rfc3339()` (no more hardcoded 2024)
-- [x] **`.speedyignore` documentation** — added to README
+### 1. `speedy-cli` — Test mancanti (priorità alta) ✅
 
-## Testing ✅
+- [x] CLI parsing: testare tutti i subcomandi (Index, Query, Context, Sync, Force, Daemon, Workspace)
+- [x] `daemon status` → verifica output via mock TCP
+- [x] `daemon ping` → "pong" via mock TCP
+- [x] `daemon stop` → daemon si ferma
+- [x] `workspace add/remove` → integration test via DaemonClient
+- [x] `--json` flag su tutti i comandi
+- [x] `--path` / `-p` flag globale
+- [x] Connessione: daemon non in esecuzione → errore gestito
+- [x] Timeout/errore connessione se daemon non parte
 
-- [x] **Integration tests** — 5 integration tests in `tests/integration_test.rs`
-- [x] **Tests for watcher** — 2 tests (extension filtering)
-- [x] **Tests for daemon lifecycle** — 3 tests (read/write/update info)
-- [x] **Tests for CLI parsing** — 22 tests covering all flags and subcommands
-- [x] **Cross-platform** — daemon read/write tests work on all platforms
+### 2. `speedy-daemon` — Test IPC aggiuntivi (priorità media) ✅
 
-## Enhancements ✅
+- [x] `exec` command: invia comando a `speedy.exe` e ritorna output
+- [x] `reindex` command: spawna `speedy.exe sync`
+- [x] `exec` con comando inesistente → dispatch_command gestisce
+- [x] `exec` con binary `speedy.exe` non trovato → errore
+- [x] Doppia `add` dello stesso workspace → idempotente (non crash)
+- [x] `remove` di workspace inesistente → ok (gestito)
+- [x] Watcher: fermato su `remove`, riavviato su `add`
+- [x] PID tracking: active_pids set, cleanup su stop
+- [x] Graceful shutdown: `stop` ferma watcher, termina listener
+- [x] Porta occupata → errore (test con mock listener concorrente)
+- [x] `status` con uptime, versione, conteggi corretti
+- [x] Port fallback: porta occupata → daemon si sposta su quella successiva
 
-- [x] **Config file support** — `speedy.toml` / `.speedy/config.toml` with env var override
-- [x] **Better error messages** — added `context()` from anyhow in indexer, db, workspace, hash
-- [x] **Embedding cache** — avoids recomputing embeddings for identical chunk content
-- [x] **Progress reporting** — `indicatif` progress bar in `index_directory`
-- [x] **Graceful shutdown for watcher** — `ctrlc` signal handler in `start_watcher`
-- [x] **Windows daemon as proper service** — now uses proper Windows Service via `sc.exe` (create/delete/start/stop) + `windows-service` crate (service control handler)
+### 3. `speedy` — Test worker aggiuntivi (priorità media) ✅ / 🟡
 
-## Summary
+- [x] `ensure_daemon()`: daemon già alive → skip spawn (mock TCP server)
+- [x] `ensure_daemon()`: daemon morto → spawn success (solo unit test con mock; e2e su Windows bloccato dal firewall, vedi `docs/windows-firewall-tcp.md`)
+- [x] `ensure_daemon()`: daemon morto → spawn failure (exe non trovato)
+- [x] `ensure_daemon()`: workspace registrato via mock server
+- [x] `should_skip_daemon_check()`: tutti i casi (daemon flags, workspace flags, subcomandi)
+- [x] `Commands::Daemon { action: None }` → parsing verificato
+- [ ] Test `--as-service` (Windows) → skip (richiede ambiente Windows Service)
+- [🟡] Index con file non esistenti → testabile ora (exe in `dist/`)
+- [🟡] Watch `--detach` → testabile ora (exe in `dist/`)
 
-- **67 tests** passing (62 unit + 5 integration)
-- **0 warnings** on build
-- All `instructions.md` CLI flags supported (top-level and subcommands)
-- Mock/stub code removed
-- Config file support added
-- Embedding cache and progress reporting implemented
+### 4. End-to-end integration (priorità alta) ✅ / 🟡
+
+- [x] `speedy-cli index .` → daemon esegue e torna output (via `test_index_and_query_via_daemon`)
+- [x] `speedy-cli context` → daemon → `speedy.exe context`
+- [x] `speedy-cli sync` → daemon → `speedy.exe sync`
+- [x] `speedy-cli daemon list` → `speedy-daemon` → workspace registrati
+- [x] `speedy-cli workspace add` → `speedy-daemon` avvia watcher
+- [x] `speedy-daemon` standalone: start, IPC ping/pong/status/stop
+- [x] `speedy-cli daemon stop` → daemon si ferma
+- [x] `--json` flag su tutti i comandi
+- [x] `speedy-cli force` → force reindex
+- [ ] Ciclo completo: workspace add → file change → watcher → speedy.exe index → query trova risultato
+- [ ] `speedy` standalone (no daemon): index, query, context, sync
+- [ ] Test su Windows: `sc create/delete`, `--as-service`
+
+### 5. MCP — Test aggiuntivi (priorità bassa) ✅
+
+- [x] `SPEEDY_BIN` env var → binary personalizzato
+- [x] `SPEEDY_BIN` non trovato → errore chiaro
+
+---
+
+## Roba da fare / miglioramenti
+
+- [x] **Graceful shutdown figli**: `speedy-daemon` ora traccia i PIDs dei figli spawnati (`active_pids`) e li kill su stop
+- [ ] **Concorrenza workspace**: file lock su `workspaces.json` per accesso cross-process (fd-lock)
+- [ ] **Test watcher reali**: usare `tempfile` + notify events simulati
+- [ ] **Health check periodico migliorato**: daemon verifica watcher attivi, restart automatico
+- [ ] **Documentazione API IPC**: proto semplice testo su TCP (esiste in commento, va in docs/)
+- [ ] **Benchmark**: tempi di indexing, query latency, memoria
+- [x] **Logging strutturato**: già tutto su `tracing`, unico `eprintln!` residuo in `testexe`
+- [x] **Port fallback**: se porta 42137 occupata, prova 42138, 42139... (implementato + test)
+- [x] **Config reload**: comando IPC `reload` per ricaricare workspaces e sync watcher
+- [x] **CLI help**: `speedy-cli --help` funziona già (clap derive)
+- [x] **speedy-daemon PID**: già gestito da `kill_existing_daemon()` all'avvio
+
+---
+
+## Note
+
+- `speedy-daemon` watcher spawna `speedy.exe index <path>` per ogni file change
+- `speedy-cli` manda `exec <cmd>` via TCP → daemon spawna `speedy.exe <cmd>` e ritorna stdout
+- `speedy` worker ha `--as-service` legacy per backward compat (per-workspace Windows service)
+- Tutti i test devono passare su Windows (`cargo test`) — alcuni usano `#[cfg(windows)]`
+- Test del daemon usano `DAEMON_TEST_LOCK` mutex globale per isolamento
+- **Binaries compilati in `dist/`**: `speedy.exe`, `speedy-daemon.exe`, `speedy-cli.exe` (manca `speedy-mcp.exe`)
+- **Piano di completamento dettagliato**: `docs/COMPLETION-PLAN.md`

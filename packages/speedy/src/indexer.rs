@@ -1,4 +1,4 @@
-use crate::config::Config;
+use speedy_core::config::Config;
 use crate::db::{ChunkRecord, ProjectSummary, SearchResult, SqliteVectorStore, VectorStore};
 use crate::embed::{self, EmbeddingProvider};
 use crate::hash;
@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::error;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs;
@@ -70,7 +71,7 @@ impl Indexer {
             pb.set_message(short);
             match self.index_file(file_path).await {
                 Ok(chunks) => total_chunks += chunks,
-                Err(e) => eprintln!("  Failed: {file_path}: {e}"),
+                Err(e) => error!("Failed: {file_path}: {e}"),
             }
             pb.inc(1);
         }

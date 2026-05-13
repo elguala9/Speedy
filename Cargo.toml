@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
     "packages/speedy-core",
+    "packages/speedy",
+    "packages/speedy-daemon",
+    "packages/speedy-cli",
     "packages/testexe",
     "packages/speedy-mcp",
 ]

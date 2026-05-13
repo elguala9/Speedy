@@ -21,7 +21,7 @@ pub struct Cli {
     #[arg(long = "file", help = "Target file for --modify", requires = "modify")]
     pub file: Option<String>,
 
-    #[arg(short = 'd', long = "daemons", help = "List all daemons")]
+    #[arg(short = 'd', long = "daemons", help = "List all workspaces tracked by the daemon")]
     pub daemons: bool,
 
     #[arg(long = "daemon-stop", alias = "ds", help = "Stop a daemon (use with -p <path>)")]
@@ -50,6 +50,9 @@ pub struct Cli {
 
     #[arg(long = "workspace-delete", help = "Delete a workspace and its daemon (use with -p <path>)")]
     pub workspace_delete: Option<String>,
+
+    #[arg(long = "daemon-port", help = "Daemon TCP port (default: 42137)", default_value = "42137")]
+    pub daemon_port: u16,
 }
 
 #[derive(Subcommand)]
@@ -76,10 +79,10 @@ pub enum Commands {
     Context,
     #[command(about = "Sync filesystem changes to the database incrementally")]
     Sync,
-    #[command(about = "Manage the background watcher daemon")]
+    #[command(about = "Manage the background watcher daemon (no args = start central daemon)")]
     Daemon {
         #[command(subcommand)]
-        action: DaemonAction,
+        action: Option<DaemonAction>,
     },
     #[command(about = "Manage workspaces")]
     Workspace {
@@ -181,13 +184,13 @@ mod tests {
     #[test]
     fn test_cli_parse_daemon_list() {
         let cli = Cli::parse_from(["speedy", "daemon", "list"]);
-        assert!(matches!(cli.command, Some(Commands::Daemon { action: DaemonAction::List })));
+        assert!(matches!(cli.command, Some(Commands::Daemon { action: Some(DaemonAction::List) })));
     }
 
     #[test]
     fn test_cli_parse_daemon_stop() {
         let cli = Cli::parse_from(["speedy", "daemon", "stop", "-p", "/test"]);
-        assert!(matches!(cli.command, Some(Commands::Daemon { action: DaemonAction::Stop { .. } })));
+        assert!(matches!(cli.command, Some(Commands::Daemon { action: Some(DaemonAction::Stop { .. }) })));
     }
 
     #[test]

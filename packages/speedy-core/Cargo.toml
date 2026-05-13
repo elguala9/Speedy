@@ -1,36 +1,18 @@
 [package]
-name = "speedy"
+name = "speedy-core"
 version = "0.1.0"
 edition = "2021"
-description = "Local Semantic File System - bridges local filesystem with AI models"
+description = "Local Semantic File System - shared library"
 
-[[bin]]
-name = "speedy"
-path = "src/bin/speedy.rs"
+[lib]
+name = "speedy_core"
+path = "src/lib.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 anyhow = "1"
-ignore = "0.4"
-sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
-notify = { version = "6.1", features = ["macos_kqueue"] }
-notify-debouncer-mini = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
-futures = "0.3"
-uuid = { version = "1", features = ["v4"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
-async-trait = "0.1"
 dirs = "5"
-indicatif = "0.17"
-ctrlc = "3.4"
-
-[target.'cfg(windows)'.dependencies]
-windows-service = "0.7"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["full", "rt", "macros"] }

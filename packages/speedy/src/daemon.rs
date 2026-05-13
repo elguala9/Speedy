@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::error;
 #[cfg(windows)]
 use std::sync::Arc;
 #[cfg(windows)]
@@ -122,7 +123,7 @@ fn service_main_body(_args: Vec<std::ffi::OsString>) {
     {
         Some(n) => n,
         None => {
-            eprintln!("speedy service: missing --service-name argument");
+            error!("speedy service: missing --service-name argument");
             return;
         }
     };
@@ -130,7 +131,7 @@ fn service_main_body(_args: Vec<std::ffi::OsString>) {
     let status_handle = match service_control_handler::register(&service_name, event_handler) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("speedy service: failed to register control handler: {e}");
+            error!("speedy service: failed to register control handler: {e}");
             return;
         }
     };
@@ -155,14 +156,14 @@ fn service_main_body(_args: Vec<std::ffi::OsString>) {
     {
         Some(p) => p,
         None => {
-            eprintln!("speedy service: missing -p argument");
+            error!("speedy service: missing -p argument");
             set_status(ServiceState::Stopped, ServiceControlAccept::empty());
             return;
         }
     };
 
     std::env::set_current_dir(&workspace_path).ok();
-    let config = crate::config::Config::load();
+    let config = speedy_core::config::Config::load();
     let running = Arc::new(AtomicBool::new(true));
     let run = running.clone();
 
@@ -174,7 +175,7 @@ fn service_main_body(_args: Vec<std::ffi::OsString>) {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("speedy service: failed to create runtime: {e}");
+            error!("speedy service: failed to create runtime: {e}");
             set_status(ServiceState::Stopped, ServiceControlAccept::empty());
             return;
         }
@@ -185,7 +186,7 @@ fn service_main_body(_args: Vec<std::ffi::OsString>) {
 }
 
 pub fn find_all_daemons() -> Vec<DaemonInfo> {
-    let workspaces = crate::workspace::list().unwrap_or_default();
+    let workspaces = speedy_core::workspace::list().unwrap_or_default();
     workspaces
         .iter()
         .filter_map(|ws| {
@@ -209,7 +210,7 @@ pub async fn install(path: Option<String>) -> Result<()> {
         .canonicalize()?;
 
     let root_str = root.to_string_lossy().to_string();
-    if !crate::workspace::is_registered(&root_str) {
+    if !speedy_core::workspace::is_registered(&root_str) {
         anyhow::bail!("No workspace registered for {}. A daemon cannot exist without a workspace. Create a workspace first.", root.display());
     }
 
@@ -451,7 +452,7 @@ pub async fn delete_daemon(root: &Path) -> Result<()> {
 pub async fn create_daemon(root: &Path) -> Result<()> {
     let root_str = root.to_string_lossy().to_string();
 
-    if !crate::workspace::is_registered(&root_str) {
+    if !speedy_core::workspace::is_registered(&root_str) {
         anyhow::bail!("No workspace registered for: {}. Create a workspace first.", root.display());
     }
 
@@ -465,7 +466,7 @@ pub async fn create_daemon(root: &Path) -> Result<()> {
 pub async fn force_scan(root: &Path) -> Result<()> {
     let original = std::env::current_dir()?;
     std::env::set_current_dir(root)?;
-    let config = crate::config::Config::from_env();
+    let config = speedy_core::config::Config::from_env();
     let indexer = crate::indexer::Indexer::new(&config).await?;
     let stats = indexer.sync_all().await?;
     std::env::set_current_dir(original)?;
@@ -477,7 +478,7 @@ pub async fn force_scan(root: &Path) -> Result<()> {
 }
 
 pub async fn list_all_daemons() -> Result<()> {
-    let workspaces = crate::workspace::list()?;
+    let workspaces = speedy_core::workspace::list()?;
     if workspaces.is_empty() {
         println!("No daemons found.");
         return Ok(());

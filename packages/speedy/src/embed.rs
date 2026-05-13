@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::Config;
+use speedy_core::config::Config;
 
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
@@ -154,7 +154,7 @@ pub mod tests {
 
     #[test]
     fn test_config_defaults_ollama() {
-        let config = crate::config::Config::default();
+        let config = speedy_core::config::Config::default();
         assert_eq!(config.provider_type, "ollama");
         assert_eq!(config.model, "all-minilm:l6-v2");
         assert_eq!(config.ollama_url, "http://localhost:11434");
@@ -162,7 +162,7 @@ pub mod tests {
 
     #[test]
     fn test_create_provider_ollama() {
-        let mut config = crate::config::Config::default();
+        let mut config = speedy_core::config::Config::default();
         config.model = "nomic-embed-text".to_string();
         config.ollama_url = "http://10.0.0.1:11434".to_string();
         config.provider_type = "ollama".to_string();
@@ -172,7 +172,7 @@ pub mod tests {
 
     #[test]
     fn test_create_provider_agent() {
-        let mut config = crate::config::Config::default();
+        let mut config = speedy_core::config::Config::default();
         config.provider_type = "agent".to_string();
         config.agent_command = "echo".to_string();
 
@@ -182,7 +182,7 @@ pub mod tests {
     #[test]
     #[should_panic(expected = "Unknown provider type")]
     fn test_create_provider_invalid() {
-        let mut config = crate::config::Config::default();
+        let mut config = speedy_core::config::Config::default();
         config.provider_type = "invalid".to_string();
         let _p = create_provider(&config);
     }

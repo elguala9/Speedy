@@ -4,6 +4,16 @@ Local Semantic File System — bridges local filesystem with AI models.
 
 Speedy indexes your codebase into a vector database, watches for file changes, and enables semantic search over your code. Designed as a plugin for [Opencode](https://opencode.ai).
 
+## Download
+
+Pre-built binaries are available on the [Releases page](https://github.com/elguala9/Speedy/releases):
+
+| Platform | Download |
+|----------|----------|
+| Windows (x86_64) | [speedy.exe](https://github.com/elguala9/Speedy/releases/download/v0.1.0/speedy.exe) |
+
+Or build from source (see [Quick Start](#quick-start)).
+
 ## Quick Start
 
 Minimal commands to get Speedy running:

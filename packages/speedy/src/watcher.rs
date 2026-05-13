@@ -1,4 +1,4 @@
-use crate::config::Config;
+use speedy_core::config::Config;
 use crate::indexer::Indexer;
 use anyhow::Result;
 use notify::RecursiveMode;
@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tracing::{info, error};
 
 pub async fn start_watcher(path: &str, config: &Config) -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
@@ -29,7 +30,7 @@ async fn run_watcher_loop(path: &str, config: &Config, running: Arc<AtomicBool>)
     let pid = std::process::id();
     let cwd = std::env::current_dir()?;
     let _ = crate::daemon::save_pid(&cwd, pid);
-    eprintln!("Watcher started (PID: {pid})");
+    info!("Watcher started (PID: {pid})");
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut debouncer = new_debouncer(Duration::from_millis(500), tx)?;
@@ -50,13 +51,13 @@ async fn run_watcher_loop(path: &str, config: &Config, running: Arc<AtomicBool>)
                             tokio::spawn(async move {
                                 for event in events {
                                     if let Err(e) = handle_event(&idx, &event.path).await {
-                                        eprintln!("Error handling event: {e}");
+                                        error!("Error handling event: {e}");
                                     }
                                 }
                             });
                         }
                         Err(e) => {
-                            eprintln!("Watch error: {e}");
+                            error!("Watch error: {e}");
                         }
                     }
                 }
@@ -105,7 +106,7 @@ mod tests {
     }
 }
 
-async fn handle_event(indexer: &Arc<Mutex<Indexer>>, path: &Path) -> Result<()> {
+pub(crate) async fn handle_event(indexer: &Arc<Mutex<Indexer>>, path: &Path) -> Result<()> {
     let path_str = path.to_string_lossy().to_string();
 
     if !path.exists() {
@@ -145,7 +146,7 @@ async fn handle_event(indexer: &Arc<Mutex<Indexer>>, path: &Path) -> Result<()> 
     let idx = indexer.lock().await;
     match idx.index_file(&path_str).await {
         Ok(chunks) => println!("Indexed {path_str}: {chunks} chunks"),
-        Err(e) => eprintln!("Failed to index {path_str}: {e}"),
+        Err(e) => error!("Failed to index {path_str}: {e}"),
     }
 
     Ok(())
