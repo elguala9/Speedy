@@ -8,12 +8,12 @@ $target = Join-Path (Join-Path $root 'target') 'release'
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-Write-Host '==> Build release dei 3 binari...' -ForegroundColor Yellow
-cargo build --release -p speedy -p speedy-daemon -p speedy-cli
+Write-Host '==> Build release dei 4 binari...' -ForegroundColor Yellow
+cargo build --release -p speedy -p speedy-daemon -p speedy-cli -p speedy-mcp
 if ($LASTEXITCODE -ne 0) { throw 'Build fallito' }
 
 # Copia in dist/
-@('speedy.exe', 'speedy-daemon.exe', 'speedy-cli.exe') | ForEach-Object {
+@('speedy.exe', 'speedy-daemon.exe', 'speedy-cli.exe', 'speedy-mcp.exe') | ForEach-Object {
     $src = Join-Path $target $_
     if (Test-Path $src) {
         Copy-Item $src $dist
@@ -23,5 +23,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Build fallito' }
     }
 }
 
-Write-Host "`n✅ 3 .exe pronti in: $dist" -ForegroundColor Green
+Write-Host "`nBinari pronti in: $dist" -ForegroundColor Green
 Get-ChildItem $dist | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB)) KB)" }
