@@ -131,7 +131,7 @@ fn run_speedy(root: &Path, args: &[&str], cwd: &Path) -> Option<String> {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        eprintln!("  error: {stderr}");
+        println!("  ⚠ error: {stderr}");
         None
     }
 }
