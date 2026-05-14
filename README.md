@@ -1,442 +1,254 @@
 # Speedy
 
-Local Semantic File System — bridges local filesystem with AI models.
+Local Semantic File System — bridges your local filesystem with AI models.
 
-Speedy indexes your codebase into a vector database, watches for file changes, and enables semantic search over your code. Designed as a plugin for [Opencode](https://opencode.ai).
+Speedy indexes your codebase into a SQLite vector database, watches for file changes via a single background daemon, and exposes semantic search over your code through a CLI and an MCP server for AI agents (Claude Code, Cursor, opencode, Windsurf, …).
+
+> For the full per-binary option reference see **[`commands.md`](./commands.md)**.
+> For the end-to-end runtime flow see **[`flow.md`](./flow.md)**.
+
+## Architecture at a glance
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  AI Agent / User                                            │
+│       │                                                     │
+│       ▼                                                     │
+│  speedy-mcp.exe          (MCP server over stdio)            │
+│       │                                                     │
+│       ▼                                                     │
+│  speedy-cli.exe          (thin client, no heavy deps)       │
+│       │   local socket "speedy-daemon"                      │
+│       ▼                                                     │
+│  speedy-daemon.exe       ← ONE process, global per user     │
+│   • IPC server                                              │
+│   • N file watchers (one task per workspace)                │
+│   • persistent memory: workspaces.json                      │
+│       │                                                     │
+│       │ spawn subprocess                                    │
+│       ▼                                                     │
+│  speedy.exe              ← the worker                       │
+│   • indexing, query, embedding, SQLite, chunking            │
+│   • can also run standalone (no daemon needed)              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **One daemon for everything.** Never one daemon per workspace. The same `speedy-daemon.exe` watches all your projects and survives across CLI invocations.
+- **Persistent memory.** The daemon's workspace registry lives in `workspaces.json` under your config dir. On reboot, the daemon reads it back and restarts every watcher.
+- **Worker is autonomous.** `speedy.exe` can run on its own — the daemon just orchestrates it for live updates.
 
 ## Download
 
-Pre-built binaries are available on the [Releases page](https://github.com/elguala9/Speedy/releases):
+Pre-built binaries are available on the [Releases page](https://github.com/elguala9/Speedy/releases).
 
-| Platform | Download |
-|----------|----------|
-| Windows (x86_64) | [speedy.exe](https://github.com/elguala9/Speedy/releases/download/v0.1.0/speedy.exe) |
+| Binary              | Role                                      |
+|---------------------|-------------------------------------------|
+| `speedy.exe`        | Worker — indexing, query, embedding       |
+| `speedy-daemon.exe` | Single global daemon + file watcher       |
+| `speedy-cli.exe`    | Thin client (what AI agents / scripts call) |
+| `speedy-mcp.exe`    | MCP server for AI coding agents           |
 
-Or build from source (see [Quick Start](#quick-start)).
-
-## Quick Start
-
-Minimal commands to get Speedy running:
+## Quick start
 
 ```bash
-# 1. Install Rust (if you don't have it): https://rustup.rs/
+# 1. Install Rust: https://rustup.rs/
 
-# 2. Install and start Ollama with an embedding model
-curl -fsSL https://ollama.ai/install.sh | sh
+# 2. Install Ollama and pull an embedding model
 ollama pull all-minilm:l6-v2
 
-# 3. Build Speedy
+# 3. Build the workspace
 cargo build --release
 
-# 4. Index a project
-speedy index /path/to/your/project
-
-# 5. Search semantically
+# 4. Index a project and query it
+speedy index /path/to/project
 speedy query "how does authentication work?"
 ```
 
-The binary is at `target/release/speedy` (`speedy.exe` on Windows).
+Binaries land under `target/release/`. Copy them somewhere on your `PATH` (e.g. `dist/`).
 
-## Installation Advanced
+### Daemon-driven workflow (recommended)
 
-### Prerequisites
+```bash
+# Register the workspace once: the daemon starts on demand,
+# adds a file watcher, and keeps the index up to date.
+speedy-cli workspace add /path/to/project
+
+# Query — the daemon dispatches to speedy.exe under the hood
+speedy-cli query "auth flow" -k 10
+
+# Health checks
+speedy-cli daemon ping
+speedy-cli daemon status
+speedy-cli daemon list      # workspaces tracked by the daemon
+```
+
+### Standalone (no daemon)
+
+```bash
+# Set SPEEDY_NO_DAEMON to skip the daemon completely:
+SPEEDY_NO_DAEMON=1 speedy index .
+SPEEDY_NO_DAEMON=1 speedy query "find auth"
+```
+
+## Prerequisites
 
 - [Rust](https://rustup.rs/) (edition 2021)
-- [Ollama](https://ollama.ai/) with an embedding model (default: `all-minilm:l6-v2`)
+- [Ollama](https://ollama.ai/) running locally, with an embedding model pulled (default: `all-minilm:l6-v2`)
 
-```bash
-ollama pull all-minilm:l6-v2
+## CLI reference (summary)
+
+The exhaustive option list is in [`commands.md`](./commands.md). Brief summary below.
+
+### `speedy.exe` — the worker
+
+Common subcommands (each honors `--json` and `-p, --path <PATH>`):
+
+| Command                  | What it does                                              |
+|--------------------------|-----------------------------------------------------------|
+| `index [<subdir>]`       | Index a directory into the vector DB                      |
+| `query <q> [-k <N>]`     | Semantic search (top-K, default 5)                        |
+| `context`                | Project context summary                                   |
+| `sync`                   | Incremental sync of filesystem changes                    |
+| `daemon`                 | Spawn the central daemon                                  |
+| `workspace list`         | List registered workspaces                                |
+
+Top-level shortcut flags (alternative to subcommands): `-r/--read`, `-m/--modify --file`, `-d/--daemons`, `-w/--workspaces`. Full table in [`commands.md`](./commands.md).
+
+### `speedy-cli.exe` — the thin client
+
+Global flags: `-p/--path`, `--daemon-socket`, `--json`.
+
+| Command                          | What it does                                                        |
+|----------------------------------|---------------------------------------------------------------------|
+| `index [<subdir>]`               | Send `exec ... index <subdir>` to the daemon                        |
+| `query <q> [-k <N>]`             | Send `exec ... query <q> -k <N>`                                    |
+| `context`                        | Send `exec ... context`                                             |
+| `sync`                           | Send `exec ... sync`                                                |
+| `force [-p <path>]`              | Send `sync <path>` directly (daemon-driven incremental sync)        |
+| `daemon {status,list,stop,ping}` | Talk to the daemon directly (no `speedy.exe` involved)              |
+| `workspace {list,add,remove}`    | Register/unregister workspaces (note: path is **positional** here)  |
+
+### `speedy-daemon.exe` — the central daemon
+
+Minimal CLI; all management is via the IPC protocol.
+
+| Flag                       | Default          | Purpose                                                          |
+|----------------------------|------------------|------------------------------------------------------------------|
+| `--daemon-socket <NAME>`   | `speedy-daemon`  | Local socket name (Named Pipe on Windows, UDS elsewhere)        |
+| `--daemon-dir <DIR>`       | platform config  | Override the dir holding `daemon.pid` and `workspaces.json`     |
+
+### `speedy-mcp.exe` — the MCP server
+
+Communicates over stdio. Tools exposed:
+
+| Tool             | Args                                       | Underlying call                                       |
+|------------------|--------------------------------------------|-------------------------------------------------------|
+| `speedy_query`   | `{ query: string, top_k?: number }`        | `$SPEEDY_BIN query <q> -k <top_k> --json`             |
+| `speedy_index`   | `{ path?: string }`                        | `$SPEEDY_BIN index <path>`                            |
+| `speedy_context` | `{}`                                       | `$SPEEDY_BIN context --json`                          |
+
+Set `SPEEDY_BIN` to choose the underlying binary (default: `speedy-cli`).
+
+#### Example MCP client config
+
+Minimal:
+
+```json
+{
+  "mcpServers": {
+    "speedy": {
+      "command": "speedy-mcp",
+      "args": [],
+      "env": { "SPEEDY_BIN": "speedy-cli" }
+    }
+  }
+}
 ```
 
-### Build
+Full example for **Claude Desktop** (`claude_desktop_config.json`):
 
-```bash
-cargo build --release
+```json
+{
+  "mcpServers": {
+    "speedy": {
+      "command": "C:\\Program Files\\Speedy\\speedy-mcp.exe",
+      "args": [],
+      "env": {
+        "SPEEDY_BIN": "speedy-cli",
+        "SPEEDY_DEFAULT_SOCKET": "speedy-daemon",
+        "SPEEDY_MCP_TOP_K": "10"
+      }
+    }
+  }
+}
 ```
 
-The `speedy` binary will be at `target/release/speedy.exe` (Windows) or `target/release/speedy` (Linux).
-
-### Optional: config file
-
-Create a `speedy.toml` or `.speedy/config.toml` in your project root:
-
-```toml
-model = "nomic-embed-text"
-top_k = 10
-```
-
-All options are documented in the [Configuration](#configuration) section.
-
-## Features
-
-- **Semantic Indexing** — splits source files into chunks, generates embeddings, stores in SQLite
-- **File Watching** — watches directories for changes and incrementally updates the index
-- **Semantic Search** — query your codebase by meaning, not just keywords
-- **Daemon Management** — create, stop, restart, delete background watcher daemons
-- **Workspace Management** — manage multiple indexed workspaces
-- **Embedding Cache** — avoids recomputing embeddings for unchanged content
-- **Config File** — supports `speedy.toml` / `.speedy/config.toml` in addition to env vars
-
-## CLI Reference
-
-### Global flags
-
-| Flag | Description |
-|------|-------------|
-| `--json` | Output in JSON format |
-| `-p, --path <path>` | Project root (default: current directory) |
-| `-V, --version` | Print version information |
-| `-h, --help` | Print help |
-
-### Top-level flags
-
-These flags can be used in place of a subcommand:
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--read <prompt>` | `-r` | Query the workspace with a natural language prompt |
-| `--modify <prompt>` | `-m` | Modify the workspace (write content to a file) |
-| `--file <path>` | — | Target file for `--modify` |
-| `--daemons` | `-d` | List all running daemons |
-| `--daemon-stop <path>` | — | Stop a daemon |
-| `--daemon-restart <path>` | — | Restart a daemon |
-| `--daemon-delete <path>` | — | Delete a daemon permanently |
-| `--daemon-create <path>` | — | Create a daemon for a workspace |
-| `--daemon-status <path>` | — | Show daemon status |
-| `--force <path>` | `-f` | Force reindex of a workspace |
-| `--workspaces` | `-w` | List all registered workspaces |
-| `--workspace-create <path>` | — | Create a workspace and its daemon |
-| `--workspace-delete <path>` | — | Delete a workspace and its daemon |
-
-### Subcommands
-
-| Command | Description |
-|---------|-------------|
-| `index [<subdir>]` | Index a directory into the vector database |
-| `query <query>` | Query the index with semantic search |
-| `watch [<subdir>]` | Watch a directory for changes and auto-index |
-| `context` | Show project context summary |
-| `sync` | Sync filesystem changes to the database incrementally |
-| `daemon <action>` | Manage the background watcher daemon |
-| `workspace <action>` | Manage workspaces |
-| `force [-p <path>]` | Force reindex of a workspace |
-
-### `speedy --read` / `-r`
-
-```
-speedy --read "how does authentication work?"
-speedy -r "project structure overview" -p /path/to/project
-```
-
-| Flag | Description |
-|------|-------------|
-| `-r, --read <prompt>` | Natural language prompt describing what to find |
-| `-p, --path <path>` | Project root (default: current dir) |
-| `--json` | Output in JSON format |
-
-Queries the workspace index with semantic search. Returns ranked results matching the prompt's meaning.
-
-### `speedy --modify` / `-m`
-
-```
-speedy --modify "console.log('hello');" --file src/index.js
-speedy -m "fn main() {}" --file src/main.rs
-```
-
-| Flag | Description |
-|------|-------------|
-| `-m, --modify <content>` | Content to write |
-| `--file <path>` | Target file path (required) |
-| `-p, --path <path>` | Project root (default: current dir) |
-| `--json` | Output in JSON format |
-
-Writes content to a file and updates the index.
-
-### `speedy --daemons` / `-d`
-
-```
-speedy --daemons
-speedy -d
-```
-
-Lists all running daemons.
-
-### `speedy --daemon-stop`
-
-```
-speedy --daemon-stop /path/to/project
-```
-
-### `speedy --daemon-restart`
-
-```
-speedy --daemon-restart /path/to/project
-```
-
-### `speedy --daemon-delete`
-
-```
-speedy --daemon-delete /path/to/project
-```
-
-### `speedy --daemon-create`
-
-```
-speedy --daemon-create /path/to/project
-```
-
-### `speedy --daemon-status`
-
-```
-speedy --daemon-status /path/to/project
-```
-
-### `speedy --force` / `-f`
-
-```
-speedy --force /path/to/project
-speedy -f /path/to/project
-```
-
-Forces a full re-scan of the workspace.
-
-### `speedy --workspaces` / `-w`
-
-```
-speedy --workspaces
-speedy -w
-```
-
-Lists all registered workspaces.
-
-### `speedy --workspace-create`
-
-```
-speedy --workspace-create /path/to/project
-```
-
-Creates a workspace and its daemon.
-
-### `speedy --workspace-delete`
-
-```
-speedy --workspace-delete /path/to/project
-```
-
-Deletes a workspace and its daemon.
-
-### `speedy index`
-
-```
-speedy index [<subdir>]
-speedy index src/
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `subdir` | `.` (current dir) | Subdirectory to index |
-
-### `speedy query`
-
-```
-speedy query <query>
-speedy query --top-k 10 "error handling patterns"
-```
-
-| Argument / Flag | Default | Description |
-|-----------------|---------|-------------|
-| `query` | _(required)_ | Search query string |
-| `-k, --top-k <n>` | `5` | Number of results to return |
-
-### `speedy watch`
-
-```
-speedy watch [<subdir>]
-speedy watch --detach
-```
-
-| Argument / Flag | Default | Description |
-|-----------------|---------|-------------|
-| `subdir` | `.` (current dir) | Subdirectory to watch |
-| `--detach` | `false` | Run watcher in background (daemon mode) |
-
-### `speedy daemon`
-
-| Subcommand | Description |
-|------------|-------------|
-| `install [<path>]` | Register daemon to start at boot (requires workspace) |
-| `uninstall` | Unregister daemon and stop it |
-| `status` | Show daemon status |
-| `list` | List all daemons |
-| `create -p <path>` | Create a daemon for a workspace |
-| `stop -p <path>` | Stop a daemon |
-| `restart -p <path>` | Restart a daemon |
-| `delete -p <path>` | Delete a daemon permanently |
-
-> A daemon cannot exist without a workspace. Use `workspace create` first or `--workspace-create`.
-
-### `speedy workspace`
-
-| Subcommand | Description |
-|------------|-------------|
-| `list` | List all workspaces |
-| `create -p <path>` | Create a workspace and its daemon |
-| `delete -p <path>` | Delete a workspace and its daemon |
-
-### `speedy force`
-
-```
-speedy force
-speedy force -p /path/to/project
-```
-
-| Flag | Description |
-|------|-------------|
-| `-p` | Workspace path (default: current dir) |
-
-### `speedy context`
-
-```
-speedy context
-speedy context --json
-```
-
-No arguments. Shows a project context summary.
-
-### `speedy sync`
-
-```
-speedy sync
-```
-
-No arguments. Incrementally syncs filesystem changes to the database.
-
-## Examples
-
-```bash
-# Top-level action flags
-speedy --read "how does the file watcher work?"
-speedy -r "error handling patterns" --json
-speedy --modify "console.log('hello world');" --file src/index.js
-speedy -m "fn main() { println!(\"hello\"); }" --file main.rs
-speedy --daemons
-speedy -d
-speedy --workspaces
-speedy -w
-speedy --daemon-status /path/to/project
-speedy --daemon-stop /path/to/project
-speedy --force /path/to/project
-speedy -f /path/to/project
-
-# Index current directory
-speedy index
-
-# Index a specific subdirectory
-speedy index src/
-
-# Semantic search with default top-K
-speedy query "how does the file watcher work?"
-
-# Semantic search with custom top-K
-speedy query --top-k 10 "error handling patterns"
-
-# JSON output
-speedy query --json "authentication flow"
-
-# Watch in foreground
-speedy watch
-
-# Watch in background daemon
-speedy watch --detach
-
-# Show context summary
-speedy context
-
-# Incremental sync
-speedy sync
-
-# Force reindex
-speedy force
-speedy force -p /path/to/project
-
-# Workspace management
-speedy workspace list
-speedy workspace create -p /path/to/project
-speedy workspace delete -p /path/to/project
-
-# Top-level workspace management
-speedy --workspace-create /path/to/project
-speedy --workspace-delete /path/to/project
-
-# Daemon management
-speedy daemon list
-speedy daemon status
-speedy daemon create -p /path/to/project
-speedy daemon install
-speedy daemon uninstall
-speedy daemon stop -p /path/to/project
-speedy daemon restart -p /path/to/project
-speedy daemon delete -p /path/to/project
-
-# With --path (works with all commands)
-speedy --path /path/to/project index
-speedy -p /path/to/project --read "project overview"
-speedy -p /path/to/project --modify "new content" --file file.txt
-```
+Typical agent flow:
+
+1. User opens their repo and runs `speedy-cli workspace add .` (or just `speedy index .` once — `ensure_daemon` auto-registers).
+2. The daemon spawns a watcher and keeps the SQLite index fresh on every file change.
+3. The agent (Claude / Cursor / opencode / …) calls `speedy_query { "query": "where is auth handled?", "top_k": 10 }` — the MCP server invokes `speedy-cli query "where is auth handled?" -k 10 --json` and pipes the ranked chunks back to the agent.
+4. Subsequent edits trigger a re-index in the background; the next query sees them.
+
+## IPC protocol
+
+The daemon listens on a **local socket** (Windows Named Pipe / Unix Domain Socket via the `interprocess` crate; default name `speedy-daemon`). Wire format: one line of UTF-8 per request, one line per response. Full reference in [`docs/ipc-protocol.md`](./docs/ipc-protocol.md).
+
+| Request                                  | Response                                                        |
+|------------------------------------------|-----------------------------------------------------------------|
+| `ping`                                   | `pong`                                                          |
+| `status`                                 | JSON `{pid, uptime_secs, workspace_count, watcher_count, version}` |
+| `list` / `watch-count` / `daemon-pid`    | JSON / number                                                   |
+| `is-workspace <path>`                    | `true` / `false`                                                |
+| `add <path>` / `remove <path>`           | `ok` / `error: ...`                                             |
+| `sync <path>`                            | `ok` / `error: ...`                                             |
+| `reload`                                 | `ok: N workspaces reloaded`                                     |
+| `exec <args>` (or `exec\t<cwd>\t<args>`) | stdout of `speedy.exe <args>` (with `SPEEDY_NO_DAEMON=1`)       |
+| `stop`                                   | `ok` then graceful shutdown                                     |
 
 ## Configuration
 
+Speedy reads, in priority order:
+
+1. Environment variables
+2. `speedy.toml` or `.speedy/config.toml` in the project root
+
 ### Environment variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `SPEEDY_MODEL` | `all-minilm:l6-v2` | Ollama embedding model |
-| `SPEEDY_OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
-| `SPEEDY_PROVIDER` | `ollama` | Embedding provider (`ollama` or `agent`) |
-| `SPEEDY_AGENT_COMMAND` | *(empty)* | External command for `agent` provider |
-| `SPEEDY_TOP_K` | `5` | Default top-K results |
+| Variable                  | Default                    | Purpose                                                                    |
+|---------------------------|----------------------------|----------------------------------------------------------------------------|
+| `SPEEDY_NO_DAEMON`        | unset                      | If set, the worker skips `ensure_daemon` (the daemon itself sets this when spawning `speedy.exe`) |
+| `SPEEDY_DEFAULT_SOCKET`   | `speedy-daemon`            | Override the default IPC socket name                                       |
+| `SPEEDY_DAEMON_DIR`       | platform config dir        | Override the dir for `daemon.pid` / `workspaces.json`                      |
+| `SPEEDY_BIN`              | `speedy-cli`               | Binary that `speedy-mcp` invokes for tool calls                            |
+| `SPEEDY_MODEL`            | `all-minilm:l6-v2`         | Ollama embedding model                                                     |
+| `SPEEDY_OLLAMA_URL`       | `http://localhost:11434`   | Ollama server URL                                                          |
+| `SPEEDY_PROVIDER`         | `ollama`                   | Embedding provider (`ollama` or `agent`)                                   |
+| `SPEEDY_AGENT_COMMAND`    | *(empty)*                  | External command when `SPEEDY_PROVIDER=agent`                              |
+| `SPEEDY_TOP_K`            | `5`                        | Default top-K for `query`                                                  |
+| `RUST_LOG`                | *(empty)*                  | Tracing filter                                                             |
 
-### Config file
-
-Speedy also reads configuration from `speedy.toml` or `.speedy/config.toml` (in the project root). Environment variables take precedence over the config file.
-
-Example `speedy.toml`:
+### Config file (`speedy.toml` / `.speedy/config.toml`)
 
 ```toml
 model = "nomic-embed-text"
 ollama_url = "http://localhost:11434"
 provider_type = "ollama"
 top_k = 10
-max_chunk_size = 500
+max_chunk_size = 1000
+chunk_overlap = 200
+watch_delay_ms = 500
+ignore_patterns = ["target/", ".git/", "node_modules/"]
 ```
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `model` | `all-minilm:l6-v2` | Embedding model |
-| `ollama_url` | `http://localhost:11434` | Ollama server URL |
-| `provider_type` | `ollama` | Provider (`ollama` or `agent`) |
-| `agent_command` | `""` | External command for `agent` provider |
-| `top_k` | `5` | Default top-K results |
-| `max_chunk_size` | `1000` | Max characters per chunk |
-| `chunk_overlap` | `200` | Overlap between chunks |
-| `watch_delay_ms` | `500` | Debounce delay for file watcher |
-| `ignore_patterns` | `["target/", ".git/", ...]` | Glob patterns to ignore |
+### Embedding providers
 
-### Provider: `ollama` (default)
+- **`ollama`** (default) — calls Ollama's `/api/embeddings`. Requires Ollama running locally.
+- **`agent`** — delegates embedding to `SPEEDY_AGENT_COMMAND`. The command receives the text as its first argument and must output a JSON array of floats on stdout.
 
-Uses Ollama's `/api/embeddings` endpoint. Requires Ollama running locally.
+## Ignore files
 
-### Provider: `agent`
-
-Delegates embedding generation to an external command. The command receives the text as its first argument and must output a JSON array of floats on stdout.
-
-```bash
-SPEEDY_PROVIDER=agent SPEEDY_AGENT_COMMAND=my-embedder speedy query "find relevant code"
-```
-
-## Ignoring files
-
-Speedy uses the `ignore` crate to respect `.gitignore` patterns automatically. Additionally, you can create a `.speedyignore` file in your project root for Speedy-specific ignore patterns. It follows the same format as `.gitignore`:
+Speedy honors `.gitignore` automatically (via the `ignore` crate). Add a `.speedyignore` in the project root for Speedy-specific rules — same syntax as `.gitignore`.
 
 ```gitignore
 # .speedyignore
@@ -445,48 +257,87 @@ dist/
 *.log
 ```
 
-Files matching these patterns will be skipped during indexing.
+The daemon's watcher additionally hardcodes ignores for: `target/`, `.git/`, `node_modules/`, `.speedy/`, `.speedy-daemon/`, `.idea/`, `.vscode/`, `dist/`, `build/`, `__pycache__/`, `.cargo/`.
 
-## JSON output
+## On-disk layout — the daemon's "memory"
 
-Add `--json` for structured output:
-
-```bash
-speedy index --json
-speedy query "auth flow" --json
-speedy context --json
 ```
+~/.config/speedy/                       (Windows: %APPDATA%\speedy)
+├── workspaces.json     ← global registry of every workspace the user
+│                         has added — the daemon's persistent memory
+└── daemon.pid          ← PID of the running daemon (one only)
+
+<workspace>/
+├── .speedy/
+│   ├── index.sqlite    ← vector store for THIS workspace
+│   └── config.toml     ← optional per-workspace overrides
+└── .speedyignore       ← optional, gitignore syntax
+```
+
+- Only the daemon writes to `workspaces.json`. CLI / MCP / scripts ask the daemon to `add` / `remove`; they never write the file directly.
+- `daemon.pid` is used only to clean up a stale instance after a reboot.
+- Each workspace has its own `.speedy/index.sqlite` — the daemon centralizes orchestration, not data.
 
 ## Project structure
 
 ```
-speedy-core/src/
-├── bin/
-│   └── speedy.rs        # main CLI binary
-├── cli.rs               # clap argument definitions
-├── config.rs            # configuration (env vars + toml file)
-├── daemon.rs            # daemon lifecycle management
-├── db.rs                # SQLite vector store
-├── document.rs          # text chunking
-├── embed.rs             # embedding providers (Ollama, Agent)
-├── embedding.rs         # embedding data types
-├── file.rs              # file type detection
-├── hash.rs              # SHA-256 file hashing
-├── ignore.rs            # gitignore-aware file filtering
-├── indexer.rs           # indexing orchestration
-├── lib.rs               # module declarations
-├── text.rs              # text preprocessing utilities
-├── watcher.rs           # filesystem watcher
-└── workspace.rs         # workspace persistence
+Cargo.toml (workspace)
+└── packages/
+    ├── speedy-core/         # shared lib: DaemonClient, workspace registry,
+    │                          config, local-socket helpers, embedding type
+    ├── speedy/              # bin = speedy.exe (worker)
+    ├── speedy-daemon/       # bin = speedy-daemon.exe (central daemon)
+    ├── speedy-cli/          # bin = speedy-cli.exe (thin client)
+    ├── speedy-mcp/          # bin = speedy-mcp.exe (MCP server)
+    └── testexe/             # internal test fixture
 ```
 
 ## Development
 
 ```bash
-cargo test        # run all tests
-cargo build       # compile debug
-cargo clippy      # lint
+cargo test --workspace        # run all tests
+cargo build --workspace       # debug build
+cargo clippy --workspace      # lint
 ```
+
+Some daemon tests touch process-wide state (cwd, `SPEEDY_DAEMON_DIR`) and serialize on a shared mutex — they may run slower on a single thread.
+
+## Troubleshooting
+
+**`speedy-cli` says "Cannot connect to daemon. Is it running?"**
+
+Either the daemon was never started or its named pipe is orphaned. Start a fresh one:
+
+```bash
+speedy daemon                 # spawns the central daemon detached
+speedy-cli daemon ping        # should print `pong`
+```
+
+**`daemon-pid` file is stale (PID points to a dead process)**
+
+The daemon now takes an advisory lock on `daemon.pid` at startup, so a stale PID file alone won't block a new daemon — `kill_existing_daemon` clears it. If you see "address in use" anyway, kill leftover processes manually:
+
+```powershell
+Get-Process speedy-daemon -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item "$env:APPDATA\speedy\daemon.pid" -ErrorAction SilentlyContinue
+```
+
+```bash
+pkill -f speedy-daemon || true
+rm -f ~/.config/speedy/daemon.pid
+```
+
+**`speedy-cli daemon status` hangs**
+
+Almost always a named-pipe owned by a frozen daemon. `Stop-Process` / `pkill` the daemon and re-spawn.
+
+**Watcher is not picking up file changes**
+
+Check that the workspace is registered (`speedy-cli daemon list`). If absent, add it: `speedy-cli workspace add <PATH>`. Verify the path is not under an ignored prefix (`target/`, `.git/`, `.speedy/`, `node_modules/`, etc.).
+
+**`speedy-mcp` doesn't see my repo**
+
+The MCP server runs `SPEEDY_BIN` against whatever cwd Claude Desktop sets when launching it — usually not your project. Pass `-p <PATH>` from the agent prompt or `speedy-cli workspace add <PATH>` once to register the repo. After that, `speedy_query` works from anywhere because the daemon already monitors it.
 
 ## License
 

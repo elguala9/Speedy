@@ -53,6 +53,10 @@ fn default_ignore_patterns() -> Vec<String> {
 }
 
 impl Config {
+    /// Build a `Config` from `speedy.toml` / `.speedy/config.toml` (cwd or
+    /// project subdir), then overlay env-var overrides. Use this for normal
+    /// runs where the user might have a config file. Returns `Default` if no
+    /// file is found.
     pub fn load() -> Self {
         let mut config = Self::from_file().unwrap_or_default();
         config.merge_env();
@@ -95,6 +99,10 @@ impl Config {
         }
     }
 
+    /// Build a `Config` from `Default` + env-var overrides only — **skips the
+    /// config file lookup**. Use this from contexts where reading the cwd's
+    /// `speedy.toml` is wrong (e.g. background tasks where cwd is incidental,
+    /// or pure-env-driven helpers). Most callers want [`Config::load`].
     pub fn from_env() -> Self {
         let mut config = Config::default();
         config.merge_env();
