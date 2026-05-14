@@ -8,3 +8,20 @@ members = [
     "packages/testexe",
     "packages/speedy-mcp",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/elguala9/Speedy"
+homepage = "https://github.com/elguala9/Speedy"
+authors = ["Luca Gualandi <lgualandi@omniagroup.it>"]
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+opt-level = 3

@@ -1,12 +1,14 @@
 [package]
 name = "speedy-mcp"
-version = "0.1.0"
-edition = "2021"
 description = "MCP server exposing Speedy semantic search as tools for AI coding agents"
-license = "MIT"
-repository = "https://github.com/elguala9/Speedy"
-homepage = "https://github.com/elguala9/Speedy"
-readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+authors.workspace = true
 categories = ["development-tools", "command-line-utilities"]
 keywords = ["mcp", "semantic-search", "vector", "code-search", "ai"]
 
@@ -14,3 +16,7 @@ keywords = ["mcp", "semantic-search", "vector", "code-search", "ai"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+speedy-core = { path = "../speedy-core" }
