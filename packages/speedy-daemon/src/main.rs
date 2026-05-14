@@ -1,25 +1,6 @@
-//! # Speedy Daemon IPC Protocol
+//! # Speedy Daemon
 //!
-//! The daemon listens on TCP port 42137 (configurable via `--daemon-port`).
-//! Clients send a single-line text command followed by `\n`.
-//! The daemon responds with a single line of text followed by `\n`.
-//!
-//! ## Commands
-//!
-//! | Command | Description | Response |
-//! |---------|-------------|----------|
-//! | `ping` | Health check | `pong` |
-//! | `status` | Daemon status as JSON | `{"pid":..., "uptime_secs":..., "workspace_count":..., "watcher_count":..., "version":...}` |
-//! | `list` | Monitored workspace paths | `["/path/1", "/path/2"]` |
-//! | `watch-count` | Number of active watchers | `3` |
-//! | `daemon-pid` | Daemon process ID | `12345` |
-//! | `stop` | Graceful shutdown | `ok` |
-//! | `reload` | Reload workspaces from disk, sync watchers | `ok: N workspaces reloaded` |
-//! | `add <path>` | Add a workspace, start watcher | `ok` or `error: ...` |
-//! | `remove <path>` | Remove a workspace, stop watcher | `ok` or `error: ...` |
-//! | `is-workspace <path>` | Check if path is monitored | `true` or `false` |
-//! | `reindex <path>` | Force full reindex of a workspace | `ok` or `error: ...` |
-//! | `exec <args>` | Run `speedy.exe <args>` and return stdout | command output |
+//! IPC protocol reference: see `docs/ipc-protocol.md`.
 
 use clap::Parser;
 use speedy_core::workspace;
@@ -27,55 +8,112 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+
+/// CREATE_NO_WINDOW: a console-subsystem child of a daemon (which itself runs
+/// detached) would otherwise allocate a new console window per spawn. We
+/// capture stdio explicitly, so suppressing the window is always correct.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ToNsName};
+use speedy_core::local_sock::{ListenerTrait as _, Stream as LocalStream, StreamTrait as _};
 use tracing::{info, warn, error};
 
-pub const DAEMON_PORT: u16 = 42137;
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Wire-format version of the IPC protocol. Bump on breaking changes (command
+/// rename, response shape change, new required fields). Clients should refuse
+/// to talk to a daemon whose `protocol_version` is higher than they know about.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Parser)]
 #[command(name = "speedy-daemon", about = "Speedy Central Daemon")]
 struct DaemonCli {
-    #[arg(long = "daemon-port", default_value = "42137")]
-    port: u16,
+    #[arg(long = "daemon-socket", default_value = "speedy-daemon")]
+    socket: String,
+
+    #[arg(long = "daemon-dir", help = "Override pid/workspaces.json directory")]
+    daemon_dir: Option<PathBuf>,
 }
 
 struct WatcherHandle {
     stop: Arc<AtomicBool>,
+    last_heartbeat: Arc<AtomicU64>,
 }
+
+#[derive(Default)]
+struct Metrics {
+    queries: AtomicU64,
+    indexes: AtomicU64,
+    syncs: AtomicU64,
+    watcher_events: AtomicU64,
+    exec_calls: AtomicU64,
+}
+
+impl Metrics {
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "queries": self.queries.load(Ordering::Relaxed),
+            "indexes": self.indexes.load(Ordering::Relaxed),
+            "syncs": self.syncs.load(Ordering::Relaxed),
+            "watcher_events": self.watcher_events.load(Ordering::Relaxed),
+            "exec_calls": self.exec_calls.load(Ordering::Relaxed),
+        })
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Tick threshold (in health-tick units of 30s) before we consider a watcher
+/// silently dead and restart it. 4 ticks ≈ 2 minutes.
+const WATCHER_DEAD_TICKS: u64 = 4;
+/// Warn threshold: 2 ticks ≈ 1 minute without a heartbeat.
+const WATCHER_WARN_TICKS: u64 = 2;
+const HEALTH_TICK_SECS: u64 = 30;
 
 struct CentralDaemon {
     pid: u32,
     started_at: Instant,
     running: Arc<AtomicBool>,
-    port: u16,
+    socket_name: String,
     daemon_dir: PathBuf,
     watchers: Arc<Mutex<HashMap<String, WatcherHandle>>>,
     active_pids: Arc<StdMutex<HashSet<u32>>>,
+    metrics: Arc<Metrics>,
+    /// Held for the daemon lifetime; OS releases its advisory lock when this
+    /// drops. Never read directly.
+    _lock_file: Option<std::fs::File>,
 }
 
 impl CentralDaemon {
-    fn new(port: u16, daemon_dir: PathBuf) -> Self {
+    fn new(socket_name: String, daemon_dir: PathBuf) -> Self {
         Self {
             pid: std::process::id(),
             started_at: Instant::now(),
             running: Arc::new(AtomicBool::new(true)),
-            port,
+            socket_name,
             daemon_dir,
             watchers: Arc::new(Mutex::new(HashMap::new())),
             active_pids: Arc::new(StdMutex::new(HashSet::new())),
+            metrics: Arc::new(Metrics::default()),
+            _lock_file: None,
         }
     }
 
-    fn default(port: u16) -> Result<Self> {
+    fn default(socket_name: String) -> Result<Self> {
         let daemon_dir = speedy_core::daemon_util::daemon_dir_path()?;
-        Ok(Self::new(port, daemon_dir))
+        Ok(Self::new(socket_name, daemon_dir))
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -83,8 +121,22 @@ impl CentralDaemon {
             .context("failed to create daemon directory")?;
 
         speedy_core::daemon_util::kill_existing_daemon(&self.daemon_dir);
+
+        // Advisory lock catches the race where two `speedy-daemon` processes
+        // start concurrently and both pass kill_existing_daemon before either
+        // writes daemon.pid.
+        self._lock_file = Some(
+            speedy_core::daemon_util::acquire_daemon_lock(&self.daemon_dir)?,
+        );
+
         std::fs::write(self.daemon_dir.join("daemon.pid"), self.pid.to_string())
             .context("failed to write daemon PID")?;
+
+        match workspace::prune_missing() {
+            Ok(0) => {}
+            Ok(n) => info!("Pruned {n} stale workspace entr{}", if n == 1 { "y" } else { "ies" }),
+            Err(e) => warn!("Workspace pruning failed: {e}"),
+        }
 
         let registered = workspace::list().unwrap_or_default();
         let watchers = self.watchers.clone();
@@ -92,53 +144,40 @@ impl CentralDaemon {
         for entry in &registered {
             let p = Path::new(&entry.path);
             if p.exists() {
-                let stop = start_workspace_watcher(&entry.path, active_pids.clone());
-                watchers.lock().await.insert(entry.path.clone(), WatcherHandle { stop });
+                let handle = start_workspace_watcher(&entry.path, active_pids.clone(), self.metrics.clone());
+                watchers.lock().await.insert(entry.path.clone(), handle);
                 info!("Watcher started for: {}", entry.path);
             } else {
                 warn!("Skipped missing workspace: {}", entry.path);
             }
         }
 
-        let max_port_attempts = 10;
-        let (listener, actual_port) = 'bind: {
-            for attempt in 0..max_port_attempts {
-                let try_port = self.port + attempt;
-                let addr = format!("127.0.0.1:{try_port}");
-                match TcpListener::bind(&addr).await {
-                    Ok(listener) => break 'bind (listener, try_port),
-                    Err(e) => {
-                        if attempt == max_port_attempts - 1 {
-                            return Err(e).context(format!(
-                                "Failed to bind daemon to ports {}-{}",
-                                self.port,
-                                self.port + max_port_attempts - 1
-                            ));
-                        }
-                        warn!("Port {try_port} in use, trying next...");
-                    }
-                }
+        let listener_name = self.socket_name
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .with_context(|| format!("invalid daemon socket name: {}", self.socket_name))?;
+        let listener = match ListenerOptions::new().name(listener_name).create_tokio() {
+            Ok(l) => l,
+            Err(e) => {
+                return Err(e).context(format!(
+                    "Failed to bind daemon socket: {}",
+                    self.socket_name
+                ));
             }
-            unreachable!()
         };
 
-        if actual_port != self.port {
-            warn!("Port {} in use, falling back to {}", self.port, actual_port);
-            self.port = actual_port;
-            let _ = std::fs::write(self.daemon_dir.join("daemon.port"), actual_port.to_string());
-        }
-
         info!(
-            "Speedy v{DAEMON_VERSION} (PID {}) listening on 127.0.0.1:{}",
-            self.pid, self.port
+            "Speedy v{DAEMON_VERSION} (PID {}) listening on {}",
+            self.pid, self.socket_name
         );
 
         let running = self.running.clone();
         let watchers_clone = self.watchers.clone();
         let active_pids_clone = self.active_pids.clone();
+        let metrics_clone = self.metrics.clone();
         let pid = self.pid;
         let started = self.started_at;
-        let mut health_ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut health_ticker = tokio::time::interval(std::time::Duration::from_secs(HEALTH_TICK_SECS));
         health_ticker.tick().await;
 
         loop {
@@ -148,13 +187,14 @@ impl CentralDaemon {
                     listener.accept(),
                 ) => {
                     match accept {
-                        Ok(Ok((socket, _))) => {
+                        Ok(Ok(socket)) => {
                             if !running.load(Ordering::SeqCst) { break; }
                             let w = watchers_clone.clone();
                             let a = active_pids_clone.clone();
+                            let m = metrics_clone.clone();
                             let r = running.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(socket, w, a, pid, started, r).await {
+                                if let Err(e) = handle_connection(socket, w, a, m, pid, started, r).await {
                                     error!("IPC error: {e}");
                                 }
                             });
@@ -167,33 +207,68 @@ impl CentralDaemon {
                 }
                 _ = health_ticker.tick() => {
                     if !running.load(Ordering::SeqCst) { break; }
-                    let ws = watchers_clone.lock().await;
-                    let count = ws.len();
-                    info!("Health: {count} watcher(s) active");
+                    check_watcher_health(&watchers_clone, &active_pids_clone, &metrics_clone).await;
                 }
             }
         }
 
+        drop(listener);
         stop_all_watchers(&watchers_clone, &active_pids_clone).await;
+        let _ = std::fs::remove_file(self.daemon_dir.join("daemon.pid"));
         info!("Stopped.");
         Ok(())
     }
 }
 
 fn find_speedy_exe() -> PathBuf {
+    let exe_name = format!("speedy{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe() {
-        let dir = exe.parent().unwrap();
-        let candidate = dir.join(format!("speedy{}", std::env::consts::EXE_SUFFIX));
+        let Some(dir) = exe.parent() else {
+            return PathBuf::from("speedy");
+        };
+        let candidate = dir.join(&exe_name);
         if candidate.exists() {
             return candidate;
+        }
+        // When running under `cargo test`, current_exe is in target/debug/deps/
+        // — speedy.exe lives one directory up.
+        if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
+            if let Some(parent) = dir.parent() {
+                let candidate = parent.join(&exe_name);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
         }
     }
     PathBuf::from("speedy")
 }
 
-fn start_workspace_watcher(path: &str, active_pids: Arc<StdMutex<HashSet<u32>>>) -> Arc<AtomicBool> {
+const WATCH_IGNORE_DIRS: &[&str] = &[
+    "target", ".git", "node_modules", ".speedy-daemon", ".speedy",
+    ".idea", ".vscode", "dist", "build", "__pycache__", ".cargo",
+];
+
+fn should_ignore_watch_path(p: &Path) -> bool {
+    p.components().any(|c| {
+        if let std::path::Component::Normal(name) = c {
+            if let Some(s) = name.to_str() {
+                return WATCH_IGNORE_DIRS.contains(&s);
+            }
+        }
+        false
+    })
+}
+
+fn start_workspace_watcher(
+    path: &str,
+    active_pids: Arc<StdMutex<HashSet<u32>>>,
+    metrics: Arc<Metrics>,
+) -> WatcherHandle {
     let stop = Arc::new(AtomicBool::new(false));
+    let last_heartbeat = Arc::new(AtomicU64::new(unix_now_secs()));
     let stop_clone = stop.clone();
+    let heartbeat = last_heartbeat.clone();
     let path = path.to_string();
     let speedy_exe = find_speedy_exe();
 
@@ -221,20 +296,49 @@ fn start_workspace_watcher(path: &str, active_pids: Arc<StdMutex<HashSet<u32>>>)
         info!("Watcher active: {path}");
 
         while !stop_clone.load(Ordering::SeqCst) {
+            heartbeat.store(unix_now_secs(), Ordering::Relaxed);
             match rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(Ok(events)) => {
                     let exe = speedy_exe.clone();
                     let p = path.clone();
                     let pids = active_pids.clone();
+                    let m = metrics.clone();
                     std::thread::spawn(move || {
                         for event in &events {
+                            if should_ignore_watch_path(&event.path) {
+                                continue;
+                            }
+                            m.watcher_events.fetch_add(1, Ordering::Relaxed);
                             let file_path = event.path.to_string_lossy().to_string();
-                            if let Ok(mut child) = std::process::Command::new(&exe)
+
+                            // Test hook: when SPEEDY_WATCH_LOG is set, append the
+                            // observed file path and skip the real spawn. Used by
+                            // integration tests to verify watcher → indexer wiring
+                            // without spawning speedy.exe.
+                            if let Ok(log) = std::env::var("SPEEDY_WATCH_LOG") {
+                                use std::io::Write;
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&log)
+                                {
+                                    let _ = writeln!(f, "{file_path}");
+                                }
+                                continue;
+                            }
+
+                            let mut spawn_cmd = std::process::Command::new(&exe);
+                            spawn_cmd
                                 .args(["-p", &p, "index", &file_path])
+                                .env("SPEEDY_NO_DAEMON", "1")
                                 .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .spawn()
+                                .stderr(Stdio::null());
+                            #[cfg(windows)]
                             {
+                                use std::os::windows::process::CommandExt;
+                                spawn_cmd.creation_flags(CREATE_NO_WINDOW);
+                            }
+                            if let Ok(mut child) = spawn_cmd.spawn() {
                                 let pid = child.id();
                                 pids.lock().unwrap().insert(pid);
                                 let _ = child.wait();
@@ -254,7 +358,55 @@ fn start_workspace_watcher(path: &str, active_pids: Arc<StdMutex<HashSet<u32>>>)
         info!("Watcher stopped: {path}");
     });
 
-    stop
+    WatcherHandle { stop, last_heartbeat }
+}
+
+async fn check_watcher_health(
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+    active_pids: &Arc<StdMutex<HashSet<u32>>>,
+    metrics: &Arc<Metrics>,
+) {
+    let now = unix_now_secs();
+    let warn_after = WATCHER_WARN_TICKS * HEALTH_TICK_SECS;
+    let dead_after = WATCHER_DEAD_TICKS * HEALTH_TICK_SECS;
+
+    // Collect paths that need restarting. We can't restart while holding the
+    // lock because start_workspace_watcher allocates a thread and we don't
+    // want to block other IPC under the same lock.
+    let mut to_restart: Vec<String> = Vec::new();
+    {
+        let ws = watchers.lock().await;
+        let count = ws.len();
+        for (path, handle) in ws.iter() {
+            let last = handle.last_heartbeat.load(Ordering::Relaxed);
+            let elapsed = now.saturating_sub(last);
+            if elapsed >= dead_after {
+                warn!("Watcher silent for {elapsed}s, restarting: {path}");
+                to_restart.push(path.clone());
+            } else if elapsed >= warn_after {
+                warn!("Watcher heartbeat stale ({elapsed}s): {path}");
+            }
+        }
+        info!("Health: {count} watcher(s) active");
+    }
+
+    if to_restart.is_empty() {
+        return;
+    }
+
+    let mut ws = watchers.lock().await;
+    for path in &to_restart {
+        if let Some(old) = ws.remove(path) {
+            old.stop.store(true, Ordering::SeqCst);
+        }
+        if Path::new(path).exists() {
+            let handle = start_workspace_watcher(path, active_pids.clone(), metrics.clone());
+            ws.insert(path.clone(), handle);
+            info!("Watcher restarted: {path}");
+        } else {
+            warn!("Skipping restart, path missing: {path}");
+        }
+    }
 }
 
 async fn stop_all_watchers(watchers: &Mutex<HashMap<String, WatcherHandle>>, active_pids: &StdMutex<HashSet<u32>>) {
@@ -287,9 +439,10 @@ fn kill_process(pid: u32) {
 }
 
 async fn handle_connection(
-    mut socket: TcpStream,
+    socket: LocalStream,
     watchers: Arc<Mutex<HashMap<String, WatcherHandle>>>,
     active_pids: Arc<StdMutex<HashSet<u32>>>,
+    metrics: Arc<Metrics>,
     pid: u32,
     started_at: Instant,
     running: Arc<AtomicBool>,
@@ -300,20 +453,55 @@ async fn handle_connection(
     buf_reader.read_line(&mut line).await?;
     let line = line.trim();
 
-    let resp = dispatch_command(line, &watchers, &active_pids, pid, started_at, &running).await;
+    let resp = dispatch_command(line, &watchers, &active_pids, &metrics, pid, started_at, &running).await;
 
     writer.write_all(resp.as_bytes()).await?;
     Ok(())
 }
 
-async fn exec_speedy_command(args: &str) -> String {
+/// Parse the argument blob that follows `exec` in the IPC protocol.
+///
+/// Returns `(cwd, args)` where `cwd` is `Some` only for tab-separated forms.
+/// Tab-separated forms preserve paths with spaces; the whitespace fallback
+/// exists for legacy callers that send `exec index .`-style strings directly.
+fn parse_exec_args(args: &str) -> (Option<String>, Vec<String>) {
+    if let Some(rest) = args.strip_prefix('\t') {
+        let mut parts = rest.split('\t');
+        let cwd = parts.next().map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let rest: Vec<String> = parts.map(String::from).collect();
+        return (cwd, rest);
+    }
+    if args.contains('\t') {
+        let mut parts = args.split('\t');
+        let cwd = parts.next().map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let rest: Vec<String> = parts.map(String::from).collect();
+        return (cwd, rest);
+    }
+    (None, args.split_whitespace().map(String::from).collect())
+}
+
+async fn exec_speedy_command(args: &str, metrics: &Metrics) -> String {
     let exe = find_speedy_exe();
-    let args_vec: Vec<&str> = args.split_whitespace().collect();
-    match tokio::process::Command::new(&exe)
-        .args(&args_vec)
-        .output()
-        .await
-    {
+    let mut cmd = tokio::process::Command::new(&exe);
+    let (cwd, parts) = parse_exec_args(args);
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    // Count first arg as the operation so `metrics` separates query/index/sync.
+    match parts.first().map(String::as_str) {
+        Some("query") => { metrics.queries.fetch_add(1, Ordering::Relaxed); }
+        Some("index") => { metrics.indexes.fetch_add(1, Ordering::Relaxed); }
+        Some("sync")  => { metrics.syncs.fetch_add(1, Ordering::Relaxed); }
+        _ => {}
+    }
+    metrics.exec_calls.fetch_add(1, Ordering::Relaxed);
+    for arg in parts {
+        cmd.arg(arg);
+    }
+    cmd.env("SPEEDY_NO_DAEMON", "1");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    match cmd.output().await {
         Ok(out) => {
             let mut result = String::from_utf8_lossy(&out.stdout).to_string();
             if !out.status.success() {
@@ -330,6 +518,7 @@ async fn dispatch_command(
     line: &str,
     watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
     active_pids: &Arc<StdMutex<HashSet<u32>>>,
+    metrics: &Arc<Metrics>,
     pid: u32,
     started_at: Instant,
     running: &AtomicBool,
@@ -345,6 +534,7 @@ async fn dispatch_command(
                 "workspace_count": ws.len(),
                 "watcher_count": ws.len(),
                 "version": DAEMON_VERSION,
+                "protocol_version": PROTOCOL_VERSION,
             });
             format!("{status}\n")
         }
@@ -392,8 +582,8 @@ async fn dispatch_command(
                         if !ws.contains_key(path) {
                             let p = Path::new(path);
                             if p.exists() {
-                                let stop = start_workspace_watcher(path, active_pids.clone());
-                                ws.insert(path.clone(), WatcherHandle { stop });
+                                let handle = start_workspace_watcher(path, active_pids.clone(), metrics.clone());
+                                ws.insert(path.clone(), handle);
                             }
                         }
                     }
@@ -413,7 +603,7 @@ async fn dispatch_command(
 
         _ if line.starts_with("add ") => {
             let raw_path = line.trim_start_matches("add ").trim();
-            match handle_add(raw_path, watchers, active_pids).await {
+            match handle_add(raw_path, watchers, active_pids, metrics).await {
                 Ok(()) => "ok\n".to_string(),
                 Err(e) => format!("error: {e}\n"),
             }
@@ -427,17 +617,22 @@ async fn dispatch_command(
             }
         }
 
-        _ if line.starts_with("reindex ") => {
-            let raw_path = line.trim_start_matches("reindex ").trim();
-            match handle_reindex(raw_path).await {
+        _ if line.starts_with("sync ") => {
+            let raw_path = line.trim_start_matches("sync ").trim();
+            metrics.syncs.fetch_add(1, Ordering::Relaxed);
+            match handle_sync(raw_path).await {
                 Ok(()) => "ok\n".to_string(),
                 Err(e) => format!("error: {e}\n"),
             }
         }
 
-        _ if line.starts_with("exec ") => {
-            let args = line.trim_start_matches("exec ").trim();
-            let result = exec_speedy_command(args).await;
+        "metrics" => {
+            format!("{}\n", metrics.snapshot())
+        }
+
+        _ if line.starts_with("exec ") || line.starts_with("exec\t") => {
+            let args = line[4..].trim_start_matches(|c: char| c == ' ').trim_end();
+            let result = exec_speedy_command(args, metrics).await;
             format!("{result}\n")
         }
 
@@ -456,7 +651,12 @@ fn canonical_path_match(target: &str, ws: &HashMap<String, WatcherHandle>) -> bo
     })
 }
 
-async fn handle_add(raw_path: &str, watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>, active_pids: &Arc<StdMutex<HashSet<u32>>>) -> Result<()> {
+async fn handle_add(
+    raw_path: &str,
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+    active_pids: &Arc<StdMutex<HashSet<u32>>>,
+    metrics: &Arc<Metrics>,
+) -> Result<()> {
     let canonical = Path::new(raw_path).canonicalize()?;
     let path_str = canonical.to_string_lossy().to_string();
 
@@ -466,8 +666,8 @@ async fn handle_add(raw_path: &str, watchers: &Arc<Mutex<HashMap<String, Watcher
 
     let mut ws = watchers.lock().await;
     if !ws.contains_key(&path_str) {
-        let stop = start_workspace_watcher(&path_str, active_pids.clone());
-        ws.insert(path_str.clone(), WatcherHandle { stop });
+        let handle = start_workspace_watcher(&path_str, active_pids.clone(), metrics.clone());
+        ws.insert(path_str.clone(), handle);
     }
 
     Ok(())
@@ -486,21 +686,22 @@ async fn handle_remove(raw_path: &str, watchers: &Arc<Mutex<HashMap<String, Watc
     Ok(())
 }
 
-async fn handle_reindex(raw_path: &str) -> Result<()> {
+async fn handle_sync(raw_path: &str) -> Result<()> {
     let canonical = Path::new(raw_path).canonicalize()?;
     let path_str = canonical.to_string_lossy().to_string();
 
     let exe = find_speedy_exe();
-    let output = tokio::process::Command::new(&exe)
-        .args(["-p", &path_str, "sync"])
-        .output()
-        .await?;
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.args(["-p", &path_str, "sync"]).env("SPEEDY_NO_DAEMON", "1");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd.output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        error!("Reindex failed for {path_str}: {stderr}");
+        error!("Sync failed for {path_str}: {stderr}");
     } else {
-        info!("Reindex done for {path_str}");
+        info!("Sync done for {path_str}");
     }
 
     Ok(())
@@ -513,9 +714,19 @@ fn main() -> Result<()> {
         .init();
     let cli = DaemonCli::parse();
 
+    // When --daemon-dir is given, propagate via env so workspace::* and any
+    // helpers in this process (and any inherited child env) read/write from
+    // the isolated location instead of the user's real config dir.
+    if let Some(dir) = &cli.daemon_dir {
+        std::env::set_var("SPEEDY_DAEMON_DIR", dir);
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut daemon = CentralDaemon::default(cli.port)?;
+        let mut daemon = match cli.daemon_dir {
+            Some(dir) => CentralDaemon::new(cli.socket, dir),
+            None => CentralDaemon::default(cli.socket)?,
+        };
         daemon.start().await
     })
 }
@@ -524,9 +735,77 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use speedy_core::daemon_client::DaemonClient;
+    use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, Name, Stream as TestStream, ToNsName};
     use std::time::Duration;
 
-    static PORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(42400);
+    #[test]
+    fn test_should_ignore_watch_path_target() {
+        assert!(should_ignore_watch_path(Path::new("target/debug/foo.exe")));
+        assert!(should_ignore_watch_path(Path::new("C:/proj/target/release/x")));
+    }
+
+    #[test]
+    fn test_should_ignore_watch_path_git() {
+        assert!(should_ignore_watch_path(Path::new(".git/HEAD")));
+        assert!(should_ignore_watch_path(Path::new("C:/proj/.git/index")));
+    }
+
+    #[test]
+    fn test_should_ignore_watch_path_speedy_internal() {
+        assert!(should_ignore_watch_path(Path::new(".speedy/index.sqlite")));
+        assert!(should_ignore_watch_path(Path::new(".speedy-daemon/foo")));
+    }
+
+    #[test]
+    fn test_should_ignore_watch_path_node_modules() {
+        assert!(should_ignore_watch_path(Path::new("node_modules/react/index.js")));
+        assert!(should_ignore_watch_path(Path::new("packages/x/node_modules/y/z.js")));
+    }
+
+    #[test]
+    fn test_should_ignore_watch_path_nested_subdirs() {
+        // The ignore matches at ANY level, not just the root.
+        assert!(should_ignore_watch_path(Path::new("a/b/c/target/foo")));
+        assert!(should_ignore_watch_path(Path::new("workspaces/sub/.git/refs/heads/main")));
+    }
+
+    #[test]
+    fn test_should_ignore_watch_path_normal_files() {
+        assert!(!should_ignore_watch_path(Path::new("src/main.rs")));
+        assert!(!should_ignore_watch_path(Path::new("README.md")));
+        assert!(!should_ignore_watch_path(Path::new("docs/api.md")));
+    }
+
+    #[test]
+    fn test_should_ignore_watch_path_partial_name_not_ignored() {
+        // "targets" is not "target". Component match is exact, not substring.
+        assert!(!should_ignore_watch_path(Path::new("targets/foo.rs")));
+        assert!(!should_ignore_watch_path(Path::new("git/foo.rs")));
+    }
+
+    #[test]
+    fn test_metrics_snapshot_zero_by_default() {
+        let m = Metrics::default();
+        let snap = m.snapshot();
+        assert_eq!(snap["queries"], 0);
+        assert_eq!(snap["indexes"], 0);
+        assert_eq!(snap["syncs"], 0);
+        assert_eq!(snap["watcher_events"], 0);
+        assert_eq!(snap["exec_calls"], 0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_reflects_increments() {
+        let m = Metrics::default();
+        m.queries.fetch_add(7, Ordering::Relaxed);
+        m.syncs.fetch_add(3, Ordering::Relaxed);
+        let snap = m.snapshot();
+        assert_eq!(snap["queries"], 7);
+        assert_eq!(snap["syncs"], 3);
+        assert_eq!(snap["indexes"], 0);
+    }
+
+    static SOCKET_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     static DAEMON_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct DaemonTestGuard {
@@ -534,17 +813,12 @@ mod tests {
         handle: Option<std::thread::JoinHandle<()>>,
         dir: PathBuf,
         ws_backup: Option<Vec<speedy_core::workspace::WorkspaceEntry>>,
-        _port: u16,
+        running: Arc<AtomicBool>,
     }
 
     impl Drop for DaemonTestGuard {
         fn drop(&mut self) {
-            // Send stop via raw TCP (no tokio needed in Drop)
-            if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", self._port)) {
-                use std::io::Write;
-                let _ = stream.write_all(b"stop\n");
-                let _ = stream.shutdown(std::net::Shutdown::Both);
-            }
+            self.running.store(false, Ordering::SeqCst);
             if let Some(h) = self.handle.take() {
                 let _ = h.join();
             }
@@ -565,12 +839,13 @@ mod tests {
         DAEMON_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn test_port() -> u16 {
-        PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    fn test_socket_name(name: &str) -> String {
+        let n = SOCKET_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("speedy_d_{name}_{n}")
     }
 
     fn start_daemon(name: &str) -> DaemonTestGuard {
-        let port = test_port();
+        let socket_name = test_socket_name(name);
         let dir = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -586,31 +861,35 @@ mod tests {
         };
 
         let daemon_dir = dir.join(".speedy-daemon");
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        let sn = socket_name.clone();
+
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                let mut daemon = CentralDaemon::new(port, daemon_dir);
+                let mut daemon = CentralDaemon::new(sn, daemon_dir);
+                daemon.running = running_clone;
                 daemon.start().await.unwrap();
             });
         });
 
         std::thread::sleep(Duration::from_millis(500));
-        let client = DaemonClient::new(port);
+        let client = DaemonClient::new(socket_name);
 
-        let guard = DaemonTestGuard {
+        DaemonTestGuard {
             client,
             handle: Some(handle),
             dir,
             ws_backup,
-            _port: port,
-        };
-        guard
+            running,
+        }
     }
 
     #[tokio::test]
     async fn test_ping_pong() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_ping");
+        let guard = start_daemon("test_ping");
         assert!(guard.client.is_alive().await);
         assert_eq!(guard.client.ping().await.unwrap(), "pong");
         drop(guard);
@@ -619,7 +898,7 @@ mod tests {
     #[tokio::test]
     async fn test_status_pid() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_status");
+        let guard = start_daemon("test_status");
         let status = guard.client.status().await.unwrap();
         assert_eq!(status.pid, std::process::id());
         assert_eq!(status.workspace_count, 0);
@@ -631,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_empty() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_list_empty");
+        let guard = start_daemon("test_list_empty");
         let list = guard.client.get_all_workspaces().await.unwrap();
         assert!(list.is_empty());
         assert_eq!(guard.client.watch_count().await.unwrap(), 0);
@@ -641,15 +920,15 @@ mod tests {
     #[tokio::test]
     async fn test_add_and_remove_workspace() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_add_remove");
+        let guard = start_daemon("test_add_remove");
         let ws_path = guard.dir.to_string_lossy().to_string();
 
         guard.client.add_workspace(&ws_path).await.unwrap();
 
         let list = guard.client.get_all_workspaces().await.unwrap();
         assert!(list.iter().any(|p| {
-            std::path::Path::new(p).canonicalize().ok()
-                == std::path::Path::new(&ws_path).canonicalize().ok()
+            Path::new(p).canonicalize().ok()
+                == Path::new(&ws_path).canonicalize().ok()
         }));
 
         assert!(guard.client.is_workspace(&ws_path).await.unwrap());
@@ -666,7 +945,7 @@ mod tests {
     #[tokio::test]
     async fn test_daemon_pid_watch_count() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_util");
+        let guard = start_daemon("test_util");
 
         let pid = guard.client.daemon_pid().await.unwrap();
         assert_eq!(pid, std::process::id());
@@ -684,9 +963,9 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_command_returns_error() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_unknown");
+        let guard = start_daemon("test_unknown");
 
-        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", guard._port)).await.unwrap();
+        let mut stream = TestStream::connect(guard.client.socket_name.borrow()).await.unwrap();
         use tokio::io::AsyncWriteExt;
         stream.write_all(b"invalid-command\n").await.unwrap();
         stream.shutdown().await.unwrap();
@@ -701,14 +980,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_not_alive_when_stopped() {
-        let client = DaemonClient::new(42900);
+        let client = DaemonClient::new("speedy_d_nonexistent_TEST");
         assert!(!client.is_alive().await);
     }
 
-    async fn send_tcp_cmd(port: u16, req: &str) -> Result<String> {
+    async fn send_uds_cmd(socket_name: Name<'_>, req: &str) -> Result<String> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        let addr = format!("127.0.0.1:{port}");
-        let mut stream = tokio::net::TcpStream::connect(&addr).await?;
+        let mut stream = TestStream::connect(socket_name).await?;
         stream.write_all(format!("{req}\n").as_bytes()).await?;
         stream.shutdown().await?;
         let mut reader = tokio::io::BufReader::new(&mut stream);
@@ -720,8 +998,8 @@ mod tests {
     #[tokio::test]
     async fn test_exec_returns_response() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_exec");
-        let resp = send_tcp_cmd(guard._port, "exec index .").await;
+        let guard = start_daemon("test_exec");
+        let resp = send_uds_cmd(guard.client.socket_name.borrow(), "exec index .").await;
         assert!(resp.is_ok(), "exec should not fail: {:?}", resp.err());
         drop(guard);
     }
@@ -733,7 +1011,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("exec nonexistent-command --flag", &watchers, &active_pids, 99999, started, &running).await;
+        let resp = dispatch_command("exec nonexistent-command --flag", &watchers, &active_pids, &Arc::new(Metrics::default()), 99999, started, &running).await;
         assert!(!resp.trim().is_empty(), "exec response must not be empty");
     }
 
@@ -744,22 +1022,25 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("exec query test -k 3", &watchers, &active_pids, 88888, started, &running).await;
-        assert!(!resp.trim().is_empty(), "exec response should not be empty");
+        // `query test -k 3` returns empty stdout when speedy finds no results;
+        // we only care that dispatch produces a framed response (terminating
+        // newline), not that the inner command had any output.
+        let resp = dispatch_command("exec query test -k 3", &watchers, &active_pids, &Arc::new(Metrics::default()), 88888, started, &running).await;
+        assert!(resp.ends_with('\n'), "exec dispatch must return a newline-terminated response, got: {resp:?}");
     }
 
     #[tokio::test]
-    async fn test_reindex_returns_ok() {
+    async fn test_sync_returns_ok() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_reindex");
-        let resp = send_tcp_cmd(guard._port, &format!("reindex {}", guard.dir.to_string_lossy())).await.unwrap();
-        assert_eq!(resp, "ok", "reindex should return ok");
+        let guard = start_daemon("test_sync");
+        let resp = send_uds_cmd(guard.client.socket_name.borrow(), &format!("sync {}", guard.dir.to_string_lossy())).await.unwrap();
+        assert_eq!(resp, "ok", "sync should return ok");
         drop(guard);
     }
 
     #[tokio::test]
-    async fn test_dispatch_reindex_directly() {
-        let dir = std::env::temp_dir().join("speedy_d_test_reindex_direct");
+    async fn test_dispatch_sync_directly() {
+        let dir = std::env::temp_dir().join("speedy_d_test_sync_direct");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -768,8 +1049,8 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command(&format!("reindex {}", dir.to_string_lossy()), &watchers, &active_pids, 77777, started, &running).await;
-        assert_eq!(resp.trim(), "ok", "reindex via dispatch should return ok");
+        let resp = dispatch_command(&format!("sync {}", dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 77777, started, &running).await;
+        assert_eq!(resp.trim(), "ok", "sync via dispatch should return ok");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -777,7 +1058,7 @@ mod tests {
     #[tokio::test]
     async fn test_double_add_workspace_is_idempotent() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_double_add");
+        let guard = start_daemon("test_double_add");
         let ws_path = guard.dir.to_string_lossy().to_string();
 
         guard.client.add_workspace(&ws_path).await.unwrap();
@@ -803,7 +1084,7 @@ mod tests {
         let existing_dir = dir.join("exists");
         std::fs::create_dir_all(&existing_dir).unwrap();
 
-        let resp = dispatch_command(&format!("remove {}", existing_dir.to_string_lossy()), &watchers, &active_pids, 66666, started, &running).await;
+        let resp = dispatch_command(&format!("remove {}", existing_dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 66666, started, &running).await;
         assert_eq!(resp.trim(), "ok");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -812,7 +1093,7 @@ mod tests {
     #[tokio::test]
     async fn test_graceful_shutdown_stops_listener() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_shutdown");
+        let guard = start_daemon("test_shutdown");
 
         assert!(guard.client.is_alive().await);
         guard.client.stop().await.unwrap();
@@ -825,7 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn test_watcher_stop_start_on_add_remove() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_watcher_lifecycle");
+        let guard = start_daemon("test_watcher_lifecycle");
         let ws_path = guard.dir.to_string_lossy().to_string();
 
         assert_eq!(guard.client.watch_count().await.unwrap(), 0);
@@ -846,7 +1127,7 @@ mod tests {
     #[tokio::test]
     async fn test_pid_file_cleanup_on_stop() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_pid_cleanup");
+        let guard = start_daemon("test_pid_cleanup");
         assert!(guard.client.is_alive().await);
         guard.client.stop().await.unwrap();
         drop(guard);
@@ -855,10 +1136,9 @@ mod tests {
     #[tokio::test]
     async fn test_status_has_uptime_and_version() {
         let _lock = acquire_lock();
-        let guard = start_daemon("speedy_d_test_status_full");
+        let guard = start_daemon("test_status_full");
 
         let status = guard.client.status().await.unwrap();
-        // uptime can be 0 if less than 1 second elapsed — just verify the field exists
         assert!(status.uptime_secs < 1000, "uptime seems unreasonably high: {}", status.uptime_secs);
         assert!(!status.version.is_empty(), "version should not be empty");
         assert_eq!(status.workspace_count, 0);
@@ -882,7 +1162,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("garbage", &watchers, &active_pids, 11111, started, &running).await;
+        let resp = dispatch_command("garbage", &watchers, &active_pids, &Arc::new(Metrics::default()), 11111, started, &running).await;
         assert!(resp.contains("error: unknown command"), "expected unknown command error, got: {resp}");
     }
 
@@ -897,7 +1177,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command(&format!("is-workspace {}", dir.to_string_lossy()), &watchers, &active_pids, 11112, started, &running).await;
+        let resp = dispatch_command(&format!("is-workspace {}", dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 11112, started, &running).await;
         assert_eq!(resp.trim(), "false");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -910,7 +1190,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("daemon-pid", &watchers, &active_pids, 55555, started, &running).await;
+        let resp = dispatch_command("daemon-pid", &watchers, &active_pids, &Arc::new(Metrics::default()), 55555, started, &running).await;
         assert_eq!(resp.trim(), "55555");
     }
 
@@ -921,15 +1201,15 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("watch-count", &watchers, &active_pids, 12345, started, &running).await;
+        let resp = dispatch_command("watch-count", &watchers, &active_pids, &Arc::new(Metrics::default()), 12345, started, &running).await;
         assert_eq!(resp.trim(), "0");
     }
 
     #[tokio::test]
-    async fn test_port_in_use_returns_error() {
+    async fn test_socket_in_use_returns_error() {
         let _lock = acquire_lock();
-        let port = test_port();
-        let dir = std::env::temp_dir().join("speedy_d_test_port_in_use");
+        let socket_name = test_socket_name("test_socket_in_use");
+        let dir = std::env::temp_dir().join("speedy_d_test_socket_in_use");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -939,8 +1219,10 @@ mod tests {
             let _ = std::fs::remove_file(&path);
         }
 
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
-        let mut daemon = CentralDaemon::new(port, dir.join(".speedy-daemon"));
+        // Bind a listener to the same socket name first to simulate conflict
+        let name = socket_name.as_str().to_ns_name::<GenericNamespaced>().unwrap();
+        let listener = ListenerOptions::new().name(name).create_tokio().unwrap();
+        let mut daemon = CentralDaemon::new(socket_name, dir.join(".speedy-daemon"));
         let result = daemon.start().await;
         assert!(result.is_err());
 
@@ -964,49 +1246,260 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// End-to-end: start a daemon, register a workspace, write a file inside
+    /// it, and verify the watcher detected the change. We use the
+    /// `SPEEDY_WATCH_LOG` test hook so we don't actually spawn `speedy.exe`.
     #[tokio::test]
-    async fn test_port_fallback_uses_next_port() {
+    async fn test_watcher_invokes_indexer_on_file_write() {
         let _lock = acquire_lock();
-        let port = test_port();
-        let dir = std::env::temp_dir().join("speedy_d_test_port_fallback");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
 
-        let ws_backup = workspace::list().ok();
-        if let Some(cfg) = dirs::config_dir() {
-            let path = cfg.join("speedy").join("workspaces.json");
-            let _ = std::fs::remove_file(&path);
-        }
+        let log_path = std::env::temp_dir().join(format!(
+            "speedy_watcher_log_{}_{}.txt",
+            std::process::id(),
+            SOCKET_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ));
+        let _ = std::fs::remove_file(&log_path);
+        std::env::set_var("SPEEDY_WATCH_LOG", &log_path);
 
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
-        let daemon_dir = dir.join(".speedy-daemon");
-        let mut daemon = CentralDaemon::new(port, daemon_dir.clone());
+        let guard = start_daemon("test_watcher_to_indexer");
+        let ws_path = guard.dir.to_string_lossy().to_string();
 
-        tokio::spawn(async move {
-            let _ = daemon.start().await;
-        });
+        guard.client.add_workspace(&ws_path).await.unwrap();
+        // Let the watcher subscribe before we touch the FS.
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let target = guard.dir.join("hello.txt");
+        std::fs::write(&target, b"hello from the watcher test").unwrap();
 
-        let fallback_port = port + 1;
-        let client = DaemonClient::new(fallback_port);
-        assert!(client.is_alive().await, "daemon should be on fallback port {fallback_port}");
-
-        let status = client.status().await.unwrap();
-        assert_eq!(status.pid, std::process::id());
-
-        let _ = client.stop().await;
-        drop(listener);
-
-        if let Some(ws) = ws_backup {
-            if let Some(cfg) = dirs::config_dir() {
-                let path = cfg.join("speedy").join("workspaces.json");
-                let _ = std::fs::create_dir_all(path.parent().unwrap());
-                let content = serde_json::to_string_pretty(&ws).unwrap();
-                let _ = std::fs::write(&path, content);
+        // Debouncer is 500ms; allow margin for filesystem propagation.
+        let mut observed = false;
+        for _ in 0..40 {
+            if log_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&log_path) {
+                    if content.contains("hello.txt") {
+                        observed = true;
+                        break;
+                    }
+                }
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("SPEEDY_WATCH_LOG");
+        let _ = std::fs::remove_file(&log_path);
+        drop(guard);
+
+        assert!(observed, "watcher did not log an index call for hello.txt");
+    }
+
+    // ── reload command ─────────────────────────────────────
+
+    // ── parse_exec_args ────────────────────────────────────
+
+    #[test]
+    fn test_parse_exec_args_tab_prefix_with_cwd_and_args() {
+        let (cwd, args) = parse_exec_args("\tC:\\my dir\tindex\t.");
+        assert_eq!(cwd.as_deref(), Some("C:\\my dir"));
+        assert_eq!(args, vec!["index".to_string(), ".".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_exec_args_tab_prefix_empty_cwd() {
+        // Tab prefix with empty CWD: explicit "no CWD, but tab-protocol".
+        let (cwd, args) = parse_exec_args("\t\tindex\tsubdir");
+        assert_eq!(cwd, None);
+        assert_eq!(args, vec!["index".to_string(), "subdir".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_exec_args_tab_middle_legacy() {
+        // No leading tab, but a tab in the middle — first part is treated as CWD.
+        let (cwd, args) = parse_exec_args("C:\\proj\tquery\thello");
+        assert_eq!(cwd.as_deref(), Some("C:\\proj"));
+        assert_eq!(args, vec!["query".to_string(), "hello".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_exec_args_whitespace_legacy() {
+        // Pure whitespace — legacy callers without CWD support.
+        let (cwd, args) = parse_exec_args("index . --json");
+        assert_eq!(cwd, None);
+        assert_eq!(args, vec!["index".to_string(), ".".to_string(), "--json".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_exec_args_empty_returns_no_args() {
+        let (cwd, args) = parse_exec_args("");
+        assert_eq!(cwd, None);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_exec_args_whitespace_collapses_runs() {
+        // split_whitespace collapses multiple spaces / tabs around words.
+        let (cwd, args) = parse_exec_args("query  hello   world");
+        assert_eq!(cwd, None);
+        assert_eq!(args, vec!["query".to_string(), "hello".to_string(), "world".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_exec_args_path_with_spaces_via_tab() {
+        let (cwd, args) = parse_exec_args("\tC:\\Program Files\\proj\tindex\tsome dir");
+        assert_eq!(cwd.as_deref(), Some("C:\\Program Files\\proj"));
+        // Tab is preserved as the separator; spaces inside an arg remain.
+        assert_eq!(args, vec!["index".to_string(), "some dir".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_exec_legacy_whitespace_with_nonexistent_binary() {
+        // The legacy whitespace path — used by `speedy daemon exec ...` style
+        // direct callers — must still produce a response, even if the speedy
+        // binary fails.
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command("exec --version", &watchers, &active_pids, &Arc::new(Metrics::default()), 1, started, &running).await;
+        assert!(!resp.is_empty(), "exec response must not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_exec_with_only_whitespace_after_keyword() {
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        // Pure "exec   " (no args) — the binary is invoked with no arguments.
+        let resp = dispatch_command("exec   ", &watchers, &active_pids, &Arc::new(Metrics::default()), 1, started, &running).await;
+        assert!(!resp.is_empty(), "exec must always return a non-empty line");
+    }
+
+    // ── reload command ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_reload_no_workspaces() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_reload_empty");
+        let resp = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        assert!(resp.starts_with("ok:"), "expected ok response, got: {resp}");
+        assert!(resp.contains("0 workspaces"), "expected 0 workspaces, got: {resp}");
+        assert_eq!(guard.client.watch_count().await.unwrap(), 0);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_reload_picks_up_new_workspace() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_reload_new");
+        let extra = guard.dir.join("extra_ws");
+        std::fs::create_dir_all(&extra).unwrap();
+        let extra_canonical = extra.canonicalize().unwrap().to_string_lossy().to_string();
+
+        assert_eq!(guard.client.watch_count().await.unwrap(), 0);
+
+        // Add directly to the persisted file, bypassing the daemon's add path.
+        workspace::add(&extra_canonical).unwrap();
+
+        let resp = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        assert!(resp.contains("1 workspaces"), "expected 1 workspace, got: {resp}");
+        assert_eq!(guard.client.watch_count().await.unwrap(), 1);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_reload_drops_unregistered_watcher() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_reload_drop");
+        let ws_path = guard.dir.to_string_lossy().to_string();
+
+        guard.client.add_workspace(&ws_path).await.unwrap();
+        assert_eq!(guard.client.watch_count().await.unwrap(), 1);
+
+        // Remove from the persisted file without notifying the daemon.
+        let canonical = Path::new(&ws_path).canonicalize().unwrap().to_string_lossy().to_string();
+        workspace::remove(&canonical).unwrap();
+
+        let resp = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        assert!(resp.contains("0 workspaces"), "expected 0 workspaces, got: {resp}");
+        assert_eq!(guard.client.watch_count().await.unwrap(), 0);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_reload_is_idempotent() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_reload_idem");
+        let ws_path = guard.dir.to_string_lossy().to_string();
+
+        guard.client.add_workspace(&ws_path).await.unwrap();
+        assert_eq!(guard.client.watch_count().await.unwrap(), 1);
+
+        let r1 = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        let r2 = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        let r3 = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        assert_eq!(r1, r2);
+        assert_eq!(r2, r3);
+        assert_eq!(guard.client.watch_count().await.unwrap(), 1);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_reload_skips_missing_path() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_reload_missing");
+        let missing = guard.dir.join("does_not_exist");
+        let missing_str = missing.to_string_lossy().to_string();
+
+        // Inject a path that doesn't exist on disk.
+        workspace::add(&missing_str).unwrap();
+
+        let resp = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        // reload reports the count of *registered* workspaces, even those it
+        // skips spinning up because the path is gone. Watcher count must stay 0.
+        assert!(resp.contains("1 workspaces"), "expected 1 workspace in reload report, got: {resp}");
+        assert_eq!(guard.client.watch_count().await.unwrap(), 0);
+
+        // Clean up the dangling entry so the restore on Drop doesn't keep it.
+        let _ = workspace::remove(&missing_str);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_reload_replaces_full_set() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_reload_replace");
+
+        let a = guard.dir.join("a");
+        let b = guard.dir.join("b");
+        let c = guard.dir.join("c");
+        for p in [&a, &b, &c] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let a_c = a.canonicalize().unwrap().to_string_lossy().to_string();
+        let b_c = b.canonicalize().unwrap().to_string_lossy().to_string();
+        let c_c = c.canonicalize().unwrap().to_string_lossy().to_string();
+
+        guard.client.add_workspace(&a_c).await.unwrap();
+        guard.client.add_workspace(&b_c).await.unwrap();
+        assert_eq!(guard.client.watch_count().await.unwrap(), 2);
+
+        // Externally rewrite the persisted list: drop B, add C.
+        workspace::remove(&b_c).unwrap();
+        workspace::add(&c_c).unwrap();
+
+        let resp = send_uds_cmd(guard.client.socket_name.borrow(), "reload").await.unwrap();
+        assert!(resp.contains("2 workspaces"), "expected 2 workspaces, got: {resp}");
+        assert_eq!(guard.client.watch_count().await.unwrap(), 2);
+
+        let list = guard.client.get_all_workspaces().await.unwrap();
+        let has_a = list.iter().any(|p| Path::new(p).canonicalize().ok().as_ref().map(|x| x.to_string_lossy().to_string()) == Some(a_c.clone()));
+        let has_c = list.iter().any(|p| Path::new(p).canonicalize().ok().as_ref().map(|x| x.to_string_lossy().to_string()) == Some(c_c.clone()));
+        let has_b = list.iter().any(|p| Path::new(p).canonicalize().ok().as_ref().map(|x| x.to_string_lossy().to_string()) == Some(b_c.clone()));
+        assert!(has_a, "A should still be watched");
+        assert!(has_c, "C should now be watched");
+        assert!(!has_b, "B should not be watched anymore");
+        drop(guard);
     }
 }
