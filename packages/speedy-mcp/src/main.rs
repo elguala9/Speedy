@@ -89,7 +89,11 @@ fn handle_request(req: &JsonRpcRequest, run_cmd: &dyn Fn(&[&str]) -> Result<Stri
             match name {
                 "speedy_query" => {
                     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5);
+                    let default_top_k = std::env::var("SPEEDY_MCP_TOP_K")
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(5);
+                    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(default_top_k);
                     let cmd_args = ["query", query, "-k", &top_k.to_string(), "--json"];
                     match run_cmd(&cmd_args) {
                         Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),

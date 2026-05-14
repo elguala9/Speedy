@@ -3,8 +3,9 @@ use speedy_core::daemon_client::DaemonClient;
 use speedy_core::daemon_util;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 use tracing::warn;
+
+use speedy_core::local_sock::{GenericNamespaced, Stream as LocalStream, StreamTrait as _, ToNsName};
 
 #[derive(Parser)]
 #[command(name = "speedy-cli", version, about = "Local Semantic File System - Thin Client")]
@@ -15,8 +16,8 @@ struct Cli {
     #[arg(short = 'p', long = "path", help = "Project root (default: current dir)")]
     project_path: Option<String>,
 
-    #[arg(long = "daemon-port", help = "Daemon TCP port (default: 42137)", default_value = "42137")]
-    daemon_port: u16,
+    #[arg(long = "daemon-socket", help = "Daemon socket name")]
+    daemon_socket: Option<String>,
 
     #[arg(global = true, long, help = "Output in JSON format")]
     json: bool,
@@ -84,9 +85,16 @@ enum WorkspaceAction {
     },
 }
 
-async fn send_raw_cmd(port: u16, req: &str) -> Result<String> {
-    let addr = format!("127.0.0.1:{port}");
-    let mut stream = TcpStream::connect(&addr)
+fn resolve_socket_name(cli: &Cli) -> String {
+    cli.daemon_socket.clone()
+        .unwrap_or_else(daemon_util::default_daemon_socket_name)
+}
+
+async fn send_raw_cmd(socket_name: &str, req: &str) -> Result<String> {
+    let name = socket_name
+        .to_ns_name::<GenericNamespaced>()
+        .context("invalid socket name")?;
+    let mut stream = LocalStream::connect(name)
         .await
         .context("Cannot connect to daemon. Is it running?")?;
     stream.write_all(format!("{req}\n").as_bytes()).await?;
@@ -98,8 +106,8 @@ async fn send_raw_cmd(port: u16, req: &str) -> Result<String> {
     Ok(resp.trim().to_string())
 }
 
-async fn ensure_daemon(port: u16) -> Result<()> {
-    let client = DaemonClient::new(port);
+async fn ensure_daemon(socket_name: &str) -> Result<()> {
+    let client = DaemonClient::new(socket_name);
     if client.is_alive().await {
         return Ok(());
     }
@@ -107,7 +115,7 @@ async fn ensure_daemon(port: u16) -> Result<()> {
     warn!("Daemon non risponde. Avvio...");
     let daemon_dir = daemon_util::daemon_dir_path()?;
     daemon_util::kill_existing_daemon(&daemon_dir);
-    daemon_util::spawn_daemon_process(port)?;
+    daemon_util::spawn_daemon_process(socket_name)?;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     Ok(())
 }
@@ -132,6 +140,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ListenerTrait as _, StreamTrait as _, ToNsName};
 
     #[test]
     fn test_cli_assert() {
@@ -273,15 +282,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_daemon_port() {
-        let cli = Cli::parse_from(["speedy-cli", "--daemon-port", "42138", "context"]);
-        assert_eq!(cli.daemon_port, 42138);
+    fn test_parse_daemon_socket() {
+        let cli = Cli::parse_from(["speedy-cli", "--daemon-socket", "my-daemon", "context"]);
+        assert_eq!(cli.daemon_socket, Some("my-daemon".to_string()));
     }
 
     #[test]
-    fn test_parse_daemon_port_default() {
+    fn test_parse_daemon_socket_default() {
         let cli = Cli::parse_from(["speedy-cli", "sync"]);
-        assert_eq!(cli.daemon_port, 42137);
+        assert!(cli.daemon_socket.is_none());
     }
 
     #[test]
@@ -296,25 +305,32 @@ mod tests {
         assert!(!cli.json);
     }
 
-    // ── send_raw_cmd tests with mock TCP server ──────
+    // ── send_raw_cmd tests with mock local socket server ────
+
+    fn test_socket_name(label: &str) -> String {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("speedy_cli_test_{label}_{n}")
+    }
 
     #[tokio::test]
     async fn test_send_raw_cmd_returns_response() {
-        let port = 42501;
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+        let name = test_socket_name("send_raw");
+        let ns_name = name.as_str().to_ns_name::<GenericNamespaced>().unwrap();
+        let listener = ListenerOptions::new().name(ns_name).create_tokio().unwrap();
         let handle = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let socket = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut reader, mut writer) = socket.split();
             let mut buf = [0u8; 1024];
-            use tokio::io::AsyncReadExt;
-            let n = socket.read(&mut buf).await.unwrap();
+            let n = reader.read(&mut buf).await.unwrap();
             let msg = String::from_utf8_lossy(&buf[..n]);
             assert_eq!(msg, "ping\n");
-            use tokio::io::AsyncWriteExt;
-            socket.write_all(b"pong\n").await.unwrap();
+            writer.write_all(b"pong\n").await.unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let resp = send_raw_cmd(port, "ping").await.unwrap();
+        let resp = send_raw_cmd(&name, "ping").await.unwrap();
         assert_eq!(resp, "pong");
 
         handle.await.unwrap();
@@ -322,8 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_raw_cmd_connection_refused() {
-        let port = 42502;
-        let result = send_raw_cmd(port, "ping").await;
+        let result = send_raw_cmd("speedy_cli_test_refused_NONEXISTENT", "ping").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Cannot connect") || err.contains("refused") || err.contains("denied"));
@@ -331,83 +346,199 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_daemon_when_alive() {
-        let port = 42503;
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+        let name = test_socket_name("ensure");
+        let ns_name = name.as_str().to_ns_name::<GenericNamespaced>().unwrap();
+        let listener = ListenerOptions::new().name(ns_name).create_tokio().unwrap();
         let _handle = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            use tokio::io::AsyncReadExt;
+            let socket = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut reader, mut writer) = socket.split();
             let mut buf = [0u8; 1024];
-            let _ = socket.read(&mut buf).await;
+            let _ = reader.read(&mut buf).await;
+            let _ = writer.write_all(b"pong\n").await;
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let result = ensure_daemon(port).await;
+        let result = ensure_daemon(&name).await;
         assert!(result.is_ok());
     }
 
-    // ── Workspace integration tests ──────────────────
+    // ── should_skip_daemon_check ─────────────────────
 
+    #[test]
+    fn test_skip_daemon_check_workspace_subcommand() {
+        let cli = Cli::parse_from(["speedy-cli", "workspace", "list"]);
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_daemon_subcommand() {
+        let cli = Cli::parse_from(["speedy-cli", "daemon", "ping"]);
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_no_command() {
+        let cli = Cli::parse_from(["speedy-cli"]);
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_does_not_skip_index() {
+        let cli = Cli::parse_from(["speedy-cli", "index"]);
+        assert!(!should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_does_not_skip_query() {
+        let cli = Cli::parse_from(["speedy-cli", "query", "x"]);
+        assert!(!should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_does_not_skip_context() {
+        let cli = Cli::parse_from(["speedy-cli", "context"]);
+        assert!(!should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_does_not_skip_sync() {
+        let cli = Cli::parse_from(["speedy-cli", "sync"]);
+        assert!(!should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_does_not_skip_force() {
+        let cli = Cli::parse_from(["speedy-cli", "force"]);
+        assert!(!should_skip_daemon_check(&cli));
+    }
+
+    // ── resolve_socket_name ──────────────────────────
+
+    #[test]
+    fn test_resolve_socket_name_uses_cli_when_set() {
+        let cli = Cli::parse_from(["speedy-cli", "--daemon-socket", "explicit-sock", "context"]);
+        assert_eq!(resolve_socket_name(&cli), "explicit-sock");
+    }
+
+    #[test]
+    fn test_resolve_socket_name_uses_default_when_unset() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("SPEEDY_DEFAULT_SOCKET").ok();
+        std::env::remove_var("SPEEDY_DEFAULT_SOCKET");
+
+        let cli = Cli::parse_from(["speedy-cli", "context"]);
+        assert_eq!(resolve_socket_name(&cli), "speedy-daemon");
+
+        if let Some(v) = prev { std::env::set_var("SPEEDY_DEFAULT_SOCKET", v); }
+    }
+
+    // ── send_raw_cmd: error paths ────────────────────
+
+    #[tokio::test]
+    async fn test_send_raw_cmd_invalid_socket_name_errors() {
+        // Empty string is not a valid namespace name on Windows or Linux.
+        let result = send_raw_cmd("", "ping").await;
+        assert!(result.is_err(), "empty socket name must error");
+    }
+
+    #[tokio::test]
+    async fn test_send_raw_cmd_handles_eof_response() {
+        let name = test_socket_name("eof");
+        let ns_name = name.as_str().to_ns_name::<GenericNamespaced>().unwrap();
+        let listener = ListenerOptions::new().name(ns_name).create_tokio().unwrap();
+        let _handle = tokio::spawn(async move {
+            if let Ok(socket) = listener.accept().await {
+                // Close immediately without writing a response.
+                drop(socket);
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let resp = send_raw_cmd(&name, "ping").await.unwrap_or_default();
+        // read_line on an empty stream returns 0 bytes → empty string after trim.
+        assert!(resp.is_empty(), "expected empty response on EOF, got: {resp:?}");
+    }
+}
+
+fn should_skip_daemon_check(cli: &Cli) -> bool {
+    match &cli.command {
+        Some(Commands::Daemon { .. }) | Some(Commands::Workspace { .. }) => true,
+        None => true,
+        _ => false,
+    }
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
-    ensure_daemon(cli.daemon_port).await?;
-    let client = DaemonClient::new(cli.daemon_port);
+    let socket = resolve_socket_name(&cli);
+    if !should_skip_daemon_check(&cli) {
+        ensure_daemon(&socket).await?;
+    }
+    let client = DaemonClient::new(&socket);
+
+    let cwd = std::env::current_dir()?;
+    let cwd_str = cwd.to_string_lossy().to_string();
+
+    let json = cli.json;
+    let exec_cmd = |args: &[&str]| -> String {
+        let mut s = String::from("exec\t");
+        s.push_str(&cwd_str);
+        if json {
+            s.push('\t');
+            s.push_str("--json");
+        }
+        for a in args {
+            s.push('\t');
+            s.push_str(a);
+        }
+        s
+    };
 
     match &cli.command {
         Some(Commands::Index { subdir }) => {
-            let resp = send_raw_cmd(cli.daemon_port, &format!("exec index {subdir}")).await?;
+            let resp = send_raw_cmd(&socket, &exec_cmd(&["index", subdir])).await?;
             println!("{resp}");
         }
         Some(Commands::Query { query, top_k }) => {
-            let resp = send_raw_cmd(cli.daemon_port, &format!("exec query \"{query}\" -k {top_k}")).await?;
-            if cli.json {
-                println!("{resp}");
-            } else {
-                println!("{resp}");
-            }
+            let k = top_k.to_string();
+            let resp = send_raw_cmd(&socket, &exec_cmd(&["query", query, "-k", &k])).await?;
+            println!("{resp}");
         }
         Some(Commands::Context) => {
-            let resp = send_raw_cmd(cli.daemon_port, "exec context").await?;
+            let resp = send_raw_cmd(&socket, &exec_cmd(&["context"])).await?;
             println!("{resp}");
         }
         Some(Commands::Sync) => {
-            let resp = send_raw_cmd(cli.daemon_port, "exec sync").await?;
+            let resp = send_raw_cmd(&socket, &exec_cmd(&["sync"])).await?;
             println!("{resp}");
         }
         Some(Commands::Force { path }) => {
-            let target = path.as_deref().unwrap_or(".");
-            let resp = send_raw_cmd(cli.daemon_port, &format!("reindex {target}")).await?;
+            let target = path.clone().unwrap_or_else(|| cwd_str.clone());
+            let resp = send_raw_cmd(&socket, &format!("sync {target}")).await?;
             println!("{resp}");
         }
         Some(Commands::Daemon { action }) => match action {
             DaemonAction::Status => {
-                match client.status().await {
-                    Ok(s) => {
-                        if cli.json {
-                            println!("{}", serde_json::to_string_pretty(&s)?);
-                        } else {
-                            println!("PID: {}", s.pid);
-                            println!("Uptime: {}s", s.uptime_secs);
-                            println!("Workspaces: {}", s.workspace_count);
-                            println!("Watchers: {}", s.watcher_count);
-                            println!("Version: {}", s.version);
-                        }
-                    }
-                    Err(e) => println!("Daemon status error: {e}"),
+                let s = client.status().await?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&s)?);
+                } else {
+                    println!("PID: {}", s.pid);
+                    println!("Uptime: {}s", s.uptime_secs);
+                    println!("Workspaces: {}", s.workspace_count);
+                    println!("Watchers: {}", s.watcher_count);
+                    println!("Version: {}", s.version);
                 }
             }
             DaemonAction::List => {
-                match client.get_all_workspaces().await {
-                    Ok(list) => {
-                        if list.is_empty() {
-                            println!("No daemon workspaces.");
-                        } else {
-                            for ws in &list {
-                                println!("[active] {ws}");
-                            }
-                        }
+                let list = client.get_all_workspaces().await?;
+                if list.is_empty() {
+                    println!("No daemon workspaces.");
+                } else {
+                    for ws in &list {
+                        println!("[active] {ws}");
                     }
-                    Err(e) => println!("Error: {e}"),
                 }
             }
             DaemonAction::Stop => {
@@ -415,10 +546,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 println!("Daemon stopped.");
             }
             DaemonAction::Ping => {
-                match client.ping().await {
-                    Ok(resp) => println!("{resp}"),
-                    Err(e) => println!("Error: {e}"),
-                }
+                let resp = client.ping().await?;
+                println!("{resp}");
             }
         },
         Some(Commands::Workspace { action }) => match action {
