@@ -2,7 +2,8 @@ use clap::Parser;
 use speedy_core::daemon_client::DaemonClient;
 use speedy_core::daemon_util;
 use speedy_core::workspace;
-use speedy::cli::{Cli, Commands, WorkspaceAction};
+use speedy_ai_context::cli::{Cli, Commands, WorkspaceAction};
+use speedy_ai_context::hooks;
 use anyhow::Result;
 use tracing::{info, warn};
 
@@ -80,6 +81,69 @@ async fn ensure_daemon(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+// ── Feature helpers (read/write <workspace>/.speedy/config.toml) ─────────────
+
+struct WorkspaceFeatures {
+    speedy_indexer: bool,
+    language_context: bool,
+}
+
+fn load_workspace_features(root: &std::path::Path) -> WorkspaceFeatures {
+    let path = root.join(".speedy").join("config.toml");
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(doc) = toml::from_str::<toml::Value>(&raw) {
+            let get = |key: &str| {
+                doc.get("features")
+                    .and_then(|f| f.get(key))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
+            };
+            return WorkspaceFeatures {
+                speedy_indexer: get("speedy_indexer"),
+                language_context: get("language_context"),
+            };
+        }
+    }
+    WorkspaceFeatures { speedy_indexer: true, language_context: true }
+}
+
+fn save_workspace_features(root: &std::path::Path, f: &WorkspaceFeatures) -> anyhow::Result<()> {
+    let dir = root.join(".speedy");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("config.toml");
+    let mut doc: toml::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        toml::from_str(&raw)
+            .unwrap_or_else(|_| toml::Value::Table(toml::value::Table::new()))
+    } else {
+        toml::Value::Table(toml::value::Table::new())
+    };
+    let mut section = toml::value::Table::new();
+    section.insert("speedy_indexer".to_string(), toml::Value::Boolean(f.speedy_indexer));
+    section.insert("language_context".to_string(), toml::Value::Boolean(f.language_context));
+    if let toml::Value::Table(table) = &mut doc {
+        table.insert("features".to_string(), toml::Value::Table(section));
+    }
+    std::fs::write(path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+fn feature_key(name: &str) -> anyhow::Result<&'static str> {
+    match name.to_lowercase().as_str() {
+        "speedy" | "speedy_indexer" | "speedy-indexer" => Ok("speedy_indexer"),
+        "slc" | "language_context" | "language-context" => Ok("language_context"),
+        other => anyhow::bail!("unknown feature '{other}'. Use 'speedy' or 'slc'"),
+    }
+}
+
+fn set_feature_value(f: &mut WorkspaceFeatures, key: &str, value: bool) {
+    match key {
+        "speedy_indexer" => f.speedy_indexer = value,
+        "language_context" => f.language_context = value,
+        _ => {}
+    }
+}
+
 fn should_skip_daemon_check(cli: &Cli) -> bool {
     if cli.workspaces || cli.daemons {
         return true;
@@ -89,6 +153,11 @@ fn should_skip_daemon_check(cli: &Cli) -> bool {
         return matches!(cmd,
             Commands::Daemon
             | Commands::Workspace { .. }
+            | Commands::InstallHooks { .. }
+            | Commands::UninstallHooks { .. }
+            | Commands::Enable { .. }
+            | Commands::Disable { .. }
+            | Commands::Features
         );
     }
 
@@ -138,7 +207,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     if let Some(prompt) = cli.read {
-        let indexer = speedy::indexer::Indexer::new(&config).await?;
+        let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
         let results = indexer.query(&prompt, 5).await?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&results)?);
@@ -155,7 +224,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     if let Some(content) = cli.modify {
         if let Some(file) = cli.file {
             tokio::fs::write(&file, &content).await?;
-            let indexer = speedy::indexer::Indexer::new(&config).await?;
+            let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let chunks = indexer.index_file(&file).await?;
             if cli.json {
                 let output = serde_json::json!({"file": file, "chunks": chunks});
@@ -172,7 +241,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Some(Commands::Index { subdir }) => {
-            let indexer = speedy::indexer::Indexer::new(&config).await?;
+            let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.index_directory(subdir).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
@@ -181,7 +250,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Query { query, top_k }) => {
-            let indexer = speedy::indexer::Indexer::new(&config).await?;
+            let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let k = top_k.unwrap_or(5);
             let results = indexer.query(query, k).await?;
             if cli.json {
@@ -195,7 +264,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Context) => {
-            let indexer = speedy::indexer::Indexer::new(&config).await?;
+            let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let ctx = indexer.project_context().await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&ctx)?);
@@ -207,7 +276,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Sync) => {
-            let indexer = speedy::indexer::Indexer::new(&config).await?;
+            let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.sync_all().await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
@@ -219,7 +288,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Reembed) => {
-            let indexer = speedy::indexer::Indexer::new(&config).await?;
+            let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.reembed().await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
@@ -254,6 +323,86 @@ async fn async_main(cli: Cli) -> Result<()> {
                 }
             }
         },
+        Some(Commands::InstallHooks { path, force }) => {
+            let root = match path {
+                Some(p) => p.clone(),
+                None => std::env::current_dir()?,
+            };
+            let report = hooks::install_hooks(&root, *force)?;
+            if cli.json {
+                let out = serde_json::json!({
+                    "installed": report.installed,
+                    "skipped": report.skipped.iter().map(|(n, r)| serde_json::json!({"hook": n, "reason": r})).collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                for name in &report.installed {
+                    println!("installed  {name}");
+                }
+                for (name, reason) in &report.skipped {
+                    println!("skipped    {name}  ({reason})");
+                }
+                if report.installed.is_empty() && report.skipped.is_empty() {
+                    println!("Nothing to install.");
+                } else if !report.skipped.is_empty() {
+                    println!("Tip: use --force to overwrite skipped hooks.");
+                }
+            }
+        }
+        Some(Commands::UninstallHooks { path }) => {
+            let root = match path {
+                Some(p) => p.clone(),
+                None => std::env::current_dir()?,
+            };
+            let removed = hooks::uninstall_hooks(&root)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&removed)?);
+            } else if removed.is_empty() {
+                println!("No Speedy-managed hooks found.");
+            } else {
+                for name in &removed {
+                    println!("removed    {name}");
+                }
+            }
+        }
+        Some(Commands::Enable { feature }) => {
+            let key = feature_key(feature)?;
+            let root = std::env::current_dir()?;
+            let mut f = load_workspace_features(&root);
+            set_feature_value(&mut f, key, true);
+            save_workspace_features(&root, &f)?;
+            if cli.json {
+                println!("{}", serde_json::json!({ "enabled": key, "ok": true }));
+            } else {
+                println!("● {key} enabled");
+            }
+        }
+        Some(Commands::Disable { feature }) => {
+            let key = feature_key(feature)?;
+            let root = std::env::current_dir()?;
+            let mut f = load_workspace_features(&root);
+            set_feature_value(&mut f, key, false);
+            save_workspace_features(&root, &f)?;
+            if cli.json {
+                println!("{}", serde_json::json!({ "disabled": key, "ok": true }));
+            } else {
+                println!("○ {key} disabled");
+            }
+        }
+        Some(Commands::Features) => {
+            let root = std::env::current_dir()?;
+            let f = load_workspace_features(&root);
+            if cli.json {
+                println!("{}", serde_json::json!({
+                    "speedy_indexer": f.speedy_indexer,
+                    "language_context": f.language_context,
+                }));
+            } else {
+                let bullet = |on: bool| if on { "●" } else { "○" };
+                println!("{} speedy_indexer   (file indexer)", bullet(f.speedy_indexer));
+                println!("{} language_context (code intelligence)", bullet(f.language_context));
+            }
+        }
         None => {
             anyhow::bail!("No command specified. Use --help for usage.");
         }
@@ -297,6 +446,32 @@ mod tests {
     #[test]
     fn test_skip_daemon_check_workspace_subcommand() {
         let cli = make_cli(&["speedy", "workspace", "list"]);
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_install_hooks() {
+        let cli = make_cli(&["speedy", "install-hooks"]);
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_uninstall_hooks() {
+        let cli = make_cli(&["speedy", "uninstall-hooks"]);
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_install_hooks_with_force() {
+        let cli = make_cli(&["speedy", "install-hooks", "--force"]);
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_install_hooks_with_path() {
+        let tmp = std::env::temp_dir();
+        let path_str = tmp.to_string_lossy().to_string();
+        let cli = make_cli(&["speedy", "install-hooks", "--path", &path_str]);
         assert!(should_skip_daemon_check(&cli));
     }
 

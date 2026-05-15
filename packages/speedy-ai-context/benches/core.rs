@@ -5,11 +5,11 @@
 //! scoring exercises the cosine path with realistic data shapes (`d=384` for
 //! `all-minilm:l6-v2`, the default model).
 //!
-//! Run with `cargo bench -p speedy`.
+//! Run with `cargo bench -p speedy-ai-context`.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use speedy::db::{ChunkRecord, SqliteVectorStore, VectorStore};
-use speedy::document::Document;
+use speedy_ai_context::db::{ChunkRecord, SqliteVectorStore, VectorStore};
+use speedy_ai_context::document::Document;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use uuid::Uuid;

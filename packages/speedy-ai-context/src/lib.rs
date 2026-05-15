@@ -8,6 +8,7 @@ pub mod document;
 pub mod embed;
 pub mod file;
 pub mod hash;
+pub mod hooks;
 pub mod ignore;
 pub mod indexer;
 pub mod text;
