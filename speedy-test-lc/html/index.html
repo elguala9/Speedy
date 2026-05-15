@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Speedy — Fast Semantic Search</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <nav class="container nav">
+      <a href="/" class="logo">⚡ Speedy</a>
+      <ul class="nav-links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#docs">Docs</a></li>
+        <li><a href="https://github.com/example/speedy">GitHub</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero container">
+      <h1>Semantic search for your codebase</h1>
+      <p class="hero-sub">Index any directory and query it with natural language. Works offline, stores embeddings locally.</p>
+      <div class="cta-group">
+        <a href="#install" class="btn btn-primary">Get started</a>
+        <a href="#demo"    class="btn btn-secondary">Watch demo</a>
+      </div>
+      <pre class="hero-code"><code>$ speedy index .
+Indexed 312 files, 4 821 chunks in 12.3s
+
+$ speedy query "where is the rate-limiter?"
+[0.94] src/middleware/rate_limit.rs:14
+  pub fn rate_limiter(max_req: u32, window: Duration) → impl Filter …</code></pre>
+    </section>
+
+    <section id="features" class="features container">
+      <h2>Why Speedy?</h2>
+      <ul class="feature-grid">
+        <li class="feature-card">
+          <h3>100 % local</h3>
+          <p>Embeddings never leave your machine. Uses Ollama or any local model.</p>
+        </li>
+        <li class="feature-card">
+          <h3>Incremental index</h3>
+          <p>Only re-indexes changed files. Daemon watches the filesystem in real time.</p>
+        </li>
+        <li class="feature-card">
+          <h3>MCP compatible</h3>
+          <p>Plug directly into Claude, Cursor, or any MCP-aware editor.</p>
+        </li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p class="container">© 2026 Speedy — MIT License</p>
+  </footer>
+</body>
+</html>

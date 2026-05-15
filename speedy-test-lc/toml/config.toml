@@ -1,0 +1,45 @@
+# Speedy service configuration
+
+[server]
+host    = "0.0.0.0"
+port    = 8080
+workers = 4
+timeout = "30s"
+
+[database]
+url          = "postgres://localhost/speedy_prod"
+max_conns    = 20
+min_conns    = 2
+connect_timeout = "5s"
+idle_timeout    = "10m"
+
+[embeddings]
+provider = "ollama"
+model    = "all-minilm:l6-v2"
+ollama_url  = "http://localhost:11434"
+batch_size  = 64
+cache_size  = 10_000
+
+[index]
+chunk_size    = 1000
+chunk_overlap = 200
+watch_delay   = "500ms"
+ignore_patterns = [
+    "target/",
+    "node_modules/",
+    ".git/",
+    "*.lock",
+    "dist/",
+]
+
+[logging]
+level  = "info"
+format = "json"
+file   = "/var/log/speedy/service.log"
+rotate = "daily"
+keep   = 7
+
+[auth]
+jwt_secret  = "${JWT_SECRET}"
+token_ttl   = "24h"
+refresh_ttl = "7d"

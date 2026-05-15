@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: speedy-service
+  namespace: production
+  labels:
+    app: speedy-service
+    version: "1.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: speedy-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: speedy-service
+    spec:
+      containers:
+        - name: speedy
+          image: ghcr.io/example/speedy-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPEEDY_OLLAMA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: speedy-secrets
+                  key: ollama-url
+            - name: SPEEDY_MODEL
+              value: "all-minilm:l6-v2"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: speedy-service
+  namespace: production
+spec:
+  selector:
+    app: speedy-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP

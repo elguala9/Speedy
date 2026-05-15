@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  speedy:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SPEEDY_OLLAMA_URL: "http://ollama:11434"
+      SPEEDY_MODEL: "all-minilm:l6-v2"
+      SPEEDY_LOG: "debug"
+    volumes:
+      - speedy-data:/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: speedy
+      POSTGRES_USER: speedy
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+volumes:
+  speedy-data:
+  ollama-models:
+  pg-data:

@@ -1,0 +1,94 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Speedy API",
+    "version": "1.0.0",
+    "description": "Semantic file-search service"
+  },
+  "paths": {
+    "/index": {
+      "post": {
+        "summary": "Index a directory",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                  "path":  { "type": "string", "example": "/home/user/project" },
+                  "force": { "type": "boolean", "default": false }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Index stats",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IndexStats" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/query": {
+      "post": {
+        "summary": "Semantic search",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["q"],
+                "properties": {
+                  "q":     { "type": "string" },
+                  "top_k": { "type": "integer", "default": 5, "minimum": 1, "maximum": 50 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/SearchResult" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "IndexStats": {
+        "type": "object",
+        "properties": {
+          "files":       { "type": "integer" },
+          "chunks":      { "type": "integer" },
+          "duration_ms": { "type": "integer" }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "properties": {
+          "path":  { "type": "string" },
+          "line":  { "type": "integer" },
+          "score": { "type": "number" },
+          "text":  { "type": "string" }
+        }
+      }
+    }
+  }
+}
