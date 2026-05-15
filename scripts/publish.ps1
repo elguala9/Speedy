@@ -1,50 +1,44 @@
+param(
+    [Parameter(Mandatory)][string]$Version
+)
 $ErrorActionPreference = 'Stop'
 
-$root = Split-Path $PSScriptRoot -Parent
-$ver = Select-String -Path (Join-Path (Join-Path $root 'packages') 'speedy-core/Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' | ForEach-Object { $_.Matches.Groups[1].Value }
+# Normalizza: accetta "0.2.0" o "v0.2.0"
+if ($Version -notmatch '^v') { $Version = "v$Version" }
 
-Write-Host "`n==> Pubblico speedy v$ver...`n" -ForegroundColor Green
-
-Write-Host '==> Build release...' -ForegroundColor Yellow
-cargo build --release --workspace
-if ($LASTEXITCODE -ne 0) { throw 'Build fallito' }
-
-Write-Host "`n==> Publish speedy su crates.io..." -ForegroundColor Yellow
-cargo publish -p speedy
-if ($LASTEXITCODE -ne 0) { throw 'cargo publish speedy fallito' }
-
-Write-Host "`n==> Publish speedy-mcp su crates.io..." -ForegroundColor Yellow
-cargo publish -p speedy-mcp
-if ($LASTEXITCODE -ne 0) { throw 'cargo publish speedy-mcp fallito' }
-
-Write-Host "`n==> Creo GitHub Release v$ver..." -ForegroundColor Yellow
-gh release create "v$ver" `
-    'target/release/speedy.exe' `
-    'target/release/speedy-daemon.exe' `
-    'target/release/speedy-cli.exe' `
-    'target/release/speedy-mcp.exe' `
-    --title "Speedy v$ver" --notes "Vedi CHANGELOG per i dettagli." --generate-notes
-if ($LASTEXITCODE -ne 0) { throw 'GitHub Release fallita' }
-
-Write-Host '`n==> Aggiorno README.md...' -ForegroundColor Yellow
-$oldUrl = 'https://github.com/elguala9/Speedy/releases/download/v[^/]+/speedy.exe'
-$newUrl = "https://github.com/elguala9/Speedy/releases/download/v$ver/speedy.exe"
-$readme = Join-Path $root 'README.md'
-$content = Get-Content $readme -Raw
-if ($content -match $oldUrl) {
-    $content = $content -replace $oldUrl, $newUrl
-    Set-Content $readme -Value $content -NoNewline
-    Write-Host "README.md aggiornato a v$ver" -ForegroundColor Green
-} else {
-    Write-Host 'Pattern URL non trovato in README.md, aggiornalo manualmente' -ForegroundColor Red
+# 1. Controlla branch
+$branch = git rev-parse --abbrev-ref HEAD
+if ($branch -ne 'master') {
+    Write-Error "Devi essere su master (branch attuale: $branch)"
+    exit 1
 }
 
-git add README.md
-git commit -m "release: v$ver"
-git tag "v$ver"
+# 2. Controlla working tree pulito
+$dirty = git status --porcelain
+if ($dirty) {
+    Write-Error "Working tree non pulito. Committa o stasha le modifiche prima."
+    exit 1
+}
 
-Write-Host "`n==> Push tag su remote..." -ForegroundColor Yellow
-git push
-git push --tags
+# 3. Controlla che il tag non esista gia'
+$existing = git tag -l $Version
+if ($existing) {
+    Write-Error "Tag $Version esiste gia'."
+    exit 1
+}
 
-Write-Host "`n✅ Pubblicazione v$ver completata!`n" -ForegroundColor Green
+Write-Host "`n==> Release $Version da master" -ForegroundColor Green
+
+# 4. Push dei commit
+Write-Host "==> Push master..." -ForegroundColor Yellow
+git push GitHub master
+if ($LASTEXITCODE -ne 0) { throw 'git push master fallito' }
+
+# 5. Crea e pusha il tag — parte il workflow release.yml su GitHub Actions
+Write-Host "==> Tag $Version e push..." -ForegroundColor Yellow
+git tag $Version
+git push GitHub $Version
+if ($LASTEXITCODE -ne 0) { throw 'git push tag fallito' }
+
+Write-Host "`n✅ Tag $Version pushato. GitHub Actions sta buildando gli exe." -ForegroundColor Green
+Write-Host "   Segui la build su: https://github.com/elguala9/Speedy/actions" -ForegroundColor Cyan
