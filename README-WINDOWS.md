@@ -18,13 +18,13 @@ Guida passo-passo per installare i 5 binari di Speedy su Windows e configurare l
 
 | Binario | Ruolo | Lifecycle |
 |---|---|---|
-| `speedy.exe` | Worker — indexing, query, embedding, SQLite | Lanciato dal daemon, o standalone |
+| `speedy-ai-context.exe` | Worker — indexing, query, embedding, SQLite | Lanciato dal daemon, o standalone |
 | `speedy-daemon.exe` | Daemon globale — file watcher, IPC server | **Sempre in esecuzione** (uno per utente) |
 | `speedy-cli.exe` | Client thin — scriptabile, per AI agent | Lanciato on-demand |
 | `speedy-mcp.exe` | Server MCP per AI agent (Claude, Cursor, …) | Lanciato dall'agent MCP |
 | `speedy-gui.exe` | GUI desktop — gestione workspaces e log | Lanciato on-demand |
 
-I primi quattro (`speedy`, `speedy-cli`, `speedy-mcp`, `speedy-gui`) si lanciano e terminano in secondi. Il daemon è l'unico che deve restare sempre vivo.
+I primi quattro (`speedy-ai-context`, `speedy-cli`, `speedy-mcp`, `speedy-gui`) si lanciano e terminano in secondi. Il daemon è l'unico che deve restare sempre vivo.
 
 ---
 
@@ -32,7 +32,7 @@ I primi quattro (`speedy`, `speedy-cli`, `speedy-mcp`, `speedy-gui`) si lanciano
 
 ```
 C:\Program Files\Speedy\        ← o %LOCALAPPDATA%\Programs\Speedy\ senza admin
-├── speedy.exe
+├── speedy-ai-context.exe
 ├── speedy-daemon.exe
 ├── speedy-cli.exe
 ├── speedy-mcp.exe
@@ -51,7 +51,7 @@ Scarica i `.exe` dalla [pagina Releases](https://github.com/elguala9/Speedy/rele
 $dir = 'C:\Program Files\Speedy'
 New-Item -ItemType Directory -Force $dir
 
-Copy-Item dist\speedy.exe        $dir
+Copy-Item dist\speedy-ai-context.exe $dir
 Copy-Item dist\speedy-daemon.exe $dir
 Copy-Item dist\speedy-cli.exe    $dir
 Copy-Item dist\speedy-mcp.exe    $dir

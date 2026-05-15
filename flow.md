@@ -32,7 +32,7 @@ speedy-core (lib)        ← libreria leggera condivisa
                            (DaemonStatus, Metrics, WorkspaceStatus,
                             ScanResult, LogLine), embedding type
 
-speedy.exe (worker)      ← TUTTA la logica pesante inline
+speedy-ai-context.exe (worker)      ← TUTTA la logica pesante inline
                            indexer, query, embedding, SQLite, chunking,
                            hashing, ignore, file filter, watcher reale
                            può girare standalone, oppure essere spawnato
@@ -44,7 +44,7 @@ speedy-daemon.exe        ← UN SOLO processo, globale per l'utente
                            IPC server su local socket "speedy-daemon"
                            N file-watcher (uno per workspace) DENTRO
                            lo stesso processo, come task tokio
-                           NON fa embedding/indexing: delega a speedy.exe
+                           NON fa embedding/indexing: delega a speedy-ai-context.exe
                            via subprocess
                            target di deploy: cartella Startup di Windows
                            (parte al login utente)
@@ -56,7 +56,7 @@ speedy-cli.exe           ← thin client (solo tokio + serde + clap +
 
 speedy-mcp.exe           ← server MCP (JSON-RPC su stdio) per AI agent
                            usa SPEEDY_BIN (default: speedy-cli) per
-                           eseguire i tool → daemon → speedy.exe
+                           eseguire i tool → daemon → speedy-ai-context.exe
 
 speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
                            usa DaemonClient di speedy-core direttamente
@@ -69,7 +69,7 @@ speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
 
 | Binary           | Dipende da                                       |
 |------------------|--------------------------------------------------|
-| `speedy`         | `speedy-core` + tutta la logica pesante          |
+| `speedy-ai-context` | `speedy-core` + tutta la logica pesante       |
 | `speedy-daemon`  | `speedy-core` + tutta la logica pesante          |
 | `speedy-cli`     | solo `speedy-core` (DaemonClient + local_sock)   |
 | `speedy-mcp`     | solo `speedy-core` (chiama `SPEEDY_BIN`)         |
@@ -105,9 +105,9 @@ speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
 | `is-workspace <path>`    | `true` / `false`                                           | inline                                          |
 | `add <path>`             | `ok` / `error: ...`                                        | registra in `workspaces.json` + spawna watcher  |
 | `remove <path>`          | `ok` / `error: ...`                                        | abort watcher + deregistra                      |
-| `sync <path>`            | `ok` / `error: ...`                                        | spawna `speedy.exe -p <path> sync` (incrementale) |
+| `sync <path>`            | `ok` / `error: ...`                                        | spawna `speedy-ai-context.exe -p <path> sync` (incrementale) |
 | `reload`                 | `ok: N workspaces reloaded`                                | rilegge workspaces.json + sync watcher          |
-| `exec <args>`            | stdout di `speedy.exe`                                     | spawna `speedy.exe <args>` con `SPEEDY_NO_DAEMON=1` |
+| `exec <args>`            | stdout di `speedy-ai-context.exe`                                     | spawna `speedy-ai-context.exe <args>` con `SPEEDY_NO_DAEMON=1` |
 | `stop`                   | `ok` (poi shutdown graceful)                               | abort tutti i watcher, esce dal loop accept     |
 | qualsiasi altro          | `error: unknown command: <cmd>`                            | —                                               |
 
@@ -161,12 +161,12 @@ $ speedy-cli query "auth flow"
   │    ├─ daemon riceve "add <canonical>"
   │    ├─ workspace::add() su workspaces.json
   │    ├─ spawna watcher
-  │    └─ (opzionale) sync_all iniziale via speedy.exe sync
+  │    └─ (opzionale) sync_all iniziale via speedy-ai-context.exe sync
   │
   └─ DaemonClient::cmd("exec\t<CWD>\tquery\tauth flow")
-       ├─ daemon spawna: speedy.exe -p <CWD> query "auth flow"
+       ├─ daemon spawna: speedy-ai-context.exe -p <CWD> query "auth flow"
        │                 con SPEEDY_NO_DAEMON=1
-       ├─ speedy.exe esegue la query sul DB SQLite
+       ├─ speedy-ai-context.exe esegue la query sul DB SQLite
        ├─ stdout torna al daemon
        └─ daemon lo gira al cli → cli lo stampa
 ```
@@ -188,9 +188,9 @@ Utente salva src/lib.rs
   │
   ├─ PID-check anti-loop:
   │    ├─ il file è stato toccato da un PID presente in active_pids?
-  │    └─ (cioè: una nostra scrittura via speedy.exe?)  → skip
+  │    └─ (cioè: una nostra scrittura via speedy-ai-context.exe?)  → skip
   │
-  └─ daemon spawna: speedy.exe -p <ws> index ./src/lib.rs
+  └─ daemon spawna: speedy-ai-context.exe -p <ws> index ./src/lib.rs
        (SPEEDY_NO_DAEMON=1)
        │
        ├─ inserisce il PID in active_pids
@@ -201,11 +201,11 @@ Utente salva src/lib.rs
 ### Safety: self-write
 
 ```
-speedy.exe scrive sul DB (.speedy/index.sqlite)
+speedy-ai-context.exe scrive sul DB (.speedy/index.sqlite)
   → notify nota le modifiche al file DB
   → ma le ignore-rules contengono ".speedy/"  → skip
 
-speedy.exe non scrive nei sorgenti dell'utente → nessun loop possibile
+speedy-ai-context.exe non scrive nei sorgenti dell'utente → nessun loop possibile
 ```
 
 Il PID-check serve come secondo livello difensivo, in caso un giorno il worker dovesse riscrivere qualche file.
@@ -228,19 +228,19 @@ speedy-cli.exe
 speedy-daemon.exe
   │  exec <args>  → subprocess
   ▼
-speedy.exe
+speedy-ai-context.exe
   │  query / index / context / sync su SQLite + Ollama
   ▼
 stdout risale fino all'agent come result MCP
 ```
 
-`SPEEDY_BIN` permette di puntare a `speedy.exe` direttamente (bypass daemon) per scenari batch / test.
+`SPEEDY_BIN` permette di puntare a `speedy-ai-context.exe` direttamente (bypass daemon) per scenari batch / test.
 
 ---
 
 ## 5b. Flusso "GUI desktop (`speedy-gui.exe`)"
 
-A differenza di MCP — che è una pipeline `agent → mcp → cli → daemon → speedy` — la GUI **salta lo scalino `speedy-cli.exe`** e parla al daemon direttamente con `speedy-core::DaemonClient`.
+A differenza di MCP — che è una pipeline `agent → mcp → cli → daemon → speedy-ai-context` — la GUI **salta lo scalino `speedy-cli.exe`** e parla al daemon direttamente con `speedy-core::DaemonClient`.
 
 ```
 Utente lancia speedy-gui.exe
@@ -290,7 +290,7 @@ Filtri (livelli, substring, target, workspace) operano sul buffer in memoria, ni
 
 ### Differenze chiave vs MCP
 
-- **Niente subprocess**: la GUI non spawna `speedy-cli`/`speedy.exe`. Tutto passa via `DaemonClient` in-process (più veloce, no overhead di fork per ogni click).
+- **Niente subprocess**: la GUI non spawna `speedy-cli`/`speedy-ai-context.exe`. Tutto passa via `DaemonClient` in-process (più veloce, no overhead di fork per ogni click).
 - **State condiviso**: la GUI vede metriche + status + workspace status aggregati in una `DaemonState`, e li aggiorna in modo asincrono.
 - **Autostart**: gestito a livello OS (cartella Startup su Windows, equivalenti su macOS/Linux). La GUI non scrive nel registro né in LaunchAgents — l'utente posiziona `speedy-daemon.exe` (o un suo shortcut) nella cartella Startup.
 - **Tray + notifiche**: `tray-icon` per quick-actions (Open / Restart / Quit), `notify-rust` per popup di sistema sui livelli `error` del log stream (toggle opt-in).
@@ -301,10 +301,10 @@ La GUI rileva il fallimento di `ping` e mostra un banner "Avvia daemon"; il clic
 
 ---
 
-## 6. Flusso "speedy.exe standalone, no daemon"
+## 6. Flusso "speedy-ai-context.exe standalone, no daemon"
 
 ```
-$ speedy index .
+$ speedy-ai-context index .
   │
   ├─ should_skip_daemon_check()?  → sì
   │    (subcomandi puntuali tipo index/query/context/sync da CLI diretta,
@@ -318,7 +318,7 @@ $ speedy index .
        └─ termina
 ```
 
-`speedy.exe` è completamente autosufficiente. Il daemon serve **solo** per:
+`speedy-ai-context.exe` è completamente autosufficiente. Il daemon serve **solo** per:
 1. Monitoring continuo (auto-reindex on save)
 2. Pre-flight check (indice sempre aggiornato prima di una query)
 3. API server per AI / MCP
@@ -327,13 +327,13 @@ $ speedy index .
 
 ## 7. Comandi CLI — chi li gestisce
 
-| Comando                         | `speedy.exe`           | `speedy-cli.exe`                   |
+| Comando                         | `speedy-ai-context.exe`           | `speedy-cli.exe`                   |
 |---------------------------------|------------------------|------------------------------------|
-| `index [<subdir>]`              | esegue inline          | exec → daemon → `speedy.exe index` |
-| `query <q>`                     | esegue inline          | exec → daemon → `speedy.exe query` |
-| `context`                       | esegue inline          | exec → daemon → `speedy.exe context` |
-| `sync`                          | esegue inline          | exec → daemon → `speedy.exe sync`  |
-| `reembed`                       | esegue inline          | exec → daemon → `speedy.exe reembed` |
+| `index [<subdir>]`              | esegue inline          | exec → daemon → `speedy-ai-context.exe index` |
+| `query <q>`                     | esegue inline          | exec → daemon → `speedy-ai-context.exe query` |
+| `context`                       | esegue inline          | exec → daemon → `speedy-ai-context.exe context` |
+| `sync`                          | esegue inline          | exec → daemon → `speedy-ai-context.exe sync`  |
+| `reembed`                       | esegue inline          | exec → daemon → `speedy-ai-context.exe reembed` |
 | `force [-p <path>]`             | n/a (rimosso)          | sync → daemon                      |
 | `daemon status/ping/stop/list`  | n/a                    | risposta diretta dal daemon        |
 | `daemon` (no action)            | avvia il daemon centrale | n/a                              |
@@ -378,7 +378,7 @@ $ speedy index .
 ## 9. Invarianti che il sistema deve rispettare
 
 1. **Mai due daemon vivi contemporaneamente.** `kill_existing_daemon()` viene chiamato sia dal cli (prima di spawnare) sia dal daemon stesso all'avvio. Se la pipe esiste già con un listener vivo che risponde `pong`, lo spawn viene saltato.
-2. **`speedy.exe` spawnato dal daemon ha sempre `SPEEDY_NO_DAEMON=1`** → niente ricorsione.
+2. **`speedy-ai-context.exe` spawnato dal daemon ha sempre `SPEEDY_NO_DAEMON=1`** → niente ricorsione.
 3. **Watcher e indexer non scrivono nei sorgenti dell'utente.** Solo in `.speedy/`, che è ignorato dal watcher tramite ignore-rules.
 4. **`add` è idempotente.** Aggiungere lo stesso workspace due volte non crea due watcher.
 5. **`remove` di un workspace inesistente non è un errore fatale**, risponde `ok` (o `error: ...` ma il cli lo tratta come no-op).
@@ -399,7 +399,7 @@ $ speedy index .
 ## 11. Punti dove potrei aver capito male — da verificare
 
 - **PID-tracking lato watcher**: il PID-set serve per `taskkill` allo shutdown (`packages/speedy-daemon/src/main.rs`, campo `CentralDaemon.active_pids`). **Decisione 2026-05-14**: si mantiene come *defense-in-depth*. La protezione principale contro self-write resta l'ignore di `.speedy/`, ma `active_pids` permette uno shutdown deterministico (zero indexer orfani) anche se domani il worker dovesse iniziare a scrivere file di stato fuori da `.speedy/`. Il costo è minimo (un `HashSet<u32>` per processo).
-- **Sync iniziale su `add` — risolto 2026-05-15**: `handle_add` ora fa fire-and-forget di `handle_sync` solo per i workspace nuovi (esistenti già su disco ma non ancora gestiti). L'awaiter del client torna `ok` subito, lo spawn di `speedy.exe sync` corre in background con `SPEEDY_NO_DAEMON=1`. Override per test: `SPEEDY_SKIP_INITIAL_SYNC=1`.
+- **Sync iniziale su `add` — risolto 2026-05-15**: `handle_add` ora fa fire-and-forget di `handle_sync` solo per i workspace nuovi (esistenti già su disco ma non ancora gestiti). L'awaiter del client torna `ok` subito, lo spawn di `speedy-ai-context.exe sync` corre in background con `SPEEDY_NO_DAEMON=1`. Override per test: `SPEEDY_SKIP_INITIAL_SYNC=1`.
 
 ---
 
@@ -414,7 +414,7 @@ Il daemon mantiene la coerenza con la fonte di verità (`workspaces.json`) in du
 
 ## 13. Query cross-workspace (aggiunto 2026-05-15, protocol v2)
 
-Comando IPC `query-all\t<top_k>\t<query>` → ritorna JSON-array di hit aggregati. Il daemon fa fan-out parallelo (`tokio::spawn` per ogni workspace registrato) eseguendo `speedy.exe -p <ws> query <q> -k <K> --json` con `SPEEDY_NO_DAEMON=1`, deserializza ciascuna risposta in `Vec<serde_json::Value>`, aggiunge il campo `workspace` a ogni hit, fonde tutto, ordina per score discendente e taglia a top_k.
+Comando IPC `query-all\t<top_k>\t<query>` → ritorna JSON-array di hit aggregati. Il daemon fa fan-out parallelo (`tokio::spawn` per ogni workspace registrato) eseguendo `speedy-ai-context.exe -p <ws> query <q> -k <K> --json` con `SPEEDY_NO_DAEMON=1`, deserializza ciascuna risposta in `Vec<serde_json::Value>`, aggiunge il campo `workspace` a ogni hit, fonde tutto, ordina per score discendente e taglia a top_k.
 
 CLI utente: `speedy-cli query --all <q>` (oppure direttamente via `DaemonClient::query_all`).
 

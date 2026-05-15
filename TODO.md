@@ -9,22 +9,6 @@ speedy-gui 5).
 
 ---
 
-## P0 — Pulizia immediata
-
-- [x] **Rimosso import inutilizzato** `StreamTrait as _` da
-      `packages/speedy-cli/src/main.rs`. Zero warning su `cargo check`.
-
-- [x] **`winreg` già assente** da `packages/speedy-gui/Cargo.toml` —
-      rimossa prima della review.
-
-- [x] **Fix test harness `speedy-mcp` integration**: `McpClient::stop`
-      riscritta con exit write-only + `try_wait` 5 s + `kill()` fallback.
-      Risolve il blocco CI Windows.
-
-- [x] **`flow.md` §7 allineato**: aggiunta riga `reembed`.
-
----
-
 ## P1 — Smoke E2E manuale GUI
 
 Richiede macchina fisica. Checklist completa in **[`TODO-platform.md`](./TODO-platform.md)**.
@@ -33,42 +17,8 @@ Richiede macchina fisica. Checklist completa in **[`TODO-platform.md`](./TODO-pl
 
 ## P2 — Fedora / Linux packaging
 
-- [x] §7 `ci.yml`: step `apt-get install` GUI-deps Linux +
-      `cargo bench --workspace --no-run`.
-
 Tutto il resto (§1 build Fedora, §3 README Linux, §4 autostart, §5 .desktop)
 è già dettagliato in **[`todo-fedora.md`](./todo-fedora.md)**.
-
----
-
-## P3 — Idee / rifiniture
-
-- [x] **`workspace_status.chunk_count`**: campo già `Option<u64>` con
-      doc "None if unknown — kept for forward-compat". Decisione: resta
-      `None` dal daemon (aprire SQLite da qui richiederebbe spawning
-      aggiuntivo). Nessun cambio necessario.
-
-- [x] **Watcher health test**: `last_heartbeat` / `WATCHER_DEAD_TICKS` /
-      `check_watcher_health_with_thresholds` non esistono nel codebase —
-      il punto era prematuro. Rimandato a quando la feature verrà
-      implementata.
-
-- [x] **`speedy-gui` auto-refresh interval**: aggiunta opzione
-      `DragValue` 1–60 s nella sezione Preferenze della Dashboard.
-      Persistita via `eframe::Storage` (`refresh_interval_secs`).
-
-- [x] **`speedy-mcp` README**: aggiunto esempio Claude Desktop +
-      cross-ref a `commands.md` / `README.md#configuration`.
-
-- [x] **`Justfile` `just build-all`**: aggiunto alias equivalente a
-      `cargo build-all`.
-
-- [x] **`scripts/publish.ps1`**: letto — tool release interno one-shot
-      (build → crates.io → GitHub Release → bump README URL → tag).
-      Non serve sezione "Release" pubblica nel README.
-
-- [x] **Bench + CI**: step `cargo bench --workspace --no-run` in
-      `ci.yml`.
 
 ---
 
