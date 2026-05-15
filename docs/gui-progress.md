@@ -388,3 +388,56 @@ Resta solo lo smoke E2E manuale (`cargo run --release -p speedy-gui` e
 verifica visiva di tray icon + notifiche + autostart), non eseguibile in
 sessione non-interattiva.
 
+---
+
+## 2026-05-15 (parte 4) — autostart rimosso, daemon-exe override, prune-missing
+
+Le decisioni in parte 3 sono state in parte riviste. Stato corrente nel
+codice (verifica `master` HEAD `c642282`):
+
+### Autostart rimosso dalla GUI
+
+`packages/speedy-gui/src/autostart.rs` **non esiste più**. Il dependency
+`winreg` resta in `Cargo.toml` solo per uso futuro (può essere rimosso).
+La Dashboard **non** ha più il checkbox "Avvia daemon al login utente".
+
+Motivazione: scrivere in `HKCU\…\Run` / `LaunchAgents` /
+`~/.config/autostart` è invadente per un'app distribuita come tarball di
+binari. L'utente posiziona manualmente uno shortcut a `speedy-daemon`
+nella Startup folder (Windows) o equivalente — vedi README §"Recommended
+layout".
+
+Riferimenti in queste note (parte 3 §"Auto-start daemon al login",
+file `autostart.rs`, checkbox in Dashboard) vanno letti come "fatto
+poi rollbackato".
+
+### Daemon-exe override
+
+Aggiunto un campo "Eseguibile daemon" nella Dashboard con `Sfoglia…` /
+`Applica` / `Ripristina automatico`. Persistito come
+`PersistedSettings.daemon_exe_path` in `eframe::Storage`. Il bridge usa
+`spawn_daemon_process_with(exe, socket)` quando l'override è settato.
+
+API nuova in `speedy-core/src/daemon_util.rs`:
+`pub fn resolve_daemon_exe() -> Result<PathBuf>`
+`pub fn spawn_daemon_process_with(exe: &Path, socket_name: &str) -> Result<()>`
+
+### Prune-missing (IPC + GUI)
+
+Nuovo comando IPC one-shot `prune-missing`:
+- Daemon: `handle_prune_missing` ferma i watcher per path inesistenti,
+  rimuove le entry da `workspaces.json`, risponde con
+  `{"removed": N, "paths": [...]}`.
+- Client: `DaemonClient::prune_missing()` in speedy-core.
+- GUI: pulsante "🧹 Pulisci orfani" nella tab Workspaces (più una
+  riga con badge "⚠ mancante" sui workspace il cui path non esiste).
+
+### Stato test (HEAD attuale)
+
+`cargo check --workspace --all-targets` → verde (1 warning: unused
+import `StreamTrait` in `speedy-cli/src/main.rs:147` — fix banale).
+
+`cargo test --workspace -- --test-threads=1` → in corso al momento
+della redazione di questa nota; controllare l'esito prima di credere
+allo storico in parte 3.
+

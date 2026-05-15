@@ -34,3 +34,24 @@ Add to your MCP client config:
 ```
 
 Set `SPEEDY_BIN` env var to point to the speedy binary if not in PATH.
+
+### Claude Desktop (`claude_desktop_config.json`)
+
+```json
+{
+  "mcpServers": {
+    "speedy": {
+      "command": "C:\\Program Files\\Speedy\\speedy-mcp.exe",
+      "args": [],
+      "env": {
+        "SPEEDY_BIN": "speedy-cli",
+        "SPEEDY_DEFAULT_SOCKET": "speedy-daemon",
+        "SPEEDY_MCP_TOP_K": "10"
+      }
+    }
+  }
+}
+```
+
+> Full per-binary flag reference: [`commands.md`](../../commands.md).  
+> Environment variables and config file options: [`README.md`](../../README.md#configuration).

@@ -333,6 +333,7 @@ $ speedy index .
 | `query <q>`                     | esegue inline          | exec → daemon → `speedy.exe query` |
 | `context`                       | esegue inline          | exec → daemon → `speedy.exe context` |
 | `sync`                          | esegue inline          | exec → daemon → `speedy.exe sync`  |
+| `reembed`                       | esegue inline          | exec → daemon → `speedy.exe reembed` |
 | `force [-p <path>]`             | n/a (rimosso)          | sync → daemon                      |
 | `daemon status/ping/stop/list`  | n/a                    | risposta diretta dal daemon        |
 | `daemon` (no action)            | avvia il daemon centrale | n/a                              |
@@ -421,3 +422,43 @@ Note operative:
 - Il fan-out non condivide il file lock di `workspaces.json` (per-workspace `vectors.db` sono indipendenti).
 - Se un workspace fallisce (Ollama giù, DB corrotto), restituisce array vuoto e gli altri proseguono.
 - `protocol_version` salito a 2; client più vecchi che vanno via `cmd("query-all …")` ricevono `error: unknown command`.
+
+---
+
+## 14. `prune-missing` esplicito (aggiunto 2026-05-15)
+
+Oltre al prune periodico di §12, esiste ora un comando IPC esplicito
+`prune-missing` (one-shot) che fa la stessa pulizia *su richiesta*:
+
+- Lato daemon: ferma i watcher per i path non più esistenti, chiama
+  `workspace::prune_missing` e ritorna `{"removed": N, "paths": [...]}`.
+- Lato client: `DaemonClient::prune_missing() -> Result<Vec<String>>`.
+- UI: pulsante "🧹 Pulisci orfani" nella tab Workspaces della GUI.
+  Si differenzia dal `Remove` per-riga perché non richiede di sapere il
+  path: pulisce tutto ciò che non esiste più senza confermare uno per uno.
+
+`protocol_version` resta 2 — è un comando nuovo, non un'incompatibilità.
+
+---
+
+## 15. GUI: daemon-exe override (aggiunto 2026-05-15)
+
+`spawn_daemon_process` nel `speedy-core` ora ha una variante
+`spawn_daemon_process_with(exe, socket)` che accetta un path esplicito.
+Esposto in `daemon_util::resolve_daemon_exe()` per UI/diagnostica.
+
+Nella GUI, la Dashboard mostra:
+
+- Path risolto correntemente (override custom o auto-detect).
+- Campo testuale + `Sfoglia…` / `Applica` / `Ripristina automatico`.
+- "Apri cartella" per saltare al folder che contiene il binario.
+
+L'override è persistito in `eframe::Storage` (campo `daemon_exe_path`).
+Quando settato, `bridge.spawn_daemon()` lo usa al posto dell'auto-detect.
+Caso d'uso principale: GUI installata in una cartella separata dal daemon
+(es. `~/.local/bin/` per GUI e `~/.local/libexec/` per il daemon).
+
+Autostart al login: **rimosso dalla GUI** (commit `c642282`). La GUI non
+scrive più nel registro Windows / LaunchAgents / `.desktop`. Per
+avviare il daemon all'accesso utente, vedi README — la mossa
+consigliata su Windows resta uno shortcut in `shell:startup`.
