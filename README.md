@@ -131,12 +131,6 @@ $lnk.Save()
 After the next login (or by running it once manually) the daemon is up; all
 other commands talk to it transparently.
 
-> **Alternative — let the GUI manage autostart for you.** `speedy-gui.exe`
-> has a built-in toggle ("Avvia daemon al login utente") in the Dashboard
-> tab that registers/unregisters the daemon under
-> `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Functionally
-> equivalent to the Startup-folder shortcut; pick whichever you prefer.
-
 ### First run
 
 ```bash
@@ -225,7 +219,7 @@ arguments. Four tabs:
 
 | Tab          | What it does                                                                |
 |--------------|-----------------------------------------------------------------------------|
-| Dashboard    | Daemon status (pid/uptime/version), metrics, restart/reload/stop, autostart toggle, "notify on error" toggle |
+| Dashboard    | Daemon status (pid/uptime/version), metrics, restart/reload/stop, "notify on error" toggle |
 | Workspaces   | List + add (native file picker) + per-workspace Index/Sync/Open folder/Remove |
 | Scan         | Walk a root path looking for existing `.speedy/index.sqlite` and bulk-register what it finds |
 | Logs         | Live tail (`subscribe-log` IPC) or historical view of any `daemon.log.*` file, with level/substring/target/workspace filters and JSON/JSONL export |

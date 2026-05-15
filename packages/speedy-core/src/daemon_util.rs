@@ -83,15 +83,24 @@ pub fn acquire_daemon_lock(daemon_dir: &Path) -> Result<File> {
 }
 
 pub fn spawn_daemon_process(socket_name: &str) -> Result<()> {
-    let exe = find_daemon_exe()
+    let exe = resolve_daemon_exe()
         .context("failed to find daemon executable")?;
+    spawn_daemon_process_with(&exe, socket_name)
+}
+
+/// Spawn the daemon at a caller-specified path. Used by the GUI when the user
+/// overrides the auto-detected binary location from the Dashboard.
+pub fn spawn_daemon_process_with(exe: &Path, socket_name: &str) -> Result<()> {
+    if !exe.exists() {
+        anyhow::bail!("daemon executable not found: {}", exe.display());
+    }
 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         // DETACHED_PROCESS (0x8) | CREATE_NO_WINDOW (0x08000000) | CREATE_NEW_PROCESS_GROUP (0x200):
         // fully detach so the calling shell doesn't keep pipe handles open.
-        std::process::Command::new(&exe)
+        std::process::Command::new(exe)
             .arg("--daemon-socket")
             .arg(socket_name)
             .creation_flags(0x08000208)
@@ -104,7 +113,7 @@ pub fn spawn_daemon_process(socket_name: &str) -> Result<()> {
 
     #[cfg(not(windows))]
     {
-        std::process::Command::new(&exe)
+        std::process::Command::new(exe)
             .arg("--daemon-socket")
             .arg(socket_name)
             .stdout(std::process::Stdio::null())
@@ -116,7 +125,10 @@ pub fn spawn_daemon_process(socket_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn find_daemon_exe() -> Result<PathBuf> {
+/// Locate the `speedy-daemon` binary using the same heuristics
+/// `spawn_daemon_process` uses internally. Exposed for callers (e.g. the GUI)
+/// that want to display the resolved path to the user.
+pub fn resolve_daemon_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe.parent().context("no parent dir")?;
 

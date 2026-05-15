@@ -160,26 +160,37 @@ fn copy_with_retry(source: &PathBuf, dest: &PathBuf) {
     );
 }
 
-fn temp_project() -> PathBuf {
-    // Each test gets its own dir. Parallel integration tests were racing on a
-    // single shared path: one test would remove the dir while another was
-    // setting current_dir on a child process, producing "not a directory".
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("speedy_mcp_int_{}_{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("src")).unwrap();
+/// Owns a temp project dir for one test. On drop it BOTH wipes the directory
+/// AND de-registers the workspace from the daemon's `workspaces.json`. The
+/// second step matters: invoking `speedy_query` against this dir triggers
+/// `ensure_daemon` in the worker, which adds the cwd to the registry. Without
+/// the de-register on drop, the registry accumulates ghost test entries that
+/// later show up in the GUI's Workspaces tab.
+pub struct TempProject {
+    dir: PathBuf,
+}
 
-    std::fs::write(dir.join("Cargo.toml"), br#"[package]
+impl TempProject {
+    fn new() -> Self {
+        // Each test gets its own dir. Parallel integration tests were racing on a
+        // single shared path: one test would remove the dir while another was
+        // setting current_dir on a child process, producing "not a directory".
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("speedy_mcp_int_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        std::fs::write(dir.join("Cargo.toml"), br#"[package]
 name = "mcp-test"
 version = "0.1.0"
 edition = "2021"
 "#)
-    .unwrap();
+        .unwrap();
 
-    std::fs::write(
-        dir.join("src").join("lib.rs"),
-        br#"pub fn greet(name: &str) -> String {
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            br#"pub fn greet(name: &str) -> String {
     format!("Hello, {name}!")
 }
 
@@ -187,10 +198,42 @@ pub fn add(a: i32, b: i32) -> i32 {
     a + b
 }
 "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
-    dir
+        Self { dir }
+    }
+}
+
+impl Drop for TempProject {
+    fn drop(&mut self) {
+        // The worker canonicalizes cwd before adding it to workspaces.json, so
+        // the stored form is usually the `\\?\C:\...` extended-length path on
+        // Windows. Try the canonical form first, then the literal as a fallback.
+        let canonical = self.dir.canonicalize().ok();
+        if let Some(c) = &canonical {
+            let _ = speedy_core::workspace::remove(&c.to_string_lossy());
+        }
+        let _ = speedy_core::workspace::remove(&self.dir.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl std::ops::Deref for TempProject {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.dir
+    }
+}
+
+impl AsRef<Path> for TempProject {
+    fn as_ref(&self) -> &Path {
+        &self.dir
+    }
+}
+
+fn temp_project() -> TempProject {
+    TempProject::new()
 }
 
 fn assert_rpc_success(response: &serde_json::Value) {
