@@ -282,6 +282,149 @@ fn test_standalone_index_and_query() {
     assert!(context.status.success(), "standalone context failed: {}", String::from_utf8_lossy(&context.stderr));
 }
 
+/// End-to-end real-watcher pipeline: register a workspace via `workspace add`,
+/// drop a file into it, then poll a `query` until the new content appears in
+/// the DB. This exercises the full chain — notify → debouncer → daemon spawn
+/// of `speedy.exe index` → SQLite write → embedding via Ollama — without the
+/// `SPEEDY_WATCH_LOG` test hook that short-circuits the indexer.
+///
+/// Skipped if Ollama is not reachable (the daemon would still spawn the
+/// indexer, but the embed step would fail and the chunk never lands in the
+/// DB). The unit-level wiring test `test_watcher_invokes_indexer_on_file_write`
+/// covers the watcher → indexer hand-off without needing Ollama.
+#[test]
+fn test_watcher_index_query_pipeline() {
+    if !ollama_reachable() {
+        eprintln!("skipping test_watcher_index_query_pipeline: Ollama unreachable");
+        return;
+    }
+    let _lock = acquire_lock();
+    let name = unique_name("pipeline");
+    let dir = std::env::temp_dir().join(&name);
+    // We index a real-but-small project so the initial `add` doesn't try to
+    // walk something huge; we'll add the marker file afterwards to test the
+    // watcher path specifically.
+    create_test_project(&dir);
+    let guard = DaemonGuard::start(&name, &dir);
+
+    let ws_path = dir.to_string_lossy().to_string();
+    let add = guard.run_cli(&["workspace", "add", &ws_path]);
+    assert!(add.is_ok(), "workspace add failed: {:?}", add.err());
+
+    // A distinctive token that's unlikely to collide with the seed project's
+    // contents. We'll search for it via semantic query.
+    let marker = "speedy_watcher_e2e_marker_pumpkin_zebra";
+    let target = dir.join("src").join("marker_file.rs");
+    std::fs::write(
+        &target,
+        format!("pub fn {marker}() -> &'static str {{ \"{marker} content body\" }}\n").as_bytes(),
+    ).unwrap();
+
+    // Debouncer is 500ms + spawn + embed via Ollama; allow a generous window.
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut found = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(out) = guard.run_cli(&["query", marker, "-k", "5"]) {
+            if out.contains(marker) || out.contains("marker_file.rs") {
+                found = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert!(
+        found,
+        "watcher → index → query pipeline did not surface marker '{marker}' within timeout"
+    );
+}
+
+/// Standalone worker path: `speedy.exe` invoked directly with
+/// `SPEEDY_NO_DAEMON=1`, against a tempdir, must complete `index`/`query`/
+/// `context`/`sync` without ever contacting a daemon. We assert this by
+/// pointing it at a socket name that no daemon owns — if the worker tried to
+/// spawn one, `is_alive()` would return true after the run.
+#[test]
+fn test_standalone_no_daemon_flag() {
+    if !ollama_reachable() {
+        eprintln!("skipping test_standalone_no_daemon_flag: Ollama unreachable");
+        return;
+    }
+    let _lock = acquire_lock();
+    let name = unique_name("nodaemon");
+    let dir = std::env::temp_dir().join(&name);
+    create_test_project(&dir);
+
+    // Use a socket name that nothing else listens on. A daemon-dir under the
+    // workspace itself isolates pid/workspaces.json from the user's real one.
+    let socket = format!("speedy_e2e_nodaemon_sock_{name}");
+    let daemon_dir = dir.join(".speedy-daemon-iso");
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+
+    let speedy = bin_path("speedy");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        quiet_command(&speedy)
+            .args(args)
+            .current_dir(&dir)
+            .env("SPEEDY_NO_DAEMON", "1")
+            .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+            .env("SPEEDY_DEFAULT_SOCKET", &socket)
+            .output()
+            .expect("speedy invocation failed to spawn")
+    };
+
+    let index = run(&["index", "."]);
+    assert!(index.status.success(), "standalone index failed: {}", String::from_utf8_lossy(&index.stderr));
+    let index_out = String::from_utf8_lossy(&index.stdout);
+    assert!(index_out.contains("Indexed"), "expected 'Indexed' in output, got: {index_out}");
+
+    let query = run(&["query", "greet"]);
+    assert!(query.status.success(), "standalone query failed: {}", String::from_utf8_lossy(&query.stderr));
+
+    let context = run(&["context"]);
+    assert!(context.status.success(), "standalone context failed: {}", String::from_utf8_lossy(&context.stderr));
+
+    let sync = run(&["sync"]);
+    assert!(sync.status.success(), "standalone sync failed: {}", String::from_utf8_lossy(&sync.stderr));
+
+    // Critical: no daemon must have been spawned. We connect to the chosen
+    // socket name and expect failure / no pong. We do this synchronously via
+    // a quick tokio runtime to reuse DaemonClient.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let alive = rt.block_on(async {
+        let client = speedy_core::daemon_client::DaemonClient::new(&socket);
+        client.is_alive().await
+    });
+    assert!(!alive, "SPEEDY_NO_DAEMON=1 should never spawn a daemon, but one is listening on {socket}");
+
+    // Also assert no daemon.pid file got created in the isolated dir.
+    assert!(
+        !daemon_dir.join("daemon.pid").exists(),
+        "daemon.pid should not exist when running in no-daemon mode"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn ollama_reachable() -> bool {
+    // Same probe shape as testexe: 3s timeout, no model assumption beyond the
+    // tags endpoint responding 200. Returns false on any failure.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        match client.get("http://localhost:11434/api/tags").send().await {
+            Ok(r) => r.status().is_success(),
+            Err(_) => false,
+        }
+    })
+}
+
 #[test]
 fn test_standalone_index_nonexistent_path() {
     let _lock = acquire_lock();
