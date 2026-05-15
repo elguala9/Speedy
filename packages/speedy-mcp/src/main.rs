@@ -144,7 +144,10 @@ fn content_json(text: &str) -> serde_json::Value {
 }
 
 fn run_speedy(args: &[&str]) -> Result<String, String> {
-    let bin = std::env::var("SPEEDY_BIN").unwrap_or_else(|_| "speedy".to_string());
+    // Default to the thin client so a clean `cargo install speedy-mcp` resolves
+    // via PATH to the daemon-backed flow, matching the README's documented
+    // contract. Tests and power users can override with SPEEDY_BIN.
+    let bin = std::env::var("SPEEDY_BIN").unwrap_or_else(|_| "speedy-cli".to_string());
     let output = Command::new(&bin)
         .args(args)
         .output()
@@ -471,20 +474,56 @@ mod tests {
     }
 
     #[test]
-    fn test_run_speedy_defaults_to_speedy() {
+    fn test_run_speedy_defaults_to_speedy_cli() {
         let _env_lock = ENV_LOCK.lock().unwrap();
         let original = std::env::var("SPEEDY_BIN").ok();
         std::env::remove_var("SPEEDY_BIN");
 
         let result = run_speedy(&["--version"]);
-        // Should try to run "speedy" which may or may not exist
-        // Either way we get an error or output - just verify no crash
+        // The default is the thin client. In test envs it usually IS on PATH
+        // (the workspace target dir is added by cargo), but we don't depend on
+        // that — we only assert the name flows through to the error message.
         if let Err(e) = &result {
-            assert!(e.contains("speedy"), "default binary name should be 'speedy', got: {e}");
+            assert!(
+                e.contains("speedy-cli"),
+                "default binary name should be 'speedy-cli', got: {e}"
+            );
         }
 
         if let Some(val) = original {
             std::env::set_var("SPEEDY_BIN", val);
+        } else {
+            std::env::remove_var("SPEEDY_BIN");
+        }
+    }
+
+    /// Clean-env scenario: with no SPEEDY_BIN set, the default name
+    /// `speedy-cli` must be the one we look up via PATH. We force a PATH that
+    /// can't contain the binary and assert the failure message names it.
+    #[test]
+    fn test_run_speedy_default_uses_path_for_speedy_cli() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let prev_bin = std::env::var("SPEEDY_BIN").ok();
+        let prev_path = std::env::var("PATH").ok();
+        std::env::remove_var("SPEEDY_BIN");
+        // Empty PATH guarantees the lookup will fail with the binary name in
+        // the OS error message — no risk of accidentally finding a real one.
+        std::env::set_var("PATH", "");
+
+        let result = run_speedy(&["--version"]);
+        assert!(result.is_err(), "with empty PATH the lookup must fail");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("speedy-cli"),
+            "error must name the default binary 'speedy-cli', got: {err}"
+        );
+
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        if let Some(v) = prev_bin {
+            std::env::set_var("SPEEDY_BIN", v);
         } else {
             std::env::remove_var("SPEEDY_BIN");
         }
