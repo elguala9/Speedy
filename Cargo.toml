@@ -2,12 +2,13 @@
 resolver = "2"
 members = [
     "packages/speedy-core",
-    "packages/speedy",
+    "packages/speedy-ai-context",
     "packages/speedy-daemon",
     "packages/speedy-cli",
     "packages/testexe",
     "packages/speedy-mcp",
     "packages/speedy-gui",
+    "packages/speedy-language-context",
 ]
 
 [workspace.package]

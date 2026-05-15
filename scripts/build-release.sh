@@ -10,9 +10,9 @@ rm -rf "$dist"
 mkdir -p "$dist"
 
 echo "==> Building release binaries..."
-cargo build --release -p speedy -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui
+cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui
 
-bins=(speedy speedy-daemon speedy-cli speedy-mcp speedy-gui)
+bins=(speedy-ai-context speedy-daemon speedy-cli speedy-mcp speedy-gui)
 ext=""
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) ext=".exe" ;;
