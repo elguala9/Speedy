@@ -22,6 +22,10 @@ test-crate crate:
 build:
     cargo build --workspace
 
+# build-all: alias per cargo build-all (tutti i 5 binari, release)
+build-all:
+    cargo build --release -p speedy -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui
+
 # build-release: compila ottimizzato
 build-release:
     cargo build --release --workspace
