@@ -13,11 +13,13 @@ Speedy indexes your codebase into a SQLite vector database, watches for file cha
 ┌─────────────────────────────────────────────────────────────┐
 │  AI Agent / User                                            │
 │       │                                                     │
-│       ▼                                                     │
-│  speedy-mcp.exe          (MCP server over stdio)            │
-│       │                                                     │
-│       ▼                                                     │
-│  speedy-cli.exe          (thin client, no heavy deps)       │
+│       ├─────────────────────┐                               │
+│       ▼                     ▼                               │
+│  speedy-mcp.exe       speedy-gui.exe   (egui desktop app)   │
+│  (MCP / stdio)              │                               │
+│       │                     │                               │
+│       ▼                     │                               │
+│  speedy-cli.exe ◄───────────┘   (thin client, no heavy deps)│
 │       │   local socket "speedy-daemon"                      │
 │       ▼                                                     │
 │  speedy-daemon.exe       ← ONE process, global per user     │
@@ -47,48 +49,127 @@ Pre-built binaries are available on the [Releases page](https://github.com/elgua
 | `speedy-daemon.exe` | Single global daemon + file watcher       |
 | `speedy-cli.exe`    | Thin client (what AI agents / scripts call) |
 | `speedy-mcp.exe`    | MCP server for AI coding agents           |
+| `speedy-gui.exe`    | Desktop GUI (egui) — manage daemon, workspaces, live logs |
 
-## Quick start
+## Install
+
+### Build the binaries
 
 ```bash
 # 1. Install Rust: https://rustup.rs/
-
 # 2. Install Ollama and pull an embedding model
 ollama pull all-minilm:l6-v2
 
-# 3. Build the workspace
-cargo build --release
-
-# 4. Index a project and query it
-speedy index /path/to/project
-speedy query "how does authentication work?"
+# 3. Build all 5 binaries in one shot
+cargo build-all
+# (alias for: cargo build --release -p speedy -p speedy-daemon \
+#                            -p speedy-cli -p speedy-mcp -p speedy-gui)
 ```
 
-Binaries land under `target/release/`. Copy them somewhere on your `PATH` (e.g. `dist/`).
+Or run `scripts/build-release.ps1` / `scripts/build-release.sh` — they build
+**and** copy every `.exe` into `dist/`.
 
-### Daemon-driven workflow (recommended)
+### Recommended layout (Windows)
+
+Speedy ships as **5 binaries with two distinct lifecycles**: a long-running
+background daemon and four short-lived front-end tools. Install them
+accordingly.
+
+**1. The user-facing tools — in one folder, on `PATH`**
+
+Pick a stable install dir, e.g. `C:\Program Files\Speedy\` (or
+`%LOCALAPPDATA%\Programs\Speedy\` if you don't want admin rights), and copy
+the four front-end binaries into it:
+
+```
+C:\Program Files\Speedy\
+├── speedy.exe          ← worker (also usable standalone)
+├── speedy-cli.exe      ← thin client for scripts / MCP
+├── speedy-mcp.exe      ← MCP server for AI coding agents
+└── speedy-gui.exe      ← desktop GUI
+```
+
+Adding this folder to your **`PATH`** is *recommended but not required*. With
+it on `PATH` you can type `speedy query …` and `speedy-cli daemon status`
+from any shell, and MCP clients can reference `speedy-mcp` without a full
+path. To add it permanently (PowerShell, current user only):
+
+```powershell
+$dir = 'C:\Program Files\Speedy'
+[Environment]::SetEnvironmentVariable(
+    'Path',
+    [Environment]::GetEnvironmentVariable('Path','User') + ';' + $dir,
+    'User')
+```
+
+Open a fresh terminal afterwards.
+
+**2. The daemon — in the Windows Startup folder**
+
+`speedy-daemon.exe` is different: it's a single, global, always-on process,
+so put it where Windows will launch it automatically at every login. Place
+(or shortcut) the binary into the **Startup folder**:
+
+```
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
+```
+
+Quick way to open it: `Win + R` → `shell:startup` → Enter.
+
+Drop a copy of `speedy-daemon.exe` there, or — cleaner — drop a **shortcut**
+that points to the binary in your install dir:
+
+```powershell
+$startup = [Environment]::GetFolderPath('Startup')
+$target  = 'C:\Program Files\Speedy\speedy-daemon.exe'
+$ws      = New-Object -ComObject WScript.Shell
+$lnk     = $ws.CreateShortcut("$startup\speedy-daemon.lnk")
+$lnk.TargetPath = $target
+$lnk.Save()
+```
+
+After the next login (or by running it once manually) the daemon is up; all
+other commands talk to it transparently.
+
+> **Alternative — let the GUI manage autostart for you.** `speedy-gui.exe`
+> has a built-in toggle ("Avvia daemon al login utente") in the Dashboard
+> tab that registers/unregisters the daemon under
+> `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Functionally
+> equivalent to the Startup-folder shortcut; pick whichever you prefer.
+
+### First run
 
 ```bash
-# Register the workspace once: the daemon starts on demand,
-# adds a file watcher, and keeps the index up to date.
-speedy-cli workspace add /path/to/project
+# Register the workspace once: the daemon adds a file watcher
+# and keeps the index up to date in the background.
+speedy-cli workspace add C:\path\to\project
 
-# Query — the daemon dispatches to speedy.exe under the hood
-speedy-cli query "auth flow" -k 10
+# Index it (the daemon dispatches to speedy.exe under the hood)
+speedy-cli index
 
-# Health checks
-speedy-cli daemon ping
-speedy-cli daemon status
-speedy-cli daemon list      # workspaces tracked by the daemon
+# Query
+speedy-cli query "how does authentication work?" -k 10
+
+# Sanity checks
+speedy-cli daemon ping        # → pong
+speedy-cli daemon status      # JSON with pid, uptime, watcher_count, …
+speedy-cli daemon list        # workspaces currently watched
 ```
+
+Or just launch `speedy-gui.exe` and add workspaces from the **Workspaces**
+tab — same operations, with live tail of the daemon logs.
 
 ### Standalone (no daemon)
 
+If you don't want a background process at all, `speedy.exe` works on its own:
+
 ```bash
-# Set SPEEDY_NO_DAEMON to skip the daemon completely:
 SPEEDY_NO_DAEMON=1 speedy index .
 SPEEDY_NO_DAEMON=1 speedy query "find auth"
 ```
+
+You lose live re-indexing on file changes — every query reflects only what
+the last manual `index` / `sync` captured.
 
 ## Prerequisites
 
@@ -136,6 +217,21 @@ Minimal CLI; all management is via the IPC protocol.
 |----------------------------|------------------|------------------------------------------------------------------|
 | `--daemon-socket <NAME>`   | `speedy-daemon`  | Local socket name (Named Pipe on Windows, UDS elsewhere)        |
 | `--daemon-dir <DIR>`       | platform config  | Override the dir holding `daemon.pid` and `workspaces.json`     |
+
+### `speedy-gui.exe` — the desktop GUI
+
+An `egui`-based desktop app that wraps the daemon's IPC. Launch with no
+arguments. Four tabs:
+
+| Tab          | What it does                                                                |
+|--------------|-----------------------------------------------------------------------------|
+| Dashboard    | Daemon status (pid/uptime/version), metrics, restart/reload/stop, autostart toggle, "notify on error" toggle |
+| Workspaces   | List + add (native file picker) + per-workspace Index/Sync/Open folder/Remove |
+| Scan         | Walk a root path looking for existing `.speedy/index.sqlite` and bulk-register what it finds |
+| Logs         | Live tail (`subscribe-log` IPC) or historical view of any `daemon.log.*` file, with level/substring/target/workspace filters and JSON/JSONL export |
+
+A system tray icon (green = daemon alive, red = down) provides quick
+**Open Speedy / Restart daemon / Quit** actions.
 
 ### `speedy-mcp.exe` — the MCP server
 

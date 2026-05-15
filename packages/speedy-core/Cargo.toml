@@ -26,3 +26,4 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 interprocess = { version = "2", features = ["tokio"] }
 fd-lock = "4"
+walkdir = "2"

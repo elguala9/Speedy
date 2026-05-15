@@ -42,6 +42,11 @@ accepted for legacy callers that do not need a cwd.
 | `metrics` | Cumulative counters since daemon start (queries, indexes, syncs, watcher_events, exec_calls). | JSON object |
 | `query-all\t<top_k>\t<query>` | (v2) Fan-out query across every registered workspace; returns the merged top-K. | JSON array of `{workspace, path, line, text, score}` |
 | `exec <args>` | Run `speedy <args>` and return its stdout. | command output |
+| `reindex <path>` | (v2) Force a clean re-index of the workspace at `<path>` (runs `speedy index .` in that cwd). | stdout of the indexer, or `error: ...` |
+| `workspace-status <path>` | (v2) Per-workspace runtime info: watcher alive, last event, last sync, db size. | JSON `WorkspaceStatus` |
+| `scan\t<root>[\t<max_depth>]` | (v2) Walk `<root>` looking for `.speedy/index.sqlite` directories. Skips `target`, `.git`, `node_modules`, etc. `max_depth` defaults to 8. | JSON array of `ScanResult` |
+| `tail-log [n]` | (v2) Snapshot of the last `n` (default 200) lines from the current daemon log file, parsed back into `LogLine`. | JSON array of `LogLine` |
+| `subscribe-log` | (v2) Long-lived: daemon answers `ok\n` and then streams one JSON-encoded `LogLine` per `\n` until the client closes. | streaming `LogLine` objects |
 
 ## Examples
 
