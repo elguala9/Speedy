@@ -348,16 +348,12 @@ fn find_speedy_exe() -> PathBuf {
     PathBuf::from("speedy")
 }
 
-const WATCH_IGNORE_DIRS: &[&str] = &[
-    "target", ".git", "node_modules", ".speedy-daemon", ".speedy",
-    ".idea", ".vscode", "dist", "build", "__pycache__", ".cargo",
-];
-
 fn should_ignore_watch_path(p: &Path) -> bool {
+    let dirs = speedy_core::default_ignores::watch_dirs();
     p.components().any(|c| {
         if let std::path::Component::Normal(name) = c {
             if let Some(s) = name.to_str() {
-                return WATCH_IGNORE_DIRS.contains(&s);
+                return dirs.contains(&s);
             }
         }
         false
@@ -458,6 +454,30 @@ fn start_workspace_watcher(
                                 pids.lock().unwrap().insert(pid);
                                 let _ = child.wait();
                                 pids.lock().unwrap().remove(&pid);
+                            }
+
+                            // Also update the SLC symbol graph when language_context is enabled.
+                            let features = slc_features::load_features(Some(&p));
+                            if features.language_context {
+                                if let Some(slc_exe) = slc_features::find_slc_exe() {
+                                    let mut slc_cmd = std::process::Command::new(&slc_exe);
+                                    slc_cmd
+                                        .arg("--path").arg(&p)
+                                        .arg("update")
+                                        .arg(&file_path)
+                                        .stdin(Stdio::null())
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null());
+                                    #[cfg(windows)]
+                                    {
+                                        use std::os::windows::process::CommandExt;
+                                        slc_cmd.creation_flags(CREATE_NO_WINDOW);
+                                    }
+                                    match slc_cmd.spawn() {
+                                        Ok(_) => tracing::debug!(workspace = %p, file = %file_path, "slc update spawned by watcher"),
+                                        Err(e) => tracing::warn!(workspace = %p, error = %e, "failed to spawn slc update from watcher"),
+                                    }
+                                }
                             }
                         }
                     });
@@ -1029,6 +1049,79 @@ async fn dispatch_command(
             format!("{result}\n")
         }
 
+        // ── speedy-language-context bridge ────────────────────────────────
+        _ if line.starts_with("slc-notify\t") => {
+            let rest = &line["slc-notify\t".len()..];
+            let parts: Vec<&str> = rest.split('\t').collect();
+            if let Some((ws, files)) = parts.split_first() {
+                let file_count = files.len();
+                tracing::info!(workspace = %ws, %file_count, "slc-notify received — spawning slc update");
+                if !files.is_empty() {
+                    if let Some(slc_exe) = slc_features::find_slc_exe() {
+                        let mut cmd = std::process::Command::new(&slc_exe);
+                        cmd.arg("--path").arg(ws);
+                        cmd.arg("update");
+                        for f in files.iter() {
+                            cmd.arg(f);
+                        }
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            cmd.creation_flags(CREATE_NO_WINDOW);
+                        }
+                        cmd.stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null());
+                        match cmd.spawn() {
+                            Ok(_) => tracing::debug!(%ws, "slc update spawned"),
+                            Err(e) => tracing::warn!(%ws, error = %e, "failed to spawn slc update"),
+                        }
+                    } else {
+                        tracing::debug!("speedy-language-context not found; skipping slc-notify");
+                    }
+                }
+            }
+            "ok\n".to_string()
+        }
+
+        _ if line.starts_with("feature-enable\t") => {
+            let rest = &line["feature-enable\t".len()..];
+            // Format: <workspace>\t<name>  OR  <name>  (legacy)
+            let (workspace, name) = if let Some((ws, n)) = rest.split_once('\t') {
+                (Some(ws), n.trim())
+            } else {
+                (None, rest.trim())
+            };
+            match slc_features::set_feature(workspace, name, true) {
+                Ok(()) => "ok\n".to_string(),
+                Err(e) => format!("error: {e}\n"),
+            }
+        }
+
+        _ if line.starts_with("feature-disable\t") => {
+            let rest = &line["feature-disable\t".len()..];
+            let (workspace, name) = if let Some((ws, n)) = rest.split_once('\t') {
+                (Some(ws), n.trim())
+            } else {
+                (None, rest.trim())
+            };
+            match slc_features::set_feature(workspace, name, false) {
+                Ok(()) => "ok\n".to_string(),
+                Err(e) => format!("error: {e}\n"),
+            }
+        }
+
+        _ if line.starts_with("feature-status\t") => {
+            let workspace = &line["feature-status\t".len()..];
+            let f = slc_features::load_features(Some(workspace.trim()));
+            format!("{}\n", serde_json::to_string(&f).unwrap_or_default())
+        }
+
+        "feature-status" => {
+            let f = slc_features::load_features(None);
+            format!("{}\n", serde_json::to_string(&f).unwrap_or_default())
+        }
+
         _ => {
             format!("error: unknown command: {line}\n")
         }
@@ -1294,9 +1387,7 @@ fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
         .map(|e| e.path)
         .collect();
 
-    const SKIP: &[&str] = &[
-        "target", ".git", "node_modules", ".idea", ".vscode", "dist", "build", "__pycache__", ".cargo",
-    ];
+    let skip = speedy_core::default_ignores::watch_dirs();
 
     let mut out = Vec::new();
     let walker = walkdir::WalkDir::new(root)
@@ -1305,7 +1396,7 @@ fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            !SKIP.contains(&name.as_ref())
+            !skip.iter().any(|d| *d == name.as_ref())
         });
 
     for entry in walker.flatten() {
@@ -1429,6 +1520,152 @@ fn main() -> Result<()> {
         daemon.log_tx = Some(log_tx);
         daemon.start().await
     })
+}
+
+/// Lightweight feature-toggle storage for the daemon. Mirrors the
+/// `speedy-language-context::features` schema but lives inline so the daemon
+/// does not depend on that crate.
+///
+/// When a workspace path is provided the features are stored in
+/// `<workspace>/.speedy/config.toml` under `[features]` — the same file that
+/// `speedy-language-context` reads — so both processes see the same state.
+/// Without a workspace, the global fallback `~/.speedy/daemon-features.toml`
+/// is used for backward compatibility.
+mod slc_features {
+    use anyhow::Result;
+    use serde::{Deserialize, Serialize};
+    use std::path::PathBuf;
+
+    fn default_true() -> bool {
+        true
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Features {
+        #[serde(default = "default_true")]
+        pub speedy_indexer: bool,
+        #[serde(default = "default_true")]
+        pub language_context: bool,
+    }
+
+    impl Features {
+        fn all_on() -> Self {
+            Self {
+                speedy_indexer: true,
+                language_context: true,
+            }
+        }
+    }
+
+    fn global_config_path() -> PathBuf {
+        let home = if let Some(p) =
+            std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        {
+            PathBuf::from(p)
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+        home.join(".speedy").join("daemon-features.toml")
+    }
+
+    fn workspace_config_path(workspace: &str) -> PathBuf {
+        PathBuf::from(workspace).join(".speedy").join("config.toml")
+    }
+
+    /// Load features: workspace config (under `[features]`) if available, else global.
+    pub fn load_features(workspace: Option<&str>) -> Features {
+        if let Some(ws) = workspace.filter(|s| !s.is_empty()) {
+            let path = workspace_config_path(ws);
+            if path.exists() {
+                if let Ok(raw) = std::fs::read_to_string(&path) {
+                    if let Ok(doc) = toml::from_str::<toml::Value>(&raw) {
+                        if let Some(section) = doc.get("features") {
+                            if let Ok(f) = section.clone().try_into::<Features>() {
+                                return f;
+                            }
+                        }
+                    }
+                }
+            }
+            return Features::all_on();
+        }
+        // Global fallback
+        let path = global_config_path();
+        if !path.exists() {
+            return Features::all_on();
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return Features::all_on(),
+        };
+        toml::from_str::<Features>(&raw).unwrap_or_else(|_| Features::all_on())
+    }
+
+    /// Persist a feature toggle. If workspace is given, writes to
+    /// `<workspace>/.speedy/config.toml` under `[features]`; otherwise writes
+    /// to the global daemon config.
+    pub fn set_feature(workspace: Option<&str>, name: &str, enabled: bool) -> Result<()> {
+        let mut f = load_features(workspace);
+        match name {
+            "speedy_indexer" | "speedy-indexer" => f.speedy_indexer = enabled,
+            "language_context" | "language-context" => f.language_context = enabled,
+            other => anyhow::bail!("unknown feature: {other}"),
+        }
+
+        if let Some(ws) = workspace.filter(|s| !s.is_empty()) {
+            let path = workspace_config_path(ws);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Merge into existing TOML, preserving other sections.
+            let mut doc: toml::Value = if path.exists() {
+                let raw = std::fs::read_to_string(&path).unwrap_or_default();
+                toml::from_str(&raw)
+                    .unwrap_or_else(|_| toml::Value::Table(toml::value::Table::new()))
+            } else {
+                toml::Value::Table(toml::value::Table::new())
+            };
+            let features_val = toml::Value::try_from(&f)?;
+            if let toml::Value::Table(table) = &mut doc {
+                table.insert("features".to_string(), features_val);
+            }
+            let serialized = toml::to_string_pretty(&doc)?;
+            std::fs::write(path, serialized)?;
+        } else {
+            let path = global_config_path();
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let serialized = toml::to_string_pretty(&f)?;
+            std::fs::write(path, serialized)?;
+        }
+        Ok(())
+    }
+
+    /// Locate the `speedy-language-context` executable: same directory as this
+    /// daemon binary first, then PATH. Returns `None` if not found.
+    pub fn find_slc_exe() -> Option<PathBuf> {
+        let exe_name = if cfg!(windows) {
+            "speedy-language-context.exe"
+        } else {
+            "speedy-language-context"
+        };
+        // Same dir as the running daemon
+        if let Ok(self_exe) = std::env::current_exe() {
+            if let Some(dir) = self_exe.parent() {
+                let candidate = dir.join(exe_name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        // Fallback: search PATH
+        std::env::var_os("PATH").and_then(|path_var| {
+            std::env::split_paths(&path_var)
+                .map(|dir| dir.join(exe_name))
+                .find(|p| p.is_file())
+        })
+    }
 }
 
 #[cfg(test)]
