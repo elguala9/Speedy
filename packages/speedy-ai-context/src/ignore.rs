@@ -35,16 +35,7 @@ impl FileFilter {
 
     pub fn is_binary(path: &Path) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let binary_exts = [
-                "exe", "dll", "so", "dylib", "bin", "obj", "o", "a", "lib",
-                "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp",
-                "mp3", "mp4", "avi", "mov", "mkv", "wav", "flac", "ogg",
-                "zip", "tar", "gz", "bz2", "7z", "rar",
-                "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-                "ttf", "otf", "woff", "woff2",
-                "class", "pyc", "pyo",
-            ];
-            return binary_exts.contains(&ext);
+            return speedy_core::default_ignores::binary_extensions().contains(&ext);
         }
         false
     }
