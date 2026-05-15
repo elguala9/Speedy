@@ -48,6 +48,8 @@ pub enum Commands {
     Context,
     #[command(about = "Sync filesystem changes to the database incrementally")]
     Sync,
+    #[command(about = "Drop and rebuild every chunk's embedding (use after changing SPEEDY_MODEL)")]
+    Reembed,
     #[command(about = "Start the central background daemon")]
     Daemon,
     #[command(about = "Manage workspaces")]

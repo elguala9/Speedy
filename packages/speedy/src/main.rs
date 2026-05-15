@@ -2,20 +2,11 @@ use clap::Parser;
 use speedy_core::daemon_client::DaemonClient;
 use speedy_core::daemon_util;
 use speedy_core::workspace;
-use crate::cli::{Cli, Commands, WorkspaceAction};
+use speedy::cli::{Cli, Commands, WorkspaceAction};
 use anyhow::Result;
 use tracing::{info, warn};
 
-mod cli;
-mod db;
-mod document;
-mod embed;
-mod file;
-mod hash;
-mod ignore;
-mod indexer;
-mod text;
-
+#[cfg(test)]
 fn resolve_path(path: &Option<String>) -> Result<std::path::PathBuf> {
     match path {
         Some(p) => Ok(std::path::PathBuf::from(p).canonicalize()?),
@@ -111,7 +102,10 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     if cli.workspaces {
         let workspaces = workspace::list()?;
-        if workspaces.is_empty() {
+        if cli.json {
+            let paths: Vec<&String> = workspaces.iter().map(|w| &w.path).collect();
+            println!("{}", serde_json::to_string_pretty(&paths)?);
+        } else if workspaces.is_empty() {
             println!("No workspaces found.");
         } else {
             for ws in &workspaces {
@@ -123,7 +117,14 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     if cli.daemons {
         let client = DaemonClient::new(resolve_socket_name(&cli));
-        if client.is_alive().await {
+        let alive = client.is_alive().await;
+        if cli.json {
+            let list = if alive { client.get_all_workspaces().await.unwrap_or_default() } else { Vec::new() };
+            let out = serde_json::json!({ "alive": alive, "workspaces": list });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        } else if !alive {
+            println!("Daemon not running.");
+        } else {
             let list = client.get_all_workspaces().await?;
             if list.is_empty() {
                 println!("No daemon workspaces.");
@@ -132,14 +133,12 @@ async fn async_main(cli: Cli) -> Result<()> {
                     println!("[active] {ws}");
                 }
             }
-        } else {
-            println!("Daemon not running.");
         }
         return Ok(());
     }
 
     if let Some(prompt) = cli.read {
-        let indexer = crate::indexer::Indexer::new(&config).await?;
+        let indexer = speedy::indexer::Indexer::new(&config).await?;
         let results = indexer.query(&prompt, 5).await?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&results)?);
@@ -156,7 +155,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     if let Some(content) = cli.modify {
         if let Some(file) = cli.file {
             tokio::fs::write(&file, &content).await?;
-            let indexer = crate::indexer::Indexer::new(&config).await?;
+            let indexer = speedy::indexer::Indexer::new(&config).await?;
             let chunks = indexer.index_file(&file).await?;
             if cli.json {
                 let output = serde_json::json!({"file": file, "chunks": chunks});
@@ -173,7 +172,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Some(Commands::Index { subdir }) => {
-            let indexer = crate::indexer::Indexer::new(&config).await?;
+            let indexer = speedy::indexer::Indexer::new(&config).await?;
             let stats = indexer.index_directory(subdir).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
@@ -182,7 +181,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Query { query, top_k }) => {
-            let indexer = crate::indexer::Indexer::new(&config).await?;
+            let indexer = speedy::indexer::Indexer::new(&config).await?;
             let k = top_k.unwrap_or(5);
             let results = indexer.query(query, k).await?;
             if cli.json {
@@ -196,7 +195,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Context) => {
-            let indexer = crate::indexer::Indexer::new(&config).await?;
+            let indexer = speedy::indexer::Indexer::new(&config).await?;
             let ctx = indexer.project_context().await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&ctx)?);
@@ -208,7 +207,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Sync) => {
-            let indexer = crate::indexer::Indexer::new(&config).await?;
+            let indexer = speedy::indexer::Indexer::new(&config).await?;
             let stats = indexer.sync_all().await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
@@ -219,15 +218,34 @@ async fn async_main(cli: Cli) -> Result<()> {
                 );
             }
         }
+        Some(Commands::Reembed) => {
+            let indexer = speedy::indexer::Indexer::new(&config).await?;
+            let stats = indexer.reembed().await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+            } else {
+                println!(
+                    "Reembedded with model '{}': {} files, {} chunks in {}ms",
+                    indexer.model, stats.files, stats.chunks, stats.duration_ms
+                );
+            }
+        }
         Some(Commands::Daemon) => {
             let socket = resolve_socket_name(&cli);
             daemon_util::spawn_daemon_process(&socket)?;
-            println!("Daemon started on socket {socket}");
+            if cli.json {
+                println!("{}", serde_json::json!({ "started": true, "socket": socket }));
+            } else {
+                println!("Daemon started on socket {socket}");
+            }
         }
         Some(Commands::Workspace { action }) => match action {
             WorkspaceAction::List => {
                 let workspaces = workspace::list()?;
-                if workspaces.is_empty() {
+                if cli.json {
+                    let paths: Vec<&String> = workspaces.iter().map(|w| &w.path).collect();
+                    println!("{}", serde_json::to_string_pretty(&paths)?);
+                } else if workspaces.is_empty() {
                     println!("No workspaces found.");
                 } else {
                     for ws in &workspaces {
@@ -247,7 +265,6 @@ async fn async_main(cli: Cli) -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use crate::cli::Commands;
     use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ListenerTrait as _, StreamTrait as _, ToNsName};
 
     #[test]
