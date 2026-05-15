@@ -62,8 +62,7 @@ speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
                            usa DaemonClient di speedy-core direttamente
                            via tokio runtime in background, NON passa
                            per speedy-cli. 4 tab: Dashboard / Workspaces /
-                           Scan / Logs. Tray icon di sistema. Autostart
-                           daemon via HKCU\Run (alternativa allo Startup).
+                           Scan / Logs. Tray icon di sistema.
 ```
 
 ### Dipendenze fra crate
@@ -293,7 +292,7 @@ Filtri (livelli, substring, target, workspace) operano sul buffer in memoria, ni
 
 - **Niente subprocess**: la GUI non spawna `speedy-cli`/`speedy.exe`. Tutto passa via `DaemonClient` in-process (più veloce, no overhead di fork per ogni click).
 - **State condiviso**: la GUI vede metriche + status + workspace status aggregati in una `DaemonState`, e li aggiorna in modo asincrono.
-- **Autostart**: la GUI può registrare/deregistrare `speedy-daemon.exe` sotto `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (su macOS: LaunchAgent plist; su Linux: `.desktop` autostart). Funzionalmente equivalente al posizionare il binario nella cartella Startup di Windows, ma reversibile da UI.
+- **Autostart**: gestito a livello OS (cartella Startup su Windows, equivalenti su macOS/Linux). La GUI non scrive nel registro né in LaunchAgents — l'utente posiziona `speedy-daemon.exe` (o un suo shortcut) nella cartella Startup.
 - **Tray + notifiche**: `tray-icon` per quick-actions (Open / Restart / Quit), `notify-rust` per popup di sistema sui livelli `error` del log stream (toggle opt-in).
 
 ### Quando il daemon è giù

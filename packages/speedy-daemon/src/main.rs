@@ -692,6 +692,42 @@ async fn prune_and_reconcile(watchers: &Arc<Mutex<HashMap<String, WatcherHandle>
     }
 }
 
+/// IPC-driven variant of [`prune_and_reconcile`]: stops watchers for paths
+/// that no longer exist on disk, drops the corresponding entries from
+/// `workspaces.json`, and returns the list of paths that were removed so the
+/// caller (e.g. the GUI "Pulisci orfani" button) can show feedback.
+async fn handle_prune_missing(
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+) -> Vec<String> {
+    let to_remove: Vec<String> = workspace::list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| !Path::new(&e.path).exists())
+        .map(|e| e.path)
+        .collect();
+
+    if !to_remove.is_empty() {
+        let mut ws = watchers.lock().await;
+        for path in &to_remove {
+            if let Some(handle) = ws.remove(path) {
+                handle.stop.store(true, Ordering::SeqCst);
+                info!("prune-missing: stopped watcher for {path}");
+            }
+        }
+    }
+
+    match workspace::prune_missing() {
+        Ok(n) if n > 0 => info!(
+            "prune-missing: removed {n} stale workspace entr{}",
+            if n == 1 { "y" } else { "ies" }
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("prune-missing: workspace::prune_missing failed: {e}"),
+    }
+
+    to_remove
+}
+
 async fn stop_all_watchers(watchers: &Mutex<HashMap<String, WatcherHandle>>, active_pids: &StdMutex<HashSet<u32>>) {
     let mut map = watchers.lock().await;
     for (_, handle) in map.iter() {
@@ -903,6 +939,15 @@ async fn dispatch_command(
                 Ok(n) => format!("ok: {n} workspaces reloaded\n"),
                 Err(e) => format!("error: {e}\n"),
             }
+        }
+
+        "prune-missing" => {
+            let removed = handle_prune_missing(watchers).await;
+            let payload = serde_json::json!({
+                "removed": removed.len(),
+                "paths": removed,
+            });
+            format!("{payload}\n")
         }
 
         _ if line.starts_with("is-workspace ") => {

@@ -161,6 +161,19 @@ impl DaemonClient {
         self.cmd("reload").await
     }
 
+    /// Ask the daemon to drop every registered workspace whose path no longer
+    /// exists on disk. Returns the list of paths actually removed (may be empty).
+    pub async fn prune_missing(&self) -> Result<Vec<String>> {
+        let resp = self.cmd("prune-missing").await?;
+        #[derive(serde::Deserialize)]
+        struct PruneResp {
+            #[serde(default)]
+            paths: Vec<String>,
+        }
+        let parsed: PruneResp = serde_json::from_str(&resp)?;
+        Ok(parsed.paths)
+    }
+
     /// Walk `root` looking for `.speedy/index.sqlite` and return one entry per
     /// hit. `max_depth` caps how deep the walker descends (default 8 on the
     /// daemon side if `None`).
