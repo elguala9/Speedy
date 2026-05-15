@@ -23,12 +23,14 @@
 
 ---
 
-## 1. Gli attori (3 .exe + 1 lib + 1 MCP)
+## 1. Gli attori (5 .exe + 1 lib)
 
 ```
 speedy-core (lib)        ← libreria leggera condivisa
                            DaemonClient, workspace registry, config,
-                           local-socket helpers, embedding type
+                           local-socket helpers, types serde condivisi
+                           (DaemonStatus, Metrics, WorkspaceStatus,
+                            ScanResult, LogLine), embedding type
 
 speedy.exe (worker)      ← TUTTA la logica pesante inline
                            indexer, query, embedding, SQLite, chunking,
@@ -44,6 +46,8 @@ speedy-daemon.exe        ← UN SOLO processo, globale per l'utente
                            lo stesso processo, come task tokio
                            NON fa embedding/indexing: delega a speedy.exe
                            via subprocess
+                           target di deploy: cartella Startup di Windows
+                           (parte al login utente)
 
 speedy-cli.exe           ← thin client (solo tokio + serde + clap +
                            interprocess), zero dipendenze pesanti
@@ -53,16 +57,24 @@ speedy-cli.exe           ← thin client (solo tokio + serde + clap +
 speedy-mcp.exe           ← server MCP (JSON-RPC su stdio) per AI agent
                            usa SPEEDY_BIN (default: speedy-cli) per
                            eseguire i tool → daemon → speedy.exe
+
+speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
+                           usa DaemonClient di speedy-core direttamente
+                           via tokio runtime in background, NON passa
+                           per speedy-cli. 4 tab: Dashboard / Workspaces /
+                           Scan / Logs. Tray icon di sistema. Autostart
+                           daemon via HKCU\Run (alternativa allo Startup).
 ```
 
 ### Dipendenze fra crate
 
-| Binary           | Dipende da                                  |
-|------------------|---------------------------------------------|
-| `speedy`         | `speedy-core` + tutta la logica pesante     |
-| `speedy-daemon`  | `speedy-core` + tutta la logica pesante     |
-| `speedy-cli`     | solo `speedy-core` (DaemonClient + local_sock) |
-| `speedy-mcp`     | solo `speedy-core` (chiama `SPEEDY_BIN`)    |
+| Binary           | Dipende da                                       |
+|------------------|--------------------------------------------------|
+| `speedy`         | `speedy-core` + tutta la logica pesante          |
+| `speedy-daemon`  | `speedy-core` + tutta la logica pesante          |
+| `speedy-cli`     | solo `speedy-core` (DaemonClient + local_sock)   |
+| `speedy-mcp`     | solo `speedy-core` (chiama `SPEEDY_BIN`)         |
+| `speedy-gui`     | solo `speedy-core` (DaemonClient + types) + egui |
 
 ---
 
@@ -104,6 +116,13 @@ Note operative del daemon:
 - `accept()` ha timeout 1s → può controllare il flag `running` e uscire pulito entro un tick dopo `stop`.
 - `exec` setta `SPEEDY_NO_DAEMON=1` nell'env del child → il worker non rientra mai nel daemon (no fork-bomb).
 - All'avvio, le entry in `workspaces.json` con path inesistente vengono purgate.
+
+> Comandi aggiuntivi a supporto della GUI (`metrics`, `scan`, `reindex`,
+> `workspace-status`, `tail-log`, `subscribe-log`, `query-all`) sono
+> documentati nel dettaglio in [`docs/ipc-protocol.md`](./docs/ipc-protocol.md).
+> Tutti one-shot tranne `subscribe-log`, che è long-lived: il daemon manda
+> `ok\n` come handshake e poi una `LogLine` JSON per ogni evento finché il
+> client non chiude la connessione.
 
 ---
 
@@ -217,6 +236,69 @@ stdout risale fino all'agent come result MCP
 ```
 
 `SPEEDY_BIN` permette di puntare a `speedy.exe` direttamente (bypass daemon) per scenari batch / test.
+
+---
+
+## 5b. Flusso "GUI desktop (`speedy-gui.exe`)"
+
+A differenza di MCP — che è una pipeline `agent → mcp → cli → daemon → speedy` — la GUI **salta lo scalino `speedy-cli.exe`** e parla al daemon direttamente con `speedy-core::DaemonClient`.
+
+```
+Utente lancia speedy-gui.exe
+  │
+  ├─ main thread: TrayHandle::try_new() (Windows/macOS lo vogliono qui)
+  │   └─ eframe::run_native → SpeedyApp::new
+  │        ├─ DaemonBridge::new
+  │        │   ├─ tokio::runtime::Runtime (multi-thread, 2 worker)
+  │        │   └─ Arc<Mutex<DaemonState>>  ← snapshot condivisa
+  │        └─ Carica settings da eframe::Storage (tab, tema, socket)
+  │
+  ├─ A ogni frame (≤500ms, ctx.request_repaint_after):
+  │   ├─ App::update clona DaemonState (Vec/HashMap moderati: cheap)
+  │   ├─ Le view (Dashboard / Workspaces / Scan / Logs) leggono dalla snapshot
+  │   └─ Nessun Mutex held durante il disegno
+  │
+  └─ Utente clicca "Aggiungi workspace":
+       │
+       ├─ rfd::FileDialog::pick_folder (file picker nativo)
+       │
+       ├─ DaemonBridge::add_workspace(path)
+       │   ├─ inc_busy()  (mostra spinner in topbar)
+       │   ├─ runtime.spawn:
+       │   │    ├─ DaemonClient::add_workspace(path)  →  IPC "add <canonical>"
+       │   │    └─ scrive il risultato in DaemonState.last_op_result
+       │   └─ ritorna SUBITO (UI non blocca)
+       │
+       └─ Il frame successivo legge la snapshot:
+            ├─ se ok → toast verde + refresh lista workspace
+            └─ se err → toast rosso con il messaggio del daemon
+```
+
+### Log streaming (tab "Logs")
+
+```
+LogStreamHandle::start
+  ├─ tokio task: DaemonClient::subscribe_log
+  │    ├─ apre la pipe, manda "subscribe-log\n", legge "ok\n"
+  │    └─ poi legge una LogLine JSON per riga → mpsc::UnboundedSender
+  │
+  ├─ ring buffer cap 5000 nel main thread (drain del receiver in update())
+  │
+  └─ Se la pipe muore (daemon riavviato) → riconnessione automatica ogni 2s
+```
+
+Filtri (livelli, substring, target, workspace) operano sul buffer in memoria, niente nuovo IPC.
+
+### Differenze chiave vs MCP
+
+- **Niente subprocess**: la GUI non spawna `speedy-cli`/`speedy.exe`. Tutto passa via `DaemonClient` in-process (più veloce, no overhead di fork per ogni click).
+- **State condiviso**: la GUI vede metriche + status + workspace status aggregati in una `DaemonState`, e li aggiorna in modo asincrono.
+- **Autostart**: la GUI può registrare/deregistrare `speedy-daemon.exe` sotto `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (su macOS: LaunchAgent plist; su Linux: `.desktop` autostart). Funzionalmente equivalente al posizionare il binario nella cartella Startup di Windows, ma reversibile da UI.
+- **Tray + notifiche**: `tray-icon` per quick-actions (Open / Restart / Quit), `notify-rust` per popup di sistema sui livelli `error` del log stream (toggle opt-in).
+
+### Quando il daemon è giù
+
+La GUI rileva il fallimento di `ping` e mostra un banner "Avvia daemon"; il click chiama `spawn_daemon_process` (stessa logica di `ensure_daemon` lato cli: cerca `speedy-daemon{EXE_SUFFIX}` accanto al binario GUI, spawn detached, polling `is_alive` con backoff fino a 10s).
 
 ---
 
