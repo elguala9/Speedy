@@ -40,6 +40,7 @@ accepted for legacy callers that do not need a cwd.
 | `is-workspace <path>` | Whether the canonical path is monitored. | `true` or `false` |
 | `sync <path>` | Incrementally sync the workspace index (spawns `speedy.exe -p <path> sync`). | `ok` or `error: ...` |
 | `metrics` | Cumulative counters since daemon start (queries, indexes, syncs, watcher_events, exec_calls). | JSON object |
+| `query-all\t<top_k>\t<query>` | (v2) Fan-out query across every registered workspace; returns the merged top-K. | JSON array of `{workspace, path, line, text, score}` |
 | `exec <args>` | Run `speedy <args>` and return its stdout. | command output |
 
 ## Examples

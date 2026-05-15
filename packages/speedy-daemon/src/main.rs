@@ -30,7 +30,9 @@ pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire-format version of the IPC protocol. Bump on breaking changes (command
 /// rename, response shape change, new required fields). Clients should refuse
 /// to talk to a daemon whose `protocol_version` is higher than they know about.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 (2026-05-14): added `query-all` for cross-workspace search.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Parser)]
 #[command(name = "speedy-daemon", about = "Speedy Central Daemon")]
@@ -81,6 +83,10 @@ const WATCHER_DEAD_TICKS: u64 = 4;
 /// Warn threshold: 2 ticks ≈ 1 minute without a heartbeat.
 const WATCHER_WARN_TICKS: u64 = 2;
 const HEALTH_TICK_SECS: u64 = 30;
+/// Run `workspace::prune_missing` every Nth health tick. At 30s/tick × 10 ≈ 5
+/// minutes — catches workspaces deleted while the daemon is running without
+/// hammering the file lock.
+const PRUNE_EVERY_N_TICKS: u64 = 10;
 
 struct CentralDaemon {
     pid: u32,
@@ -89,6 +95,12 @@ struct CentralDaemon {
     socket_name: String,
     daemon_dir: PathBuf,
     watchers: Arc<Mutex<HashMap<String, WatcherHandle>>>,
+    /// PIDs of `speedy.exe index` children currently in-flight. Used by
+    /// `stop_all_watchers` to taskkill them on shutdown so we don't leak a
+    /// child still writing to SQLite after the daemon exits. The primary
+    /// defense against the watcher re-firing on our own writes is the ignore
+    /// list on `.speedy/`; this set is kept as defense-in-depth and to make
+    /// shutdown deterministic.
     active_pids: Arc<StdMutex<HashSet<u32>>>,
     metrics: Arc<Metrics>,
     /// Held for the daemon lifetime; OS releases its advisory lock when this
@@ -171,6 +183,14 @@ impl CentralDaemon {
             self.pid, self.socket_name
         );
 
+        spawn_workspaces_json_watcher(
+            self.daemon_dir.clone(),
+            self.watchers.clone(),
+            self.active_pids.clone(),
+            self.metrics.clone(),
+            self.running.clone(),
+        );
+
         let running = self.running.clone();
         let watchers_clone = self.watchers.clone();
         let active_pids_clone = self.active_pids.clone();
@@ -179,6 +199,7 @@ impl CentralDaemon {
         let started = self.started_at;
         let mut health_ticker = tokio::time::interval(std::time::Duration::from_secs(HEALTH_TICK_SECS));
         health_ticker.tick().await;
+        let mut tick_count: u64 = 0;
 
         loop {
             tokio::select! {
@@ -208,6 +229,10 @@ impl CentralDaemon {
                 _ = health_ticker.tick() => {
                     if !running.load(Ordering::SeqCst) { break; }
                     check_watcher_health(&watchers_clone, &active_pids_clone, &metrics_clone).await;
+                    tick_count = tick_count.wrapping_add(1);
+                    if tick_count % PRUNE_EVERY_N_TICKS == 0 {
+                        prune_and_reconcile(&watchers_clone).await;
+                    }
                 }
             }
         }
@@ -366,9 +391,26 @@ async fn check_watcher_health(
     active_pids: &Arc<StdMutex<HashSet<u32>>>,
     metrics: &Arc<Metrics>,
 ) {
+    check_watcher_health_with_thresholds(
+        watchers,
+        active_pids,
+        metrics,
+        WATCHER_WARN_TICKS * HEALTH_TICK_SECS,
+        WATCHER_DEAD_TICKS * HEALTH_TICK_SECS,
+    )
+    .await;
+}
+
+/// Threshold-parameterized core so unit tests can trigger the dead-watcher
+/// restart path without waiting two minutes.
+async fn check_watcher_health_with_thresholds(
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+    active_pids: &Arc<StdMutex<HashSet<u32>>>,
+    metrics: &Arc<Metrics>,
+    warn_after: u64,
+    dead_after: u64,
+) {
     let now = unix_now_secs();
-    let warn_after = WATCHER_WARN_TICKS * HEALTH_TICK_SECS;
-    let dead_after = WATCHER_DEAD_TICKS * HEALTH_TICK_SECS;
 
     // Collect paths that need restarting. We can't restart while holding the
     // lock because start_workspace_watcher allocates a thread and we don't
@@ -406,6 +448,157 @@ async fn check_watcher_health(
         } else {
             warn!("Skipping restart, path missing: {path}");
         }
+    }
+}
+
+/// Reconcile in-memory watchers with `workspaces.json` on disk.
+///
+/// - Adds watchers for paths registered on disk but not in memory.
+/// - Stops watchers for paths in memory but absent from disk.
+/// Returns the number of registered workspaces after reconciliation.
+///
+/// When the daemon itself writes to `workspaces.json` (via `add`/`remove`)
+/// this is invoked by the file-watcher and acts as a no-op because the
+/// in-memory map already matches.
+async fn reload_from_disk(
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+    active_pids: &Arc<StdMutex<HashSet<u32>>>,
+    metrics: &Arc<Metrics>,
+) -> Result<usize> {
+    let registered = workspace::list()?;
+    let mut ws = watchers.lock().await;
+    let registered_paths: std::collections::HashSet<String> =
+        registered.iter().map(|e| e.path.clone()).collect();
+
+    let to_remove: Vec<String> = ws.keys()
+        .filter(|k| !registered_paths.contains(k.as_str()))
+        .cloned()
+        .collect();
+    for path in &to_remove {
+        if let Some(handle) = ws.remove(path) {
+            handle.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    for path in &registered_paths {
+        if !ws.contains_key(path) {
+            let p = Path::new(path);
+            if p.exists() {
+                let handle = start_workspace_watcher(path, active_pids.clone(), metrics.clone());
+                ws.insert(path.clone(), handle);
+            }
+        }
+    }
+
+    Ok(registered_paths.len())
+}
+
+/// Watch `<daemon_dir>/workspaces.json` for changes by external tooling and
+/// trigger a reload. The daemon's own writes also fire this watcher, but
+/// `reload_from_disk` is a no-op when state already matches, so the extra
+/// work is negligible.
+fn spawn_workspaces_json_watcher(
+    daemon_dir: PathBuf,
+    watchers: Arc<Mutex<HashMap<String, WatcherHandle>>>,
+    active_pids: Arc<StdMutex<HashSet<u32>>>,
+    metrics: Arc<Metrics>,
+    running: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Debounce 1s: the daemon writes the file then immediately re-reads it
+        // for `list`; debouncing prevents a thrash on the same logical edit.
+        let mut debouncer = match notify_debouncer_mini::new_debouncer(
+            std::time::Duration::from_secs(1),
+            tx,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("workspaces.json watcher: failed to create debouncer: {e}");
+                return;
+            }
+        };
+
+        // notify can't watch a path that doesn't exist yet, so watch the
+        // parent directory and filter events by filename.
+        if let Err(e) = debouncer.watcher().watch(
+            &daemon_dir,
+            notify::RecursiveMode::NonRecursive,
+        ) {
+            error!("workspaces.json watcher: failed to watch {}: {e}", daemon_dir.display());
+            return;
+        }
+
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!("workspaces.json watcher: failed to build runtime: {e}");
+                return;
+            }
+        };
+
+        while running.load(Ordering::SeqCst) {
+            match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(Ok(events)) => {
+                    let touched = events.iter().any(|e| {
+                        e.path.file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s == "workspaces.json")
+                            .unwrap_or(false)
+                    });
+                    if !touched {
+                        continue;
+                    }
+                    let w = watchers.clone();
+                    let a = active_pids.clone();
+                    let m = metrics.clone();
+                    rt.block_on(async {
+                        match reload_from_disk(&w, &a, &m).await {
+                            Ok(n) => info!("Auto-reload triggered by workspaces.json change: {n} workspaces"),
+                            Err(e) => warn!("Auto-reload failed: {e}"),
+                        }
+                    });
+                }
+                Ok(Err(e)) => error!("workspaces.json watcher error: {e}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+}
+
+/// Drop watchers whose workspace path no longer exists on disk, and prune the
+/// same entries from `workspaces.json`. Runs periodically so stale entries that
+/// appear *after* daemon boot (e.g. user deleted the project dir) get cleaned
+/// up without needing a daemon restart.
+async fn prune_and_reconcile(watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>) {
+    // Drop in-memory watchers whose path is gone first; otherwise the watcher
+    // task keeps trying to observe a missing dir until the next health tick.
+    let dead_paths: Vec<String> = {
+        let ws = watchers.lock().await;
+        ws.keys()
+            .filter(|p| !Path::new(p.as_str()).exists())
+            .cloned()
+            .collect()
+    };
+    if !dead_paths.is_empty() {
+        let mut ws = watchers.lock().await;
+        for path in &dead_paths {
+            if let Some(handle) = ws.remove(path) {
+                handle.stop.store(true, Ordering::SeqCst);
+                info!("Auto-prune: stopped watcher for missing path {path}");
+            }
+        }
+    }
+
+    // Then prune the on-disk registry.
+    match workspace::prune_missing() {
+        Ok(0) => {}
+        Ok(n) => info!("Auto-prune: removed {n} stale workspace entr{}", if n == 1 { "y" } else { "ies" }),
+        Err(e) => warn!("Auto-prune failed: {e}"),
     }
 }
 
@@ -560,36 +753,8 @@ async fn dispatch_command(
         }
 
         "reload" => {
-            match workspace::list() {
-                Ok(registered) => {
-                    let mut ws = watchers.lock().await;
-                    let registered_paths: std::collections::HashSet<String> =
-                        registered.iter().map(|e| e.path.clone()).collect();
-
-                    // Stop watchers for removed workspaces
-                    let to_remove: Vec<String> = ws.keys()
-                        .filter(|k| !registered_paths.contains(k.as_str()))
-                        .cloned()
-                        .collect();
-                    for path in &to_remove {
-                        if let Some(handle) = ws.remove(path) {
-                            handle.stop.store(true, Ordering::SeqCst);
-                        }
-                    }
-
-                    // Start watchers for new workspaces
-                    for path in &registered_paths {
-                        if !ws.contains_key(path) {
-                            let p = Path::new(path);
-                            if p.exists() {
-                                let handle = start_workspace_watcher(path, active_pids.clone(), metrics.clone());
-                                ws.insert(path.clone(), handle);
-                            }
-                        }
-                    }
-
-                    format!("ok: {} workspaces reloaded\n", registered_paths.len())
-                }
+            match reload_from_disk(watchers, active_pids, metrics).await {
+                Ok(n) => format!("ok: {n} workspaces reloaded\n"),
                 Err(e) => format!("error: {e}\n"),
             }
         }
@@ -615,6 +780,13 @@ async fn dispatch_command(
                 Ok(()) => "ok\n".to_string(),
                 Err(e) => format!("error: {e}\n"),
             }
+        }
+
+        _ if line.starts_with("query-all\t") || line.starts_with("query-all ") => {
+            metrics.queries.fetch_add(1, Ordering::Relaxed);
+            let args = &line["query-all".len()..];
+            let resp = handle_query_all(args, watchers).await;
+            format!("{resp}\n")
         }
 
         _ if line.starts_with("sync ") => {
@@ -665,9 +837,26 @@ async fn handle_add(
     }
 
     let mut ws = watchers.lock().await;
-    if !ws.contains_key(&path_str) {
+    let is_new = !ws.contains_key(&path_str);
+    if is_new {
         let handle = start_workspace_watcher(&path_str, active_pids.clone(), metrics.clone());
         ws.insert(path_str.clone(), handle);
+    }
+    drop(ws);
+
+    // Fire-and-forget initial sync: the watcher only picks up *future* changes,
+    // so without this the index is empty until the user runs `sync`/`index`.
+    // We don't await: `add` returns immediately and the indexer runs in the
+    // background. SPEEDY_NO_DAEMON=1 prevents recursion.
+    if is_new && std::env::var_os("SPEEDY_SKIP_INITIAL_SYNC").is_none() {
+        let path_for_sync = path_str.clone();
+        let metrics_clone = metrics.clone();
+        tokio::spawn(async move {
+            metrics_clone.syncs.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = handle_sync(&path_for_sync).await {
+                warn!("Initial sync failed for {path_for_sync}: {e}");
+            }
+        });
     }
 
     Ok(())
@@ -684,6 +873,87 @@ async fn handle_remove(raw_path: &str, watchers: &Arc<Mutex<HashMap<String, Watc
     let _ = workspace::remove(&path_str);
 
     Ok(())
+}
+
+/// Parse `<sep><top_k><sep><query>` where `<sep>` is `\t` (preferred) or a
+/// single space (legacy). Returns `(top_k, query)`. Falls back to top_k=5 if
+/// parsing fails.
+fn parse_query_all_args(args: &str) -> (usize, String) {
+    let trimmed = args.trim_start_matches(['\t', ' ']);
+    let (k_str, q) = match trimmed.split_once(|c: char| c == '\t' || c == ' ') {
+        Some((k, q)) => (k, q.to_string()),
+        None => return (5, trimmed.to_string()),
+    };
+    let k = k_str.trim().parse().unwrap_or(5);
+    (k, q)
+}
+
+/// Fan out a query to every registered workspace, aggregate results, and
+/// return the top-K by score as a JSON array. Each item gains a `workspace`
+/// field pointing at the source path so callers can tell hits apart.
+async fn handle_query_all(
+    args: &str,
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+) -> String {
+    let (top_k, query) = parse_query_all_args(args);
+    if query.is_empty() {
+        return r#"{"error":"empty query"}"#.to_string();
+    }
+    let paths: Vec<String> = {
+        let ws = watchers.lock().await;
+        ws.keys().cloned().collect()
+    };
+    if paths.is_empty() {
+        return "[]".to_string();
+    }
+
+    let exe = find_speedy_exe();
+    let k_str = top_k.to_string();
+
+    let mut tasks = Vec::with_capacity(paths.len());
+    for ws_path in paths {
+        let exe = exe.clone();
+        let q = query.clone();
+        let k = k_str.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut cmd = tokio::process::Command::new(&exe);
+            cmd.args(["-p", &ws_path, "query", &q, "-k", &k, "--json"])
+                .env("SPEEDY_NO_DAEMON", "1");
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let output = match cmd.output().await {
+                Ok(o) => o,
+                Err(_) => return (ws_path, Vec::new()),
+            };
+            if !output.status.success() {
+                return (ws_path, Vec::new());
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let parsed: Vec<serde_json::Value> = serde_json::from_str(stdout.trim()).unwrap_or_default();
+            (ws_path, parsed)
+        }));
+    }
+
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+    for t in tasks {
+        if let Ok((ws_path, items)) = t.await {
+            for mut item in items {
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("workspace".to_string(), serde_json::Value::String(ws_path.clone()));
+                }
+                merged.push(item);
+            }
+        }
+    }
+
+    merged.sort_by(|a, b| {
+        let sa = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let sb = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged.truncate(top_k);
+
+    serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
 async fn handle_sync(raw_path: &str) -> Result<()> {
@@ -803,6 +1073,47 @@ mod tests {
         assert_eq!(snap["queries"], 7);
         assert_eq!(snap["syncs"], 3);
         assert_eq!(snap["indexes"], 0);
+    }
+
+    #[test]
+    fn test_parse_query_all_args_tab_separated() {
+        let (k, q) = parse_query_all_args("\t10\thello world");
+        assert_eq!(k, 10);
+        assert_eq!(q, "hello world");
+    }
+
+    #[test]
+    fn test_parse_query_all_args_space_legacy() {
+        // Legacy form `query-all 5 some query` — single-space separator.
+        let (k, q) = parse_query_all_args(" 5 some query");
+        assert_eq!(k, 5);
+        assert_eq!(q, "some query");
+    }
+
+    #[test]
+    fn test_parse_query_all_args_fallback_top_k() {
+        // Unparseable top_k → fall back to 5, query is the rest.
+        let (k, q) = parse_query_all_args("\tnotanum\trest");
+        assert_eq!(k, 5);
+        assert_eq!(q, "rest");
+    }
+
+    #[test]
+    fn test_parse_query_all_args_query_with_internal_spaces() {
+        let (k, q) = parse_query_all_args("\t3\tauth flow login redirect");
+        assert_eq!(k, 3);
+        assert_eq!(q, "auth flow login redirect");
+    }
+
+    #[test]
+    fn test_protocol_version_matches_supported() {
+        // If this fires, the client's SUPPORTED_PROTOCOL_VERSION wasn't bumped
+        // in lockstep — that drift is exactly what causes silent compat bugs.
+        assert_eq!(
+            PROTOCOL_VERSION,
+            speedy_core::daemon_client::SUPPORTED_PROTOCOL_VERSION,
+            "PROTOCOL_VERSION and SUPPORTED_PROTOCOL_VERSION must move together"
+        );
     }
 
     static SOCKET_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1501,5 +1812,242 @@ mod tests {
         assert!(has_c, "C should now be watched");
         assert!(!has_b, "B should not be watched anymore");
         drop(guard);
+    }
+
+    // ── socket race ────────────────────────────────────────
+
+    /// Two real `speedy-daemon` subprocesses fired simultaneously against the
+    /// same socket name AND the same daemon_dir. The `acquire_daemon_lock`
+    /// advisory lock must let exactly one through; the loser must exit with a
+    /// non-zero status. We run actual subprocesses (not in-process daemons)
+    /// because `kill_existing_daemon` reads `daemon.pid` and would taskkill
+    /// the test binary itself if two daemons shared this process's PID.
+    #[test]
+    fn test_socket_race_only_one_daemon_wins() {
+        let _lock = acquire_lock();
+
+        // Locate the built `speedy-daemon` binary — same logic as
+        // find_daemon_exe in production code.
+        let suffix = std::env::consts::EXE_SUFFIX;
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().unwrap();
+        let direct = dir.join(format!("speedy-daemon{suffix}"));
+        let daemon_bin = if direct.exists() {
+            direct
+        } else if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
+            dir.parent().unwrap().join(format!("speedy-daemon{suffix}"))
+        } else {
+            eprintln!("skipping test_socket_race: speedy-daemon binary not found");
+            return;
+        };
+        if !daemon_bin.exists() {
+            eprintln!("skipping test_socket_race: {} missing — build with `cargo build -p speedy-daemon`", daemon_bin.display());
+            return;
+        }
+
+        let socket = test_socket_name("race");
+        let race_dir = std::env::temp_dir().join(format!(
+            "speedy_d_race_{}_{}",
+            std::process::id(),
+            SOCKET_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&race_dir);
+        std::fs::create_dir_all(&race_dir).unwrap();
+        let daemon_dir = race_dir.join(".speedy-daemon");
+
+        let spawn_one = || {
+            let mut cmd = std::process::Command::new(&daemon_bin);
+            cmd.args(["--daemon-socket", &socket])
+                .arg("--daemon-dir").arg(&daemon_dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            cmd.spawn().expect("spawn daemon child")
+        };
+
+        // Fire both spawns as close together as possible. They'll race
+        // acquire_daemon_lock + the socket bind.
+        let mut a = spawn_one();
+        let mut b = spawn_one();
+
+        // Wait long enough that the loser has surrendered (lock contention
+        // surfaces in well under a second; bind contention not much longer).
+        std::thread::sleep(Duration::from_secs(3));
+
+        let a_exit = a.try_wait().expect("try_wait a");
+        let b_exit = b.try_wait().expect("try_wait b");
+
+        // Exactly one of them must still be running (the winner, holding the
+        // listener) while the other must have exited on its own with a
+        // failure. Anything else means the lock or bind didn't serialize the
+        // race correctly.
+        let a_alive = a_exit.is_none();
+        let b_alive = b_exit.is_none();
+        let alive_count = (a_alive as usize) + (b_alive as usize);
+        assert_eq!(
+            alive_count, 1,
+            "exactly one daemon should win the race; a_exit={a_exit:?} b_exit={b_exit:?}"
+        );
+
+        // The loser must have exited non-success.
+        let loser_status = if a_alive { b_exit.unwrap() } else { a_exit.unwrap() };
+        assert!(
+            !loser_status.success(),
+            "the losing daemon should exit with failure, got: {loser_status:?}"
+        );
+
+        // The winner is still listening — verify and stop it.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let alive = rt.block_on(async {
+            let client = speedy_core::daemon_client::DaemonClient::new(&socket);
+            client.is_alive().await
+        });
+        assert!(alive, "the winning daemon should be reachable on the socket");
+
+        // Stop the winner cleanly via IPC; fall back to kill on timeout.
+        rt.block_on(async {
+            let client = speedy_core::daemon_client::DaemonClient::new(&socket);
+            let _ = client.stop().await;
+        });
+        if a_alive {
+            let _ = a.kill();
+            let _ = a.wait();
+        } else {
+            let _ = b.kill();
+            let _ = b.wait();
+        }
+
+        let _ = std::fs::remove_dir_all(&race_dir);
+    }
+
+    // ── canonicalize / UNC path ────────────────────────────
+
+    /// On Windows `Path::canonicalize` returns `\\?\C:\...`. `is-workspace`
+    /// canonicalizes both sides before comparing, so a workspace registered
+    /// via one form must still match a lookup via the other. This test guards
+    /// against regressions where we'd compare raw strings.
+    #[tokio::test]
+    async fn test_is_workspace_matches_across_unc_prefix() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_unc_match");
+        let ws = guard.dir.canonicalize().unwrap();
+        let ws_str = ws.to_string_lossy().to_string();
+        guard.client.add_workspace(&ws_str).await.unwrap();
+
+        // On Windows ws_str is already `\\?\…`. Try a stripped-prefix variant.
+        #[cfg(windows)]
+        {
+            let stripped = ws_str.trim_start_matches(r"\\?\").to_string();
+            if stripped != ws_str {
+                assert!(
+                    guard.client.is_workspace(&stripped).await.unwrap(),
+                    "stripped-UNC path {stripped} should still match registered {ws_str}"
+                );
+            }
+            // And re-prefixing a non-prefixed form must also match.
+            let reprefixed = format!(r"\\?\{stripped}");
+            assert!(
+                guard.client.is_workspace(&reprefixed).await.unwrap(),
+                "re-prefixed UNC path {reprefixed} should match registered {ws_str}"
+            );
+        }
+        // Non-Windows: canonicalize is no-op for UNC; just confirm match.
+        #[cfg(not(windows))]
+        {
+            assert!(guard.client.is_workspace(&ws_str).await.unwrap());
+        }
+        drop(guard);
+    }
+
+    // ── health check: dead-watcher restart ─────────────────
+
+    /// Drop a workspace's heartbeat below the threshold by stopping the
+    /// watcher thread; `check_watcher_health_with_thresholds` must move it to
+    /// `to_restart` and spin a fresh watcher with a current heartbeat.
+    #[tokio::test]
+    async fn test_health_check_restarts_dead_watcher() {
+        let _lock = acquire_lock();
+        let guard = start_daemon("test_health_restart");
+        let ws_path = guard.dir.to_string_lossy().to_string();
+        guard.client.add_workspace(&ws_path).await.unwrap();
+
+        // Reach into the daemon's watcher map via a parallel registration on
+        // the same daemon-dir — we already added the workspace, so we just
+        // need the watchers Arc. The cleanest path here is to call the inner
+        // helper directly with our own freshly-built map mimicking the daemon
+        // state. That keeps the test off the public IPC and focused.
+        let watchers: Arc<Mutex<HashMap<String, WatcherHandle>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let metrics = Arc::new(Metrics::default());
+
+        // Insert a watcher and immediately stop it so its heartbeat freezes.
+        let canonical = std::path::Path::new(&ws_path)
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let handle = start_workspace_watcher(&canonical, active_pids.clone(), metrics.clone());
+        handle.stop.store(true, Ordering::SeqCst);
+        // Force the heartbeat to be old enough to trigger restart.
+        handle.last_heartbeat.store(unix_now_secs().saturating_sub(120), Ordering::Relaxed);
+        watchers.lock().await.insert(canonical.clone(), handle);
+
+        // Thresholds: dead after 5s. Heartbeat is 120s old → restart triggers.
+        check_watcher_health_with_thresholds(
+            &watchers,
+            &active_pids,
+            &metrics,
+            /*warn_after*/ 2,
+            /*dead_after*/ 5,
+        )
+        .await;
+
+        // After restart, the heartbeat must be fresh again (within last 10s).
+        let map = watchers.lock().await;
+        let h = map.get(&canonical).expect("watcher should still be present after restart");
+        let last = h.last_heartbeat.load(Ordering::Relaxed);
+        let now = unix_now_secs();
+        assert!(
+            now.saturating_sub(last) < 10,
+            "after restart heartbeat should be recent: last={last}, now={now}"
+        );
+
+        // Clean up: stop the new watcher.
+        h.stop.store(true, Ordering::SeqCst);
+        drop(guard);
+    }
+
+    // ── graceful shutdown with in-flight child ─────────────
+
+    /// `stop_all_watchers` must always leave `active_pids` empty, even when
+    /// the PIDs in the set are bogus / already-exited. This protects the
+    /// invariant that after shutdown we don't hold references to dead PIDs
+    /// that could later get recycled and accidentally taskkill'd.
+    #[tokio::test]
+    async fn test_stop_all_watchers_clears_inflight_pids() {
+        let watchers: Arc<Mutex<HashMap<String, WatcherHandle>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+
+        // Seed a few bogus PIDs — taskkill on Windows will return non-zero but
+        // we swallow the status; the test cares about state, not exit codes.
+        {
+            let mut p = active_pids.lock().unwrap();
+            p.insert(0xDEAD_BEEFu32);
+            p.insert(0xCAFE_F00Du32);
+        }
+
+        stop_all_watchers(&watchers, &active_pids).await;
+
+        let p = active_pids.lock().unwrap();
+        assert!(p.is_empty(), "active_pids must be cleared after shutdown, still has: {p:?}");
+
+        let ws = watchers.lock().await;
+        assert!(ws.is_empty(), "watcher map must be cleared after shutdown");
     }
 }
