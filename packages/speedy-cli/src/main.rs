@@ -35,11 +35,15 @@ enum Commands {
         query: String,
         #[arg(short = 'k', long = "top-k", default_value = "5")]
         top_k: usize,
+        #[arg(long = "all", help = "Query across all registered workspaces and aggregate top-K")]
+        all: bool,
     },
     #[command(about = "Show project context summary")]
     Context,
     #[command(about = "Sync filesystem changes to the database incrementally")]
     Sync,
+    #[command(about = "Drop and rebuild every chunk's embedding (use after changing SPEEDY_MODEL)")]
+    Reembed,
     #[command(about = "Force reindex of a workspace")]
     Force {
         #[arg(short = 'p', help = "Workspace path (default: current dir)")]
@@ -500,10 +504,34 @@ async fn async_main(cli: Cli) -> Result<()> {
             let resp = send_raw_cmd(&socket, &exec_cmd(&["index", subdir])).await?;
             println!("{resp}");
         }
-        Some(Commands::Query { query, top_k }) => {
-            let k = top_k.to_string();
-            let resp = send_raw_cmd(&socket, &exec_cmd(&["query", query, "-k", &k])).await?;
-            println!("{resp}");
+        Some(Commands::Query { query, top_k, all }) => {
+            if *all {
+                let aggregated = client.query_all(query, *top_k).await?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&aggregated)?);
+                } else if let Some(items) = aggregated.as_array() {
+                    if items.is_empty() {
+                        println!("No matches across registered workspaces.");
+                    } else {
+                        for item in items {
+                            let score = item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let path = item.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+                            let line = item.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let ws = item.get("workspace").and_then(|v| v.as_str()).unwrap_or("?");
+                            let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            println!("[score={score:.4}] [{ws}] {path}:{line}");
+                            println!("  {text}");
+                            println!();
+                        }
+                    }
+                } else {
+                    println!("{aggregated}");
+                }
+            } else {
+                let k = top_k.to_string();
+                let resp = send_raw_cmd(&socket, &exec_cmd(&["query", query, "-k", &k])).await?;
+                println!("{resp}");
+            }
         }
         Some(Commands::Context) => {
             let resp = send_raw_cmd(&socket, &exec_cmd(&["context"])).await?;
@@ -511,6 +539,10 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Some(Commands::Sync) => {
             let resp = send_raw_cmd(&socket, &exec_cmd(&["sync"])).await?;
+            println!("{resp}");
+        }
+        Some(Commands::Reembed) => {
+            let resp = send_raw_cmd(&socket, &exec_cmd(&["reembed"])).await?;
             println!("{resp}");
         }
         Some(Commands::Force { path }) => {
@@ -533,7 +565,9 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
             DaemonAction::List => {
                 let list = client.get_all_workspaces().await?;
-                if list.is_empty() {
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&list)?);
+                } else if list.is_empty() {
                     println!("No daemon workspaces.");
                 } else {
                     for ws in &list {
@@ -543,17 +577,28 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
             DaemonAction::Stop => {
                 client.stop().await?;
-                println!("Daemon stopped.");
+                if cli.json {
+                    println!("{}", serde_json::json!({ "stopped": true }));
+                } else {
+                    println!("Daemon stopped.");
+                }
             }
             DaemonAction::Ping => {
                 let resp = client.ping().await?;
-                println!("{resp}");
+                if cli.json {
+                    println!("{}", serde_json::json!({ "response": resp }));
+                } else {
+                    println!("{resp}");
+                }
             }
         },
         Some(Commands::Workspace { action }) => match action {
             WorkspaceAction::List => {
                 let workspaces = speedy_core::workspace::list()?;
-                if workspaces.is_empty() {
+                if cli.json {
+                    let paths: Vec<&String> = workspaces.iter().map(|w| &w.path).collect();
+                    println!("{}", serde_json::to_string_pretty(&paths)?);
+                } else if workspaces.is_empty() {
                     println!("No workspaces found.");
                 } else {
                     for ws in &workspaces {
@@ -563,11 +608,19 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
             WorkspaceAction::Add { path } => {
                 client.add_workspace(path).await?;
-                println!("Workspace added: {path}");
+                if cli.json {
+                    println!("{}", serde_json::json!({ "added": true, "path": path }));
+                } else {
+                    println!("Workspace added: {path}");
+                }
             }
             WorkspaceAction::Remove { path } => {
                 client.remove_workspace(path).await?;
-                println!("Workspace removed: {path}");
+                if cli.json {
+                    println!("{}", serde_json::json!({ "removed": true, "path": path }));
+                } else {
+                    println!("Workspace removed: {path}");
+                }
             }
         },
         None => {
