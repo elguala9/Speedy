@@ -316,5 +316,27 @@ $ speedy index .
 
 ## 11. Punti dove potrei aver capito male — da verificare
 
-- **PID-tracking lato watcher**: oggi il PID-set serve solo per `taskkill` allo shutdown (`packages/speedy-daemon/src/main.rs:368`). La difesa contro self-write è l'ignore di `.speedy/` + il fatto che il worker non scrive nei sorgenti. Da decidere se il PID-set rimane utile o si elimina.
-- **Sync iniziale su `add`**: da confermare se il daemon fa `sync_all` subito dopo `add`, o se lascia il primo sync al watcher / al primo `exec`.
+- **PID-tracking lato watcher**: il PID-set serve per `taskkill` allo shutdown (`packages/speedy-daemon/src/main.rs`, campo `CentralDaemon.active_pids`). **Decisione 2026-05-14**: si mantiene come *defense-in-depth*. La protezione principale contro self-write resta l'ignore di `.speedy/`, ma `active_pids` permette uno shutdown deterministico (zero indexer orfani) anche se domani il worker dovesse iniziare a scrivere file di stato fuori da `.speedy/`. Il costo è minimo (un `HashSet<u32>` per processo).
+- **Sync iniziale su `add` — risolto 2026-05-15**: `handle_add` ora fa fire-and-forget di `handle_sync` solo per i workspace nuovi (esistenti già su disco ma non ancora gestiti). L'awaiter del client torna `ok` subito, lo spawn di `speedy.exe sync` corre in background con `SPEEDY_NO_DAEMON=1`. Override per test: `SPEEDY_SKIP_INITIAL_SYNC=1`.
+
+---
+
+## 12. Auto-reload e periodic prune (aggiunti 2026-05-15)
+
+Il daemon mantiene la coerenza con la fonte di verità (`workspaces.json`) in due modi indipendenti:
+
+1. **File watcher su `workspaces.json`**: `spawn_workspaces_json_watcher` osserva la `daemon_dir` con `notify_debouncer_mini` (debounce 1s). Qualsiasi modifica al file (anche da tool esterni che non passano dal daemon) triggera `reload_from_disk`, che riconcilia in-memory ↔ disk. Quando è il daemon stesso a scrivere `workspaces.json`, l'evento di notify lo fa rientrare nel reload — ma `reload_from_disk` è no-op se gli `HashSet<String>` di disk-paths e in-memory-paths sono uguali.
+2. **Tick periodico (`PRUNE_EVERY_N_TICKS = 10`, ≈5 min)**: `prune_and_reconcile` rimuove i watcher i cui path non esistono più su disco e poi chiama `workspace::prune_missing` per allineare anche il file di registro. Cattura il caso "ho cancellato la cartella mentre il daemon era attivo".
+
+---
+
+## 13. Query cross-workspace (aggiunto 2026-05-15, protocol v2)
+
+Comando IPC `query-all\t<top_k>\t<query>` → ritorna JSON-array di hit aggregati. Il daemon fa fan-out parallelo (`tokio::spawn` per ogni workspace registrato) eseguendo `speedy.exe -p <ws> query <q> -k <K> --json` con `SPEEDY_NO_DAEMON=1`, deserializza ciascuna risposta in `Vec<serde_json::Value>`, aggiunge il campo `workspace` a ogni hit, fonde tutto, ordina per score discendente e taglia a top_k.
+
+CLI utente: `speedy-cli query --all <q>` (oppure direttamente via `DaemonClient::query_all`).
+
+Note operative:
+- Il fan-out non condivide il file lock di `workspaces.json` (per-workspace `vectors.db` sono indipendenti).
+- Se un workspace fallisce (Ollama giù, DB corrotto), restituisce array vuoto e gli altri proseguono.
+- `protocol_version` salito a 2; client più vecchi che vanno via `cmd("query-all …")` ricevono `error: unknown command`.
