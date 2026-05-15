@@ -41,6 +41,24 @@ impl Indexer {
             .to_string();
         let db: Arc<dyn VectorStore> = SqliteVectorStore::new(&root).await
             .context("failed to initialize vector database")?;
+
+        // Auto-create .speedyignore if missing: merge .gitignore (if present) + default patterns
+        let speedyignore = Path::new(&root).join(".speedyignore");
+        if !speedyignore.exists() {
+            let mut content = String::new();
+            let gitignore = Path::new(&root).join(".gitignore");
+            if gitignore.exists() {
+                if let Ok(text) = std::fs::read_to_string(&gitignore) {
+                    content.push_str(&text);
+                    if !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                }
+            }
+            content.push_str(speedy_core::default_ignores::RAW);
+            let _ = std::fs::write(&speedyignore, content);
+        }
+
         let embedder = embed::create_provider(config);
 
         // Compatibility check: warn if the DB was built with a different model
