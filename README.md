@@ -379,6 +379,7 @@ Cargo.toml (workspace)
     ├── speedy-daemon/       # bin = speedy-daemon.exe (central daemon)
     ├── speedy-cli/          # bin = speedy-cli.exe (thin client)
     ├── speedy-mcp/          # bin = speedy-mcp.exe (MCP server)
+    ├── speedy-gui/          # bin = speedy-gui.exe (egui desktop app)
     └── testexe/             # internal test fixture
 ```
 

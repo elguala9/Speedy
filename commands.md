@@ -84,15 +84,25 @@ Nessun flag CLI. Lanciato senza argomenti, apre la finestra egui.
 | Tab          | Cosa fa                                                                |
 |--------------|------------------------------------------------------------------------|
 | Dashboard    | Stato daemon (pid/uptime/version), metrics cumulativi, restart/reload/stop, toggle notifiche di sistema su `error` |
-| Workspaces   | Lista + add via file picker nativo + Index/Sync/Open folder/Rimuovi per workspace |
+| Workspaces   | Lista + add via file picker nativo + Index/Sync/Open folder/Rimuovi per workspace + pulsante "Pulisci orfani" (IPC `prune-missing`) |
 | Scan         | Walk di un root path alla ricerca di `.speedy/index.sqlite` esistenti, registra in batch quelli selezionati |
 | Logs         | Tail live (`subscribe-log` IPC) o vista storica di un file `daemon.log.*`, filtri per livello/substring/target/workspace, export JSON/JSONL |
+
+La Dashboard espone anche un campo "Eseguibile daemon" (con `Sfoglia…` /
+`Applica` / `Ripristina automatico`) per forzare il path di
+`speedy-daemon` quando l'auto-detect accanto al binario GUI non basta —
+utile in dev / install custom.
 
 Tray icon di sistema (verde = daemon alive, rosso = down) con menu
 **Open Speedy / Restart daemon / Quit**.
 
+L'autostart al login non è gestito dalla GUI: posizionare manualmente
+`speedy-daemon.exe` (o un suo shortcut) nella cartella Startup di Windows
+(o equivalenti su macOS/Linux). Vedi README.
+
 Settings persistenti via `eframe::Storage`: tab selezionato, tema
-chiaro/scuro, socket name, toggle notifiche.
+chiaro/scuro, socket name, toggle notifiche di sistema su `error`,
+path override del daemon.
 
 ---
 

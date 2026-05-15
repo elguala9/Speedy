@@ -29,12 +29,13 @@ accepted for legacy callers that do not need a cwd.
 | Command | Description | Response |
 |---------|-------------|----------|
 | `ping` | Health check. | `pong` |
-| `status` | Daemon status, as JSON. | `{"pid":..., "uptime_secs":..., "workspace_count":..., "watcher_count":..., "version":..., "protocol_version":1}` |
+| `status` | Daemon status, as JSON. | `{"pid":..., "uptime_secs":..., "workspace_count":..., "watcher_count":..., "version":..., "protocol_version":2}` |
 | `list` | Monitored workspace paths, as JSON array. | `["/path/1", "/path/2"]` |
 | `watch-count` | Number of active watchers. | `3` |
 | `daemon-pid` | Daemon process ID. | `12345` |
 | `stop` | Graceful shutdown. | `ok` |
 | `reload` | Reload workspaces from disk, sync watchers. | `ok: N workspaces reloaded` |
+| `prune-missing` | (v2) Drop watchers + registry entries whose path no longer exists on disk. | JSON `{"removed": N, "paths": ["…"]}` |
 | `add <path>` | Register a workspace and start a watcher. | `ok` or `error: ...` |
 | `remove <path>` | Stop the watcher and unregister the workspace. | `ok` or `error: ...` |
 | `is-workspace <path>` | Whether the canonical path is monitored. | `true` or `false` |
@@ -61,7 +62,7 @@ accepted for legacy callers that do not need a cwd.
 
 ```
 > status
-< {"pid":4582,"uptime_secs":1287,"workspace_count":2,"watcher_count":2,"version":"0.1.0"}
+< {"pid":4582,"uptime_secs":1287,"workspace_count":2,"watcher_count":2,"version":"0.1.0","protocol_version":2}
 ```
 
 ### Add a workspace with a space in the path
