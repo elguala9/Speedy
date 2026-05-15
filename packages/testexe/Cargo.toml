@@ -3,5 +3,14 @@ name = "testexe"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "testexe"
+path = "src/main.rs"
+
+[[bin]]
+name = "workspace-fixture"
+path = "src/workspace_fixture.rs"
+
 [dependencies]
 reqwest = { version = "0.12", features = ["blocking"] }
+speedy-core = { path = "../speedy-core" }
