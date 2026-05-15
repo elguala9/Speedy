@@ -7,8 +7,8 @@ use speedy_core::types::LogLine;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const SETTINGS_KEY: &str = "speedy-gui.settings";
+const DEFAULT_REFRESH_SECS: u64 = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedSettings {
@@ -19,7 +19,12 @@ struct PersistedSettings {
     /// Override for `speedy-daemon` location. `None` = auto-detect next to GUI.
     #[serde(default)]
     daemon_exe_path: Option<String>,
+    /// Auto-refresh interval in seconds (default 2).
+    #[serde(default = "default_refresh_secs")]
+    refresh_interval_secs: u64,
 }
+
+fn default_refresh_secs() -> u64 { DEFAULT_REFRESH_SECS }
 
 impl Default for PersistedSettings {
     fn default() -> Self {
@@ -29,6 +34,7 @@ impl Default for PersistedSettings {
             socket_name: speedy_core::daemon_util::default_daemon_socket_name(),
             notify_on_error: false,
             daemon_exe_path: None,
+            refresh_interval_secs: DEFAULT_REFRESH_SECS,
         }
     }
 }
@@ -38,6 +44,7 @@ pub struct SpeedyApp {
     current_tab: Tab,
     dark_mode: bool,
     pub notify_on_error: bool,
+    refresh_interval: Duration,
     dashboard_view: views::dashboard::DashboardView,
     workspaces_view: views::workspaces::WorkspacesView,
     scan_view: views::scan::ScanView,
@@ -66,11 +73,13 @@ impl SpeedyApp {
             bridge.set_daemon_exe_override(Some(std::path::PathBuf::from(p)));
         }
         bridge.refresh_all();
+        let refresh_interval = Duration::from_secs(settings.refresh_interval_secs.max(1));
         Self {
             bridge,
             current_tab: settings.current_tab,
             dark_mode: settings.dark_mode,
             notify_on_error: settings.notify_on_error,
+            refresh_interval,
             dashboard_view: Default::default(),
             workspaces_view: Default::default(),
             scan_view: Default::default(),
@@ -128,7 +137,7 @@ impl SpeedyApp {
 
 impl App for SpeedyApp {
     fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
-        if self.last_auto_refresh.elapsed() >= REFRESH_INTERVAL {
+        if self.last_auto_refresh.elapsed() >= self.refresh_interval {
             self.bridge.refresh_all();
             self.last_auto_refresh = Instant::now();
         }
@@ -206,6 +215,7 @@ impl App for SpeedyApp {
                 &self.bridge,
                 &state_snapshot,
                 &mut self.notify_on_error,
+                &mut self.refresh_interval,
             ),
             Tab::Workspaces => {
                 self.workspaces_view.render(ui, &self.bridge, &state_snapshot)
@@ -225,6 +235,7 @@ impl App for SpeedyApp {
                 .bridge
                 .daemon_exe_override()
                 .map(|p| p.to_string_lossy().into_owned()),
+            refresh_interval_secs: self.refresh_interval.as_secs().max(1),
         };
         eframe::set_value(storage, SETTINGS_KEY, &s);
     }
