@@ -21,7 +21,7 @@ exec\t<cwd>\t<arg1>\t<arg2>...
 ```
 
 `<cwd>` (which may be empty to skip the chdir) sets the working directory
-that `speedy` will run in. The whitespace form `exec <args>` is still
+that `speedy-ai-context` will run in. The whitespace form `exec <args>` is still
 accepted for legacy callers that do not need a cwd.
 
 ## Commands
@@ -39,11 +39,11 @@ accepted for legacy callers that do not need a cwd.
 | `add <path>` | Register a workspace and start a watcher. | `ok` or `error: ...` |
 | `remove <path>` | Stop the watcher and unregister the workspace. | `ok` or `error: ...` |
 | `is-workspace <path>` | Whether the canonical path is monitored. | `true` or `false` |
-| `sync <path>` | Incrementally sync the workspace index (spawns `speedy.exe -p <path> sync`). | `ok` or `error: ...` |
+| `sync <path>` | Incrementally sync the workspace index (spawns `speedy-ai-context.exe -p <path> sync`). | `ok` or `error: ...` |
 | `metrics` | Cumulative counters since daemon start (queries, indexes, syncs, watcher_events, exec_calls). | JSON object |
 | `query-all\t<top_k>\t<query>` | (v2) Fan-out query across every registered workspace; returns the merged top-K. | JSON array of `{workspace, path, line, text, score}` |
-| `exec <args>` | Run `speedy <args>` and return its stdout. | command output |
-| `reindex <path>` | (v2) Force a clean re-index of the workspace at `<path>` (runs `speedy index .` in that cwd). | stdout of the indexer, or `error: ...` |
+| `exec <args>` | Run `speedy-ai-context <args>` and return its stdout. | command output |
+| `reindex <path>` | (v2) Force a clean re-index of the workspace at `<path>` (runs `speedy-ai-context index .` in that cwd). | stdout of the indexer, or `error: ...` |
 | `workspace-status <path>` | (v2) Per-workspace runtime info: watcher alive, last event, last sync, db size. | JSON `WorkspaceStatus` |
 | `scan\t<root>[\t<max_depth>]` | (v2) Walk `<root>` looking for `.speedy/index.sqlite` directories. Skips `target`, `.git`, `node_modules`, etc. `max_depth` defaults to 8. | JSON array of `ScanResult` |
 | `tail-log [n]` | (v2) Snapshot of the last `n` (default 200) lines from the current daemon log file, parsed back into `LogLine`. | JSON array of `LogLine` |
@@ -95,7 +95,7 @@ The CLI converts argv into the tab-separated form before sending:
 
 - The daemon listens with a 1-second timeout on `accept()` so it can poll
   `running` and exit cleanly within the same tick after `stop`.
-- `exec` runs `speedy.exe` with `SPEEDY_NO_DAEMON=1` so the child never
+- `exec` runs `speedy-ai-context.exe` with `SPEEDY_NO_DAEMON=1` so the child never
   re-enters the daemon and we cannot fork-bomb the workspace.
 - On boot, entries in `workspaces.json` whose path no longer exists are
   pruned automatically.

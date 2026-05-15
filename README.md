@@ -29,7 +29,7 @@ Speedy indexes your codebase into a SQLite vector database, watches for file cha
 │       │                                                     │
 │       │ spawn subprocess                                    │
 │       ▼                                                     │
-│  speedy.exe              ← the worker                       │
+│  speedy-ai-context.exe              ← the worker                       │
 │   • indexing, query, embedding, SQLite, chunking            │
 │   • can also run standalone (no daemon needed)              │
 └─────────────────────────────────────────────────────────────┘
@@ -37,7 +37,7 @@ Speedy indexes your codebase into a SQLite vector database, watches for file cha
 
 - **One daemon for everything.** Never one daemon per workspace. The same `speedy-daemon.exe` watches all your projects and survives across CLI invocations.
 - **Persistent memory.** The daemon's workspace registry lives in `workspaces.json` under your config dir. On reboot, the daemon reads it back and restarts every watcher.
-- **Worker is autonomous.** `speedy.exe` can run on its own — the daemon just orchestrates it for live updates.
+- **Worker is autonomous.** `speedy-ai-context.exe` can run on its own — the daemon just orchestrates it for live updates.
 
 ## Download
 
@@ -45,7 +45,7 @@ Pre-built binaries are available on the [Releases page](https://github.com/elgua
 
 | Binary              | Role                                      |
 |---------------------|-------------------------------------------|
-| `speedy.exe`        | Worker — indexing, query, embedding       |
+| `speedy-ai-context.exe`        | Worker — indexing, query, embedding       |
 | `speedy-daemon.exe` | Single global daemon + file watcher       |
 | `speedy-cli.exe`    | Thin client (what AI agents / scripts call) |
 | `speedy-mcp.exe`    | MCP server for AI coding agents           |
@@ -62,7 +62,7 @@ ollama pull all-minilm:l6-v2
 
 # 3. Build all 5 binaries in one shot
 cargo build-all
-# (alias for: cargo build --release -p speedy -p speedy-daemon \
+# (alias for: cargo build --release -p speedy-ai-context -p speedy-daemon \
 #                            -p speedy-cli -p speedy-mcp -p speedy-gui)
 ```
 
@@ -83,14 +83,14 @@ the four front-end binaries into it:
 
 ```
 C:\Program Files\Speedy\
-├── speedy.exe          ← worker (also usable standalone)
-├── speedy-cli.exe      ← thin client for scripts / MCP
-├── speedy-mcp.exe      ← MCP server for AI coding agents
-└── speedy-gui.exe      ← desktop GUI
+├── speedy-ai-context.exe  ← worker (also usable standalone)
+├── speedy-cli.exe         ← thin client for scripts / MCP
+├── speedy-mcp.exe         ← MCP server for AI coding agents
+└── speedy-gui.exe         ← desktop GUI
 ```
 
 Adding this folder to your **`PATH`** is *recommended but not required*. With
-it on `PATH` you can type `speedy query …` and `speedy-cli daemon status`
+it on `PATH` you can type `speedy-ai-context query …` and `speedy-cli daemon status`
 from any shell, and MCP clients can reference `speedy-mcp` without a full
 path. To add it permanently (PowerShell, current user only):
 
@@ -138,7 +138,7 @@ other commands talk to it transparently.
 # and keeps the index up to date in the background.
 speedy-cli workspace add C:\path\to\project
 
-# Index it (the daemon dispatches to speedy.exe under the hood)
+# Index it (the daemon dispatches to speedy-ai-context.exe under the hood)
 speedy-cli index
 
 # Query
@@ -155,11 +155,11 @@ tab — same operations, with live tail of the daemon logs.
 
 ### Standalone (no daemon)
 
-If you don't want a background process at all, `speedy.exe` works on its own:
+If you don't want a background process at all, `speedy-ai-context.exe` works on its own:
 
 ```bash
-SPEEDY_NO_DAEMON=1 speedy index .
-SPEEDY_NO_DAEMON=1 speedy query "find auth"
+SPEEDY_NO_DAEMON=1 speedy-ai-context index .
+SPEEDY_NO_DAEMON=1 speedy-ai-context query "find auth"
 ```
 
 You lose live re-indexing on file changes — every query reflects only what
@@ -174,7 +174,7 @@ the last manual `index` / `sync` captured.
 
 The exhaustive option list is in [`commands.md`](./commands.md). Brief summary below.
 
-### `speedy.exe` — the worker
+### `speedy-ai-context.exe` — the worker
 
 Common subcommands (each honors `--json` and `-p, --path <PATH>`):
 
@@ -200,7 +200,7 @@ Global flags: `-p/--path`, `--daemon-socket`, `--json`.
 | `context`                        | Send `exec ... context`                                             |
 | `sync`                           | Send `exec ... sync`                                                |
 | `force [-p <path>]`              | Send `sync <path>` directly (daemon-driven incremental sync)        |
-| `daemon {status,list,stop,ping}` | Talk to the daemon directly (no `speedy.exe` involved)              |
+| `daemon {status,list,stop,ping}` | Talk to the daemon directly (no `speedy-ai-context.exe` involved)              |
 | `workspace {list,add,remove}`    | Register/unregister workspaces (note: path is **positional** here)  |
 
 ### `speedy-daemon.exe` — the central daemon
@@ -275,7 +275,7 @@ Full example for **Claude Desktop** (`claude_desktop_config.json`):
 
 Typical agent flow:
 
-1. User opens their repo and runs `speedy-cli workspace add .` (or just `speedy index .` once — `ensure_daemon` auto-registers).
+1. User opens their repo and runs `speedy-cli workspace add .` (or just `speedy-ai-context index .` once — `ensure_daemon` auto-registers).
 2. The daemon spawns a watcher and keeps the SQLite index fresh on every file change.
 3. The agent (Claude / Cursor / opencode / …) calls `speedy_query { "query": "where is auth handled?", "top_k": 10 }` — the MCP server invokes `speedy-cli query "where is auth handled?" -k 10 --json` and pipes the ranked chunks back to the agent.
 4. Subsequent edits trigger a re-index in the background; the next query sees them.
@@ -293,7 +293,7 @@ The daemon listens on a **local socket** (Windows Named Pipe / Unix Domain Socke
 | `add <path>` / `remove <path>`           | `ok` / `error: ...`                                             |
 | `sync <path>`                            | `ok` / `error: ...`                                             |
 | `reload`                                 | `ok: N workspaces reloaded`                                     |
-| `exec <args>` (or `exec\t<cwd>\t<args>`) | stdout of `speedy.exe <args>` (with `SPEEDY_NO_DAEMON=1`)       |
+| `exec <args>` (or `exec\t<cwd>\t<args>`) | stdout of `speedy-ai-context.exe <args>` (with `SPEEDY_NO_DAEMON=1`)       |
 | `stop`                                   | `ok` then graceful shutdown                                     |
 
 ## Configuration
@@ -307,7 +307,7 @@ Speedy reads, in priority order:
 
 | Variable                  | Default                    | Purpose                                                                    |
 |---------------------------|----------------------------|----------------------------------------------------------------------------|
-| `SPEEDY_NO_DAEMON`        | unset                      | If set, the worker skips `ensure_daemon` (the daemon itself sets this when spawning `speedy.exe`) |
+| `SPEEDY_NO_DAEMON`        | unset                      | If set, the worker skips `ensure_daemon` (the daemon itself sets this when spawning `speedy-ai-context.exe`) |
 | `SPEEDY_DEFAULT_SOCKET`   | `speedy-daemon`            | Override the default IPC socket name                                       |
 | `SPEEDY_DAEMON_DIR`       | platform config dir        | Override the dir for `daemon.pid` / `workspaces.json`                      |
 | `SPEEDY_BIN`              | `speedy-cli`               | Binary that `speedy-mcp` invokes for tool calls                            |
@@ -375,7 +375,7 @@ Cargo.toml (workspace)
 └── packages/
     ├── speedy-core/         # shared lib: DaemonClient, workspace registry,
     │                          config, local-socket helpers, embedding type
-    ├── speedy/              # bin = speedy.exe (worker)
+    ├── speedy-ai-context/   # bin = speedy-ai-context.exe (worker)
     ├── speedy-daemon/       # bin = speedy-daemon.exe (central daemon)
     ├── speedy-cli/          # bin = speedy-cli.exe (thin client)
     ├── speedy-mcp/          # bin = speedy-mcp.exe (MCP server)
@@ -400,7 +400,7 @@ Some daemon tests touch process-wide state (cwd, `SPEEDY_DAEMON_DIR`) and serial
 Either the daemon was never started or its named pipe is orphaned. Start a fresh one:
 
 ```bash
-speedy daemon                 # spawns the central daemon detached
+speedy-ai-context daemon      # spawns the central daemon detached
 speedy-cli daemon ping        # should print `pong`
 ```
 
