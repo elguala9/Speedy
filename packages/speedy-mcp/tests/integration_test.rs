@@ -54,8 +54,24 @@ impl McpClient {
 
     fn stop(&mut self) {
         self.send(r#"{"jsonrpc":"2.0","id":99,"method":"shutdown","params":{}}"#);
-        self.send(r#"{"jsonrpc":"2.0","id":100,"method":"exit","params":{}}"#);
-        let _ = self.process.wait();
+        // "exit" closes the server without a response — write-only, no read.
+        if let Some(stdin) = self.process.stdin.as_mut() {
+            let _ = writeln!(stdin, r#"{{"jsonrpc":"2.0","id":100,"method":"exit","params":{{}}}}"#);
+            let _ = stdin.flush();
+        }
+        // Wait up to 5 s, then kill to avoid CI timeout.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match self.process.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = self.process.kill();
+                    let _ = self.process.wait();
+                    return;
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 
