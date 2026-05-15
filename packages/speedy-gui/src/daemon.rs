@@ -8,6 +8,7 @@
 use anyhow::Result;
 use speedy_core::daemon_client::DaemonClient;
 use speedy_core::types::{DaemonStatus, Metrics, ScanResult, WorkspaceStatus};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -39,6 +40,9 @@ pub struct DaemonBridge {
     client: Arc<DaemonClient>,
     pub socket_name: String,
     pub state: Arc<Mutex<DaemonState>>,
+    /// User-provided daemon executable path. When `None`, the auto-detect in
+    /// `speedy_core::daemon_util::resolve_daemon_exe` is used.
+    daemon_exe_override: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl DaemonBridge {
@@ -53,7 +57,30 @@ impl DaemonBridge {
             client,
             socket_name,
             state: Arc::new(Mutex::new(DaemonState::default())),
+            daemon_exe_override: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Set (or clear) the user-overridden daemon executable path. Persisted
+    /// by the app on `save`.
+    pub fn set_daemon_exe_override(&self, exe: Option<PathBuf>) {
+        if let Ok(mut o) = self.daemon_exe_override.lock() {
+            *o = exe;
+        }
+    }
+
+    pub fn daemon_exe_override(&self) -> Option<PathBuf> {
+        self.daemon_exe_override.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Return the path that will actually be used to spawn the daemon: the
+    /// override if one is set, else the auto-detected location. Errors only
+    /// when neither is usable (no override and auto-detect fails).
+    pub fn resolved_daemon_exe(&self) -> Result<PathBuf> {
+        if let Some(p) = self.daemon_exe_override() {
+            return Ok(p);
+        }
+        speedy_core::daemon_util::resolve_daemon_exe()
     }
 
     fn inc_busy(&self) {
@@ -227,6 +254,34 @@ impl DaemonBridge {
         });
     }
 
+    pub fn prune_missing(&self) {
+        let client = self.client.clone();
+        let state = self.state.clone();
+        self.inc_busy();
+        self.rt.spawn(async move {
+            let r = client.prune_missing().await;
+            if let Ok(mut s) = state.lock() {
+                s.busy = s.busy.saturating_sub(1);
+                match r {
+                    Ok(paths) if paths.is_empty() => {
+                        s.set_toast("Nessun workspace orfano", true);
+                    }
+                    Ok(paths) => {
+                        s.set_toast(
+                            format!("Rimossi {} workspace orfani", paths.len()),
+                            true,
+                        );
+                    }
+                    Err(e) => {
+                        s.last_error = Some(format!("prune-missing: {e}"));
+                        s.set_toast(format!("Pulizia fallita: {e}"), false);
+                    }
+                }
+            }
+        });
+        self.refresh_all();
+    }
+
     pub fn reload(&self) {
         let client = self.client.clone();
         let state = self.state.clone();
@@ -264,7 +319,8 @@ impl DaemonBridge {
     /// "Start daemon" / "Restart" UI paths. Note: this is a *sync* fs/process
     /// op so we don't go through the runtime.
     pub fn spawn_daemon(&self) -> Result<()> {
-        speedy_core::daemon_util::spawn_daemon_process(&self.socket_name)
+        let exe = self.resolved_daemon_exe()?;
+        speedy_core::daemon_util::spawn_daemon_process_with(&exe, &self.socket_name)
     }
 
     /// Restart sequence: stop, wait for the pipe to die, then spawn. Runs on
@@ -273,6 +329,7 @@ impl DaemonBridge {
         let client = self.client.clone();
         let socket_name = self.socket_name.clone();
         let state = self.state.clone();
+        let exe_override = self.daemon_exe_override();
         self.inc_busy();
         self.rt.spawn(async move {
             let _ = client.stop().await;
@@ -283,7 +340,11 @@ impl DaemonBridge {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
             let spawn_result = tokio::task::spawn_blocking(move || {
-                speedy_core::daemon_util::spawn_daemon_process(&socket_name)
+                let exe = match exe_override {
+                    Some(p) => p,
+                    None => speedy_core::daemon_util::resolve_daemon_exe()?,
+                };
+                speedy_core::daemon_util::spawn_daemon_process_with(&exe, &socket_name)
             })
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("join error: {e}")));

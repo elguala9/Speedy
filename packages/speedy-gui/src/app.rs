@@ -16,6 +16,9 @@ struct PersistedSettings {
     dark_mode: bool,
     socket_name: String,
     notify_on_error: bool,
+    /// Override for `speedy-daemon` location. `None` = auto-detect next to GUI.
+    #[serde(default)]
+    daemon_exe_path: Option<String>,
 }
 
 impl Default for PersistedSettings {
@@ -25,6 +28,7 @@ impl Default for PersistedSettings {
             dark_mode: true,
             socket_name: speedy_core::daemon_util::default_daemon_socket_name(),
             notify_on_error: false,
+            daemon_exe_path: None,
         }
     }
 }
@@ -34,6 +38,7 @@ pub struct SpeedyApp {
     current_tab: Tab,
     dark_mode: bool,
     pub notify_on_error: bool,
+    dashboard_view: views::dashboard::DashboardView,
     workspaces_view: views::workspaces::WorkspacesView,
     scan_view: views::scan::ScanView,
     logs_view: views::logs::LogsView,
@@ -57,12 +62,16 @@ impl SpeedyApp {
 
         let bridge =
             DaemonBridge::new(settings.socket_name).expect("failed to create daemon bridge");
+        if let Some(p) = settings.daemon_exe_path.as_deref().filter(|s| !s.is_empty()) {
+            bridge.set_daemon_exe_override(Some(std::path::PathBuf::from(p)));
+        }
         bridge.refresh_all();
         Self {
             bridge,
             current_tab: settings.current_tab,
             dark_mode: settings.dark_mode,
             notify_on_error: settings.notify_on_error,
+            dashboard_view: Default::default(),
             workspaces_view: Default::default(),
             scan_view: Default::default(),
             logs_view: Default::default(),
@@ -192,7 +201,7 @@ impl App for SpeedyApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
-            Tab::Dashboard => views::dashboard::render(
+            Tab::Dashboard => self.dashboard_view.render(
                 ui,
                 &self.bridge,
                 &state_snapshot,
@@ -212,6 +221,10 @@ impl App for SpeedyApp {
             dark_mode: self.dark_mode,
             socket_name: self.bridge.socket_name.clone(),
             notify_on_error: self.notify_on_error,
+            daemon_exe_path: self
+                .bridge
+                .daemon_exe_override()
+                .map(|p| p.to_string_lossy().into_owned()),
         };
         eframe::set_value(storage, SETTINGS_KEY, &s);
     }

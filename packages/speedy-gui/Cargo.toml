@@ -32,6 +32,3 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.19"
 notify-rust = "4.11"
-
-[target.'cfg(windows)'.dependencies]
-winreg = "0.52"

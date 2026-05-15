@@ -23,6 +23,15 @@ impl WorkspacesView {
                     bridge.refresh_workspace_status(p.clone());
                 }
             }
+            if ui
+                .button("🧹 Pulisci orfani")
+                .on_hover_text(
+                    "Rimuove le entry il cui path non esiste più sul disco",
+                )
+                .clicked()
+            {
+                bridge.prune_missing();
+            }
         });
 
         ui.add_space(6.0);
@@ -62,6 +71,19 @@ impl WorkspacesView {
             };
             ui.colored_label(dot_color, "●");
             ui.monospace(path);
+            if is_under_system_temp(path) {
+                ui.colored_label(Color32::from_rgb(220, 180, 80), "⚠ temp")
+                    .on_hover_text(
+                        "Path sotto la directory temporanea di sistema — probabilmente \
+                         un residuo di test. Usalo solo se hai davvero un progetto in TEMP.",
+                    );
+            }
+            if !std::path::Path::new(path).exists() {
+                ui.colored_label(Color32::from_rgb(220, 100, 100), "⚠ mancante")
+                    .on_hover_text(
+                        "La cartella non esiste sul disco. Premi \"Pulisci orfani\" per rimuoverla.",
+                    );
+            }
         });
 
         ui.horizontal_wrapped(|ui| {
@@ -162,6 +184,18 @@ fn fmt_ago(unix_secs: u64) -> String {
     } else {
         format!("{}d ago", diff / 86400)
     }
+}
+
+/// True when `path` sits inside the OS temp directory. Used to flag workspace
+/// rows that almost certainly come from test runs (the actual user's projects
+/// are not in `%TEMP%` / `/tmp`).
+fn is_under_system_temp(path: &str) -> bool {
+    let Ok(temp) = std::env::temp_dir().canonicalize() else {
+        return false;
+    };
+    let p = std::path::Path::new(path);
+    let candidate = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    candidate.starts_with(&temp)
 }
 
 fn open_folder(path: &str) {
