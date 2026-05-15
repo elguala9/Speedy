@@ -1,6 +1,6 @@
 # Comandi
 
-## `speedy.exe`
+## `speedy-ai-context.exe`
 
 ### Subcomandi
 
