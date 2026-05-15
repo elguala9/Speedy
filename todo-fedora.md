@@ -169,13 +169,25 @@ copiali in `~/.local/bin/`".
 
 ## 7. CI
 
-- [ ] Aggiungere un job a GitHub Actions su `ubuntu-latest` (sufficientemente
-      vicino a Fedora per la compilazione, anche se la conferma su Fedora
-      vera va fatta a mano) che esegue `cargo build --release --workspace`
-      con le dipendenze sopra installate via `apt`.
+Stato attuale (verificato 2026-05-15):
+
+- [x] **`ci.yml`** già fa matrix `[ubuntu-latest, macos-latest, windows-latest]`
+      su `cargo build` + `cargo test --workspace`. Il job Linux è
+      effettivamente vicino a Fedora per la compilazione, basta. Va
+      però **integrato** con `apt-get install` delle dipendenze GUI
+      (libgtk-3-dev, libxkbcommon-dev, ecc.) — oggi `ci.yml` non le
+      installa, quindi se in futuro la compilazione di `speedy-gui`
+      dovesse richiederle direttamente in unit-test, il job fallirà.
+      `release.yml` lo fa già correttamente.
+- [x] **`release.yml`** builda i 5 binari su `x86_64-unknown-linux-gnu`,
+      `x86_64-pc-windows-msvc`, `x86_64-apple-darwin`, `aarch64-apple-darwin`
+      e produce tarball — già include `apt-get` per le deps Linux.
+- [ ] Allineare `ci.yml` a `release.yml` su Linux: aggiungere lo step
+      `Install Linux GUI dependencies` anche al job di CI, così
+      `speedy-gui` viene effettivamente buildato e testato.
 - [ ] Eventualmente un job specifico `fedora:latest` in container
-      (`container: fedora:41`) per avere garanzia esatta. Più lento, da
-      valutare.
+      (`container: fedora:41`) per garanzia esatta sui pacchetti `dnf`.
+      Più lento, valutare solo se emergono divergenze deb↔rpm.
 
 ---
 
