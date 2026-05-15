@@ -1,5 +1,6 @@
 pub mod config;
 pub mod daemon_client;
+pub mod default_ignores;
 pub mod daemon_util;
 pub mod embedding;
 pub mod local_sock;

@@ -44,12 +44,10 @@ fn default_ollama_url() -> String { "http://localhost:11434".to_string() }
 fn default_provider_type() -> String { "ollama".to_string() }
 fn default_watch_delay_ms() -> u64 { 500 }
 fn default_ignore_patterns() -> Vec<String> {
-    vec![
-        "target/".to_string(),
-        ".git/".to_string(),
-        "node_modules/".to_string(),
-        ".speedy/".to_string(),
-    ]
+    crate::default_ignores::patterns()
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 impl Config {
@@ -135,7 +133,9 @@ mod tests {
         assert_eq!(config.provider_type, "ollama");
         assert_eq!(config.agent_command, "");
         assert_eq!(config.watch_delay_ms, 500);
-        assert_eq!(config.ignore_patterns, vec!["target/", ".git/", "node_modules/", ".speedy/"]);
+        assert!(config.ignore_patterns.iter().any(|p| p == "target/"));
+        assert!(config.ignore_patterns.iter().any(|p| p == "node_modules/"));
+        assert!(config.ignore_patterns.iter().any(|p| p == ".git/"));
     }
 
     #[test]
