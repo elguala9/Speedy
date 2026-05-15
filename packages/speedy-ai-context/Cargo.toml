@@ -1,5 +1,5 @@
 [package]
-name = "speedy"
+name = "speedy-ai-context"
 description = "Local Semantic File System - Worker CLI"
 version.workspace = true
 edition.workspace = true
@@ -13,11 +13,11 @@ categories = ["development-tools", "command-line-utilities"]
 keywords = ["semantic-search", "vector", "code-search", "embeddings"]
 
 [[bin]]
-name = "speedy"
+name = "speedy-ai-context"
 path = "src/main.rs"
 
 [lib]
-name = "speedy"
+name = "speedy_ai_context"
 path = "src/lib.rs"
 
 [[bench]]
@@ -40,6 +40,7 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 async-trait = "0.1"
 indicatif = "0.17"
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

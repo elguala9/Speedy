@@ -57,6 +57,30 @@ pub enum Commands {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
+    #[command(about = "Install Speedy git hooks into the current repo")]
+    InstallHooks {
+        #[arg(long, help = "Repo root (default: current dir)")]
+        path: Option<std::path::PathBuf>,
+        #[arg(long, help = "Overwrite existing non-Speedy hooks without prompting")]
+        force: bool,
+    },
+    #[command(about = "Remove Speedy-managed git hooks from the current repo")]
+    UninstallHooks {
+        #[arg(long, help = "Repo root (default: current dir)")]
+        path: Option<std::path::PathBuf>,
+    },
+    #[command(about = "Enable a feature (speedy | slc)")]
+    Enable {
+        #[arg(help = "Feature name: speedy (file indexer) or slc (language context)")]
+        feature: String,
+    },
+    #[command(about = "Disable a feature (speedy | slc)")]
+    Disable {
+        #[arg(help = "Feature name: speedy (file indexer) or slc (language context)")]
+        feature: String,
+    },
+    #[command(about = "Show the status of all toggleable features")]
+    Features,
 }
 
 #[derive(Subcommand)]
@@ -146,5 +170,84 @@ mod tests {
         let cli = Cli::parse_from(["speedy", "--modify", "content", "--file", "test.rs"]);
         assert_eq!(cli.modify, Some("content".to_string()));
         assert_eq!(cli.file, Some("test.rs".to_string()));
+    }
+
+    #[test]
+    fn test_cli_parse_install_hooks_default() {
+        let cli = Cli::parse_from(["speedy", "install-hooks"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::InstallHooks { path: None, force: false })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_install_hooks_with_path() {
+        let cli = Cli::parse_from(["speedy", "install-hooks", "--path", "/some/repo"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::InstallHooks { path: Some(_), force: false })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_install_hooks_force() {
+        let cli = Cli::parse_from(["speedy", "install-hooks", "--force"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::InstallHooks { force: true, .. })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_uninstall_hooks_default() {
+        let cli = Cli::parse_from(["speedy", "uninstall-hooks"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::UninstallHooks { path: None })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_uninstall_hooks_with_path() {
+        let cli = Cli::parse_from(["speedy", "uninstall-hooks", "--path", "/some/repo"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::UninstallHooks { path: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_install_hooks_force_defaults_to_false() {
+        let cli = Cli::parse_from(["speedy", "install-hooks"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::InstallHooks { force: false, .. })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_install_hooks_force_and_path_combined() {
+        let cli = Cli::parse_from(["speedy", "install-hooks", "--force", "--path", "/my/repo"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::InstallHooks { force: true, path: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn test_cli_install_hooks_help_text() {
+        // Verify the subcommands appear in the top-level help output.
+        let cmd = Cli::command();
+        let subcommand_names: Vec<_> = cmd.get_subcommands().map(|c| c.get_name()).collect();
+        assert!(subcommand_names.contains(&"install-hooks"), "install-hooks missing from subcommands");
+        assert!(subcommand_names.contains(&"uninstall-hooks"), "uninstall-hooks missing from subcommands");
+    }
+
+    #[test]
+    fn test_cli_json_flag_works_with_install_hooks() {
+        let cli = Cli::parse_from(["speedy", "--json", "install-hooks"]);
+        assert!(cli.json);
+        assert!(matches!(cli.command, Some(Commands::InstallHooks { .. })));
     }
 }
