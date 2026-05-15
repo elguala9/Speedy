@@ -80,6 +80,13 @@ pub trait VectorStore: Send + Sync {
     async fn count_chunks(&self) -> Result<usize>;
     async fn get_last_hash(&self, file_path: &str) -> Result<Option<String>>;
     async fn ensure_tables(&self) -> Result<()>;
+    /// Read a key from the `metadata` table.
+    async fn get_metadata(&self, key: &str) -> Result<Option<String>>;
+    /// Upsert a key into the `metadata` table.
+    async fn set_metadata(&self, key: &str, value: &str) -> Result<()>;
+    /// Drop every chunk in the store and reset the in-memory cache. Used by
+    /// `reembed` after a model change.
+    async fn clear_all_chunks(&self) -> Result<()>;
 }
 
 pub struct SqliteVectorStore {
@@ -147,8 +154,39 @@ impl VectorStore for SqliteVectorStore {
             );
             CREATE INDEX IF NOT EXISTS idx_file_path ON chunks(file_path);
             CREATE INDEX IF NOT EXISTS idx_hash ON chunks(hash);
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             ",
         )?;
+        Ok(())
+    }
+
+    async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare("SELECT value FROM metadata WHERE key = ?1")?;
+        let mut rows = stmt.query(params![key])?;
+        Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+    }
+
+    async fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    async fn clear_all_chunks(&self) -> Result<()> {
+        {
+            let conn = self.conn.lock().await;
+            conn.execute("DELETE FROM chunks", [])?;
+        }
+        let mut cache = self.cache.write().await;
+        cache.clear();
         Ok(())
     }
 
@@ -331,6 +369,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.count_chunks().await.unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_roundtrip() {
+        let dir = std::env::temp_dir().join("speedy_test_metadata");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SqliteVectorStore::new(dir.to_str().unwrap()).await.unwrap();
+
+        assert!(store.get_metadata("embedding_model").await.unwrap().is_none());
+        store.set_metadata("embedding_model", "nomic-embed-text").await.unwrap();
+        assert_eq!(
+            store.get_metadata("embedding_model").await.unwrap().as_deref(),
+            Some("nomic-embed-text"),
+        );
+        // Upsert overwrites.
+        store.set_metadata("embedding_model", "all-minilm").await.unwrap();
+        assert_eq!(
+            store.get_metadata("embedding_model").await.unwrap().as_deref(),
+            Some("all-minilm"),
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_chunks_empties_store_and_cache() {
+        let dir = std::env::temp_dir().join("speedy_test_clear_all");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SqliteVectorStore::new(dir.to_str().unwrap()).await.unwrap();
+
+        let records = vec![
+            ChunkRecord {
+                id: "c1".into(),
+                file_path: "a.rs".into(),
+                line: 1,
+                text: "x".into(),
+                hash: "h".into(),
+                embedding: vec![1.0, 0.0],
+                last_modified: "n".into(),
+            },
+            ChunkRecord {
+                id: "c2".into(),
+                file_path: "b.rs".into(),
+                line: 2,
+                text: "y".into(),
+                hash: "h".into(),
+                embedding: vec![0.0, 1.0],
+                last_modified: "n".into(),
+            },
+        ];
+        store.insert_chunks(&records).await.unwrap();
+        assert_eq!(store.count_chunks().await.unwrap(), 2);
+
+        store.clear_all_chunks().await.unwrap();
+        assert_eq!(store.count_chunks().await.unwrap(), 0);
+        // The cache-backed similarity_search must now return nothing.
+        assert!(store.similarity_search(&[1.0, 0.0], 5).await.unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

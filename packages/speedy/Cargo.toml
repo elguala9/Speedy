@@ -16,6 +16,14 @@ keywords = ["semantic-search", "vector", "code-search", "embeddings"]
 name = "speedy"
 path = "src/main.rs"
 
+[lib]
+name = "speedy"
+path = "src/lib.rs"
+
+[[bench]]
+name = "core"
+harness = false
+
 [dependencies]
 speedy-core = { path = "../speedy-core" }
 clap = { version = "4", features = ["derive"] }
@@ -34,3 +42,7 @@ async-trait = "0.1"
 indicatif = "0.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3"

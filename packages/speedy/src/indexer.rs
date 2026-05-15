@@ -27,8 +27,11 @@ pub struct Indexer {
     pub db: Arc<dyn VectorStore>,
     pub embedder: Arc<dyn EmbeddingProvider>,
     pub root: String,
+    pub model: String,
     embed_cache: Mutex<HashMap<String, Vec<f32>>>,
 }
+
+const METADATA_MODEL_KEY: &str = "embedding_model";
 
 impl Indexer {
     pub async fn new(config: &Config) -> Result<Self> {
@@ -39,12 +42,54 @@ impl Indexer {
         let db: Arc<dyn VectorStore> = SqliteVectorStore::new(&root).await
             .context("failed to initialize vector database")?;
         let embedder = embed::create_provider(config);
+
+        // Compatibility check: warn if the DB was built with a different model
+        // than what's configured now. Old chunks won't be in the same vector
+        // space as new query embeddings, so similarity scores become garbage.
+        // We warn but don't refuse — the user might be mid-transition and want
+        // to run `reembed` next. Indexing only writes the marker once.
+        let chunk_count = db.count_chunks().await.unwrap_or(0);
+        match db.get_metadata(METADATA_MODEL_KEY).await? {
+            Some(stored) if stored != config.model => {
+                tracing::warn!(
+                    "Embedding model mismatch: DB built with '{stored}' but configured model is '{}'. \
+                     Run `speedy reembed` to rebuild the index, or revert SPEEDY_MODEL.",
+                    config.model
+                );
+            }
+            None if chunk_count > 0 => {
+                tracing::warn!(
+                    "DB contains {chunk_count} chunks but has no recorded model. \
+                     Assuming current model '{}' — run `speedy reembed` if wrong.",
+                    config.model
+                );
+                db.set_metadata(METADATA_MODEL_KEY, &config.model).await?;
+            }
+            None => {
+                db.set_metadata(METADATA_MODEL_KEY, &config.model).await?;
+            }
+            _ => {}
+        }
+
         Ok(Self {
             db,
             embedder,
             root,
+            model: config.model.clone(),
             embed_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Drop every chunk and re-index the entire workspace with the current
+    /// embedding provider. Use after switching `SPEEDY_MODEL`. Persists the
+    /// new model name in the DB metadata table on success.
+    pub async fn reembed(&self) -> Result<IndexStats> {
+        self.db.clear_all_chunks().await
+            .context("failed to clear existing chunks before reembed")?;
+        let stats = self.index_directory(".").await?;
+        self.db.set_metadata(METADATA_MODEL_KEY, &self.model).await
+            .context("failed to record model name after reembed")?;
+        Ok(stats)
     }
 
     pub async fn index_directory(&self, path: &str) -> Result<IndexStats> {
