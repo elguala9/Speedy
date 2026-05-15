@@ -22,6 +22,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             suffix: ".exe"
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            suffix: ""
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -41,21 +44,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libxinerama-dev libgtk-3-dev libglib2.0-dev
+            libxcursor-dev libxinerama-dev libgtk-3-dev libglib2.0-dev \
+            libxdo-dev
 
-      - name: Build all binaries
-        run: cargo build --release -p speedy -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui --target ${{ matrix.target }}
+      - name: Build all binaries (Linux/Windows with GUI)
+        if: matrix.os != 'macos-latest'
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Build all binaries (macOS, no GUI)
+        if: matrix.os == 'macos-latest'
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-language-context --target ${{ matrix.target }}
+
+      - name: Package (Linux/Windows with GUI)
+        if: matrix.os != 'macos-latest'
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           tar czf speedy-${{ matrix.target }}.tar.gz \
-            speedy${{ matrix.suffix }} \
+            speedy-ai-context${{ matrix.suffix }} \
             speedy-daemon${{ matrix.suffix }} \
             speedy-cli${{ matrix.suffix }} \
             speedy-mcp${{ matrix.suffix }} \
-            speedy-gui${{ matrix.suffix }}
+            speedy-gui${{ matrix.suffix }} \
+            speedy-language-context${{ matrix.suffix }}
+          mv speedy-${{ matrix.target }}.tar.gz ../../../
+
+      - name: Package (macOS, no GUI)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf speedy-${{ matrix.target }}.tar.gz \
+            speedy-ai-context${{ matrix.suffix }} \
+            speedy-daemon${{ matrix.suffix }} \
+            speedy-cli${{ matrix.suffix }} \
+            speedy-mcp${{ matrix.suffix }} \
+            speedy-language-context${{ matrix.suffix }}
           mv speedy-${{ matrix.target }}.tar.gz ../../../
 
       - name: Upload
