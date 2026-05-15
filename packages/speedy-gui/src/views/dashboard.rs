@@ -1,5 +1,6 @@
 use crate::daemon::{DaemonBridge, DaemonState};
 use egui::{Color32, RichText, Ui};
+use std::time::Duration;
 use std::path::PathBuf;
 
 #[derive(Default)]
@@ -19,6 +20,7 @@ impl DashboardView {
         bridge: &DaemonBridge,
         state: &DaemonState,
         notify_on_error: &mut bool,
+        refresh_interval: &mut Duration,
     ) {
         ui.heading("Dashboard");
         ui.add_space(6.0);
@@ -129,6 +131,13 @@ impl DashboardView {
         ui.label(RichText::new("Preferenze").strong());
         ui.horizontal(|ui| {
             ui.checkbox(notify_on_error, "Notifiche di sistema su errore");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Auto-refresh ogni:");
+            let mut secs = refresh_interval.as_secs().max(1) as u32;
+            if ui.add(egui::DragValue::new(&mut secs).range(1..=60).suffix(" s")).changed() {
+                *refresh_interval = Duration::from_secs(secs as u64);
+            }
         });
     }
 
