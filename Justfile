@@ -70,10 +70,7 @@ docs:
 fix:
     cargo fix --workspace --allow-dirty
 
-# dist: build release dei 3 binari principali e copia in dist/
-dist:
-    powershell -NoProfile -File scripts/build-release.ps1
-
-# publish: build release, publish su crates.io, crea GitHub Release con .exe, aggiorna README
-publish:
-    powershell -NoProfile -File scripts/publish.ps1 
+# release <versione>: pusha master + crea tag → GitHub Actions builda gli exe
+# Esempio: just release 0.2.0
+release version:
+    powershell -NoProfile -File scripts/publish.ps1 {{version}}
