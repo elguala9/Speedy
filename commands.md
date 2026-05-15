@@ -75,6 +75,27 @@
 
 ---
 
+## `speedy-gui.exe`
+
+Nessun flag CLI. Lanciato senza argomenti, apre la finestra egui.
+
+### Tab
+
+| Tab          | Cosa fa                                                                |
+|--------------|------------------------------------------------------------------------|
+| Dashboard    | Stato daemon (pid/uptime/version), metrics cumulativi, restart/reload/stop, toggle autostart al login, toggle notifiche di sistema su `error` |
+| Workspaces   | Lista + add via file picker nativo + Index/Sync/Open folder/Rimuovi per workspace |
+| Scan         | Walk di un root path alla ricerca di `.speedy/index.sqlite` esistenti, registra in batch quelli selezionati |
+| Logs         | Tail live (`subscribe-log` IPC) o vista storica di un file `daemon.log.*`, filtri per livello/substring/target/workspace, export JSON/JSONL |
+
+Tray icon di sistema (verde = daemon alive, rosso = down) con menu
+**Open Speedy / Restart daemon / Quit**.
+
+Settings persistenti via `eframe::Storage`: tab selezionato, tema
+chiaro/scuro, socket name, toggle notifiche.
+
+---
+
 ## `speedy-mcp.exe`
 
 Nessun flag CLI. Avviato dal client MCP, comunica su stdio JSON-RPC.

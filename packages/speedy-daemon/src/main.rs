@@ -3,6 +3,7 @@
 //! IPC protocol reference: see `docs/ipc-protocol.md`.
 
 use clap::Parser;
+use speedy_core::types::{LogLine, ScanResult, WorkspaceStatus};
 use speedy_core::workspace;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 /// CREATE_NO_WINDOW: a console-subsystem child of a daemon (which itself runs
 /// detached) would otherwise allocate a new console window per spawn. We
@@ -24,6 +25,72 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ToNsName};
 use speedy_core::local_sock::{ListenerTrait as _, Stream as LocalStream, StreamTrait as _};
 use tracing::{info, warn, error};
+use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt as _};
+use tracing_subscriber::util::SubscriberInitExt as _;
+
+/// Capacity for the in-memory log broadcast. Each `subscribe-log` connection
+/// gets its own receiver; lagging consumers see a `Lagged(n)` skip rather than
+/// blocking the producer.
+const LOG_BROADCAST_CAPACITY: usize = 1024;
+
+/// `tracing` layer that fans every event out on a Tokio broadcast channel for
+/// live consumers (used by `subscribe-log`). The channel has a bounded
+/// capacity; receivers that fall behind get a `Lagged` skip and keep running.
+struct BroadcastLayer {
+    tx: broadcast::Sender<LogLine>,
+}
+
+impl<S> Layer<S> for BroadcastLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+        let metadata = event.metadata();
+        let mut visitor = FieldVisitor::default();
+        event.record(&mut visitor);
+        let line = LogLine {
+            ts: chrono::Utc::now().to_rfc3339(),
+            level: metadata.level().to_string().to_lowercase(),
+            target: metadata.target().to_string(),
+            message: visitor.message,
+            fields: visitor.fields,
+        };
+        let _ = self.tx.send(line);
+    }
+}
+
+#[derive(Default)]
+struct FieldVisitor {
+    message: String,
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl tracing::field::Visit for FieldVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.fields.insert(field.name().to_string(), serde_json::Value::String(value.to_string()));
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let s = format!("{value:?}");
+        if field.name() == "message" {
+            self.message = s;
+        } else {
+            self.fields.insert(field.name().to_string(), serde_json::Value::String(s));
+        }
+    }
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.fields.insert(field.name().to_string(), serde_json::Value::Number(value.into()));
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.fields.insert(field.name().to_string(), serde_json::Value::Number(value.into()));
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.fields.insert(field.name().to_string(), serde_json::Value::Bool(value));
+    }
+}
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -47,6 +114,10 @@ struct DaemonCli {
 struct WatcherHandle {
     stop: Arc<AtomicBool>,
     last_heartbeat: Arc<AtomicU64>,
+    /// Unix seconds: last filesystem event that hit this watcher (0 = never).
+    last_event_at: Arc<AtomicU64>,
+    /// Unix seconds: last successful `sync` finished for this workspace (0 = never).
+    last_sync_at: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -103,6 +174,9 @@ struct CentralDaemon {
     /// shutdown deterministic.
     active_pids: Arc<StdMutex<HashSet<u32>>>,
     metrics: Arc<Metrics>,
+    /// Broadcast channel that fans `tracing` events to live `subscribe-log`
+    /// listeners. `None` in tests where we don't install the global subscriber.
+    log_tx: Option<broadcast::Sender<LogLine>>,
     /// Held for the daemon lifetime; OS releases its advisory lock when this
     /// drops. Never read directly.
     _lock_file: Option<std::fs::File>,
@@ -119,6 +193,7 @@ impl CentralDaemon {
             watchers: Arc::new(Mutex::new(HashMap::new())),
             active_pids: Arc::new(StdMutex::new(HashSet::new())),
             metrics: Arc::new(Metrics::default()),
+            log_tx: None,
             _lock_file: None,
         }
     }
@@ -195,6 +270,8 @@ impl CentralDaemon {
         let watchers_clone = self.watchers.clone();
         let active_pids_clone = self.active_pids.clone();
         let metrics_clone = self.metrics.clone();
+        let log_tx = self.log_tx.clone();
+        let daemon_dir = self.daemon_dir.clone();
         let pid = self.pid;
         let started = self.started_at;
         let mut health_ticker = tokio::time::interval(std::time::Duration::from_secs(HEALTH_TICK_SECS));
@@ -214,8 +291,10 @@ impl CentralDaemon {
                             let a = active_pids_clone.clone();
                             let m = metrics_clone.clone();
                             let r = running.clone();
+                            let lt = log_tx.clone();
+                            let dd = daemon_dir.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(socket, w, a, m, pid, started, r).await {
+                                if let Err(e) = handle_connection(socket, w, a, m, pid, started, r, lt, dd).await {
                                     error!("IPC error: {e}");
                                 }
                             });
@@ -292,8 +371,11 @@ fn start_workspace_watcher(
 ) -> WatcherHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let last_heartbeat = Arc::new(AtomicU64::new(unix_now_secs()));
+    let last_event_at = Arc::new(AtomicU64::new(0));
+    let last_sync_at = Arc::new(AtomicU64::new(0));
     let stop_clone = stop.clone();
     let heartbeat = last_heartbeat.clone();
+    let event_at_clone = last_event_at.clone();
     let path = path.to_string();
     let speedy_exe = find_speedy_exe();
 
@@ -328,12 +410,20 @@ fn start_workspace_watcher(
                     let p = path.clone();
                     let pids = active_pids.clone();
                     let m = metrics.clone();
+                    let event_at = event_at_clone.clone();
                     std::thread::spawn(move || {
                         for event in &events {
                             if should_ignore_watch_path(&event.path) {
                                 continue;
                             }
                             m.watcher_events.fetch_add(1, Ordering::Relaxed);
+                            event_at.store(unix_now_secs(), Ordering::Relaxed);
+                            tracing::debug!(
+                                target: "watcher",
+                                workspace = %p,
+                                path = %event.path.display(),
+                                "event"
+                            );
                             let file_path = event.path.to_string_lossy().to_string();
 
                             // Test hook: when SPEEDY_WATCH_LOG is set, append the
@@ -383,7 +473,7 @@ fn start_workspace_watcher(
         info!("Watcher stopped: {path}");
     });
 
-    WatcherHandle { stop, last_heartbeat }
+    WatcherHandle { stop, last_heartbeat, last_event_at, last_sync_at }
 }
 
 async fn check_watcher_health(
@@ -631,6 +721,7 @@ fn kill_process(pid: u32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     socket: LocalStream,
     watchers: Arc<Mutex<HashMap<String, WatcherHandle>>>,
@@ -639,6 +730,8 @@ async fn handle_connection(
     pid: u32,
     started_at: Instant,
     running: Arc<AtomicBool>,
+    log_tx: Option<broadcast::Sender<LogLine>>,
+    daemon_dir: PathBuf,
 ) -> Result<()> {
     let (reader, mut writer) = socket.split();
     let mut buf_reader = BufReader::new(reader);
@@ -646,9 +739,60 @@ async fn handle_connection(
     buf_reader.read_line(&mut line).await?;
     let line = line.trim();
 
-    let resp = dispatch_command(line, &watchers, &active_pids, &metrics, pid, started_at, &running).await;
+    tracing::debug!(target: "ipc", req = %line, "connection accepted");
+
+    // `subscribe-log` is the one long-lived command: keep the writer open and
+    // stream LogLine JSONs until either side drops.
+    if line == "subscribe-log" {
+        if let Some(tx) = log_tx {
+            stream_log(&mut writer, tx).await?;
+        } else {
+            writer.write_all(b"error: log streaming not configured\n").await?;
+        }
+        return Ok(());
+    }
+
+    let resp = dispatch_command(
+        line,
+        &watchers,
+        &active_pids,
+        &metrics,
+        pid,
+        started_at,
+        &running,
+        &daemon_dir,
+    )
+    .await;
 
     writer.write_all(resp.as_bytes()).await?;
+    tracing::debug!(target: "ipc", bytes = resp.len(), "response sent");
+    Ok(())
+}
+
+/// Drive a `subscribe-log` connection: handshake `ok\n`, then forward every
+/// broadcasted `LogLine` as one JSON object per line until the client closes
+/// the socket or the channel breaks. `Lagged(_)` skips are tolerated.
+async fn stream_log<W>(writer: &mut W, tx: broadcast::Sender<LogLine>) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let mut rx = tx.subscribe();
+    writer.write_all(b"ok\n").await?;
+    loop {
+        match rx.recv().await {
+            Ok(line) => {
+                let s = serde_json::to_string(&line).unwrap_or_default();
+                if writer.write_all(s.as_bytes()).await.is_err() {
+                    break;
+                }
+                if writer.write_all(b"\n").await.is_err() {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
     Ok(())
 }
 
@@ -707,6 +851,7 @@ async fn exec_speedy_command(args: &str, metrics: &Metrics) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_command(
     line: &str,
     watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
@@ -715,6 +860,7 @@ async fn dispatch_command(
     pid: u32,
     started_at: Instant,
     running: &AtomicBool,
+    daemon_dir: &Path,
 ) -> String {
     match line {
         "ping" => "pong\n".to_string(),
@@ -792,10 +938,40 @@ async fn dispatch_command(
         _ if line.starts_with("sync ") => {
             let raw_path = line.trim_start_matches("sync ").trim();
             metrics.syncs.fetch_add(1, Ordering::Relaxed);
-            match handle_sync(raw_path).await {
+            match handle_sync(raw_path, watchers).await {
                 Ok(()) => "ok\n".to_string(),
                 Err(e) => format!("error: {e}\n"),
             }
+        }
+
+        _ if line.starts_with("reindex ") => {
+            let raw_path = line.trim_start_matches("reindex ").trim();
+            metrics.indexes.fetch_add(1, Ordering::Relaxed);
+            match handle_reindex(raw_path).await {
+                Ok(out) => format!("{out}\n"),
+                Err(e) => format!("error: {e}\n"),
+            }
+        }
+
+        _ if line.starts_with("workspace-status ") => {
+            let raw_path = line.trim_start_matches("workspace-status ").trim();
+            match handle_workspace_status(raw_path, watchers).await {
+                Ok(s) => format!("{}\n", serde_json::to_string(&s).unwrap_or_default()),
+                Err(e) => format!("error: {e}\n"),
+            }
+        }
+
+        _ if line.starts_with("scan\t") || line.starts_with("scan ") => {
+            let args = &line["scan".len()..];
+            let resp = handle_scan(args).await;
+            format!("{resp}\n")
+        }
+
+        _ if line.starts_with("tail-log") => {
+            let rest = line.trim_start_matches("tail-log").trim();
+            let n: usize = rest.parse().unwrap_or(200);
+            let resp = handle_tail_log(daemon_dir, n).await;
+            format!("{resp}\n")
         }
 
         "metrics" => {
@@ -851,9 +1027,10 @@ async fn handle_add(
     if is_new && std::env::var_os("SPEEDY_SKIP_INITIAL_SYNC").is_none() {
         let path_for_sync = path_str.clone();
         let metrics_clone = metrics.clone();
+        let watchers_clone = watchers.clone();
         tokio::spawn(async move {
             metrics_clone.syncs.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = handle_sync(&path_for_sync).await {
+            if let Err(e) = handle_sync(&path_for_sync, &watchers_clone).await {
                 warn!("Initial sync failed for {path_for_sync}: {e}");
             }
         });
@@ -956,32 +1133,205 @@ async fn handle_query_all(
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
-async fn handle_sync(raw_path: &str) -> Result<()> {
+async fn handle_sync(
+    raw_path: &str,
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+) -> Result<()> {
     let canonical = Path::new(raw_path).canonicalize()?;
     let path_str = canonical.to_string_lossy().to_string();
 
+    let started = Instant::now();
     let exe = find_speedy_exe();
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(["-p", &path_str, "sync"]).env("SPEEDY_NO_DAEMON", "1");
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let output = cmd.output().await?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        error!("Sync failed for {path_str}: {stderr}");
+        error!(target: "sync", workspace = %path_str, ms = elapsed_ms, "Sync failed: {stderr}");
     } else {
-        info!("Sync done for {path_str}");
+        info!(target: "sync", workspace = %path_str, ms = elapsed_ms, "Sync done");
+        let ws = watchers.lock().await;
+        if let Some(h) = ws.get(&path_str) {
+            h.last_sync_at.store(unix_now_secs(), Ordering::Relaxed);
+        }
     }
 
     Ok(())
 }
 
+async fn handle_reindex(raw_path: &str) -> Result<String> {
+    let canonical = Path::new(raw_path).canonicalize()?;
+    let path_str = canonical.to_string_lossy().to_string();
+
+    let started = Instant::now();
+    let exe = find_speedy_exe();
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.current_dir(&path_str)
+        .args(["index", "."])
+        .env("SPEEDY_NO_DAEMON", "1");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd.output().await?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!(target: "index", workspace = %path_str, ms = elapsed_ms, "Reindex failed: {stderr}");
+        anyhow::bail!("reindex failed: {stderr}");
+    }
+    info!(target: "index", workspace = %path_str, ms = elapsed_ms, "Reindex done");
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn handle_workspace_status(
+    raw_path: &str,
+    watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+) -> Result<WorkspaceStatus> {
+    let canonical = Path::new(raw_path).canonicalize()?;
+    let path_str = canonical.to_string_lossy().to_string();
+
+    let (alive, last_event, last_sync) = {
+        let ws = watchers.lock().await;
+        match ws.get(&path_str) {
+            Some(h) => {
+                let alive = !h.stop.load(Ordering::SeqCst);
+                let ev = h.last_event_at.load(Ordering::Relaxed);
+                let sy = h.last_sync_at.load(Ordering::Relaxed);
+                (alive, if ev == 0 { None } else { Some(ev) }, if sy == 0 { None } else { Some(sy) })
+            }
+            None => (false, None, None),
+        }
+    };
+
+    let db_path = Path::new(&path_str).join(".speedy").join("index.sqlite");
+    let index_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+
+    Ok(WorkspaceStatus {
+        path: path_str,
+        watcher_alive: alive,
+        last_event_at: last_event,
+        last_sync_at: last_sync,
+        index_size_bytes,
+        chunk_count: None,
+    })
+}
+
+/// Parse `[\t<root>[\t<max_depth>]]` and walk the filesystem reporting every
+/// directory that contains `.speedy/index.sqlite`. Skips common build dirs.
+async fn handle_scan(args: &str) -> String {
+    let trimmed = args.trim_start_matches(['\t', ' ']);
+    let mut parts = trimmed.split(['\t', '\n']);
+    let root = parts.next().unwrap_or("").trim();
+    if root.is_empty() {
+        return r#"{"error":"missing root"}"#.to_string();
+    }
+    let max_depth: usize = parts
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(8);
+
+    let root = root.to_string();
+    let results = tokio::task::spawn_blocking(move || scan_speedy_dirs(Path::new(&root), max_depth))
+        .await
+        .unwrap_or_default();
+
+    serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
+    let registered: std::collections::HashSet<String> = workspace::list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+
+    const SKIP: &[&str] = &[
+        "target", ".git", "node_modules", ".idea", ".vscode", "dist", "build", "__pycache__", ".cargo",
+    ];
+
+    let mut out = Vec::new();
+    let walker = walkdir::WalkDir::new(root)
+        .max_depth(max_depth)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !SKIP.contains(&name.as_ref())
+        });
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let db = path.join(".speedy").join("index.sqlite");
+        if !db.exists() {
+            continue;
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path_str = canonical.to_string_lossy().to_string();
+        let registered = registered.contains(&path_str);
+        let (last_modified, db_size_bytes) = match std::fs::metadata(&db) {
+            Ok(m) => {
+                let ts = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| {
+                        let secs = d.as_secs() as i64;
+                        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                            .map(|dt| dt.to_rfc3339())
+                            .unwrap_or_default()
+                    });
+                (ts, m.len())
+            }
+            Err(_) => (None, 0),
+        };
+        out.push(ScanResult { path: path_str, registered, last_modified, db_size_bytes });
+    }
+    out
+}
+
+/// Read the most recent `daemon.log.*` file in `<daemon_dir>/logs/` and
+/// return its last `n` lines parsed back into `LogLine` values. Lines that
+/// cannot be parsed (e.g. raw stderr that leaked into the file) are skipped.
+async fn handle_tail_log(daemon_dir: &Path, n: usize) -> String {
+    let logs_dir = daemon_dir.join("logs");
+    let result = tokio::task::spawn_blocking(move || tail_log_blocking(&logs_dir, n))
+        .await
+        .unwrap_or_default();
+    serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn tail_log_blocking(logs_dir: &Path, n: usize) -> Vec<LogLine> {
+    let Ok(entries) = std::fs::read_dir(logs_dir) else { return Vec::new(); };
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_file() { continue; }
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("daemon.log") { continue; }
+        let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        latest = match latest {
+            Some((cur, _)) if cur >= mtime => latest,
+            _ => Some((mtime, p)),
+        };
+    }
+    let Some((_, path)) = latest else { return Vec::new(); };
+    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new(); };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..]
+        .iter()
+        .filter_map(|l| serde_json::from_str::<LogLine>(l).ok())
+        .collect()
+}
+
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_target(false)
-        .init();
     let cli = DaemonCli::parse();
 
     // When --daemon-dir is given, propagate via env so workspace::* and any
@@ -991,12 +1341,47 @@ fn main() -> Result<()> {
         std::env::set_var("SPEEDY_DAEMON_DIR", dir);
     }
 
+    let daemon_dir = match &cli.daemon_dir {
+        Some(d) => d.clone(),
+        None => speedy_core::daemon_util::daemon_dir_path()?,
+    };
+    let logs_dir = daemon_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir).ok();
+
+    let file_appender = tracing_appender::rolling::daily(&logs_dir, "daemon.log");
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+    // Leak the guard so the writer thread keeps flushing for the entire daemon
+    // lifetime; without this, dropping the guard at end-of-main can race the
+    // last log writes.
+    Box::leak(Box::new(file_guard));
+
+    let (log_tx, _initial_rx) = broadcast::channel::<LogLine>(LOG_BROADCAST_CAPACITY);
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(std::io::stderr),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(file_writer),
+        )
+        .with(BroadcastLayer { tx: log_tx.clone() })
+        .init();
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let mut daemon = match cli.daemon_dir {
             Some(dir) => CentralDaemon::new(cli.socket, dir),
             None => CentralDaemon::default(cli.socket)?,
         };
+        daemon.log_tx = Some(log_tx);
         daemon.start().await
     })
 }
@@ -1322,7 +1707,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("exec nonexistent-command --flag", &watchers, &active_pids, &Arc::new(Metrics::default()), 99999, started, &running).await;
+        let resp = dispatch_command("exec nonexistent-command --flag", &watchers, &active_pids, &Arc::new(Metrics::default()), 99999, started, &running, Path::new(".")).await;
         assert!(!resp.trim().is_empty(), "exec response must not be empty");
     }
 
@@ -1336,7 +1721,7 @@ mod tests {
         // `query test -k 3` returns empty stdout when speedy finds no results;
         // we only care that dispatch produces a framed response (terminating
         // newline), not that the inner command had any output.
-        let resp = dispatch_command("exec query test -k 3", &watchers, &active_pids, &Arc::new(Metrics::default()), 88888, started, &running).await;
+        let resp = dispatch_command("exec query test -k 3", &watchers, &active_pids, &Arc::new(Metrics::default()), 88888, started, &running, Path::new(".")).await;
         assert!(resp.ends_with('\n'), "exec dispatch must return a newline-terminated response, got: {resp:?}");
     }
 
@@ -1360,7 +1745,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command(&format!("sync {}", dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 77777, started, &running).await;
+        let resp = dispatch_command(&format!("sync {}", dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 77777, started, &running, Path::new(".")).await;
         assert_eq!(resp.trim(), "ok", "sync via dispatch should return ok");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1395,7 +1780,7 @@ mod tests {
         let existing_dir = dir.join("exists");
         std::fs::create_dir_all(&existing_dir).unwrap();
 
-        let resp = dispatch_command(&format!("remove {}", existing_dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 66666, started, &running).await;
+        let resp = dispatch_command(&format!("remove {}", existing_dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 66666, started, &running, Path::new(".")).await;
         assert_eq!(resp.trim(), "ok");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1473,7 +1858,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("garbage", &watchers, &active_pids, &Arc::new(Metrics::default()), 11111, started, &running).await;
+        let resp = dispatch_command("garbage", &watchers, &active_pids, &Arc::new(Metrics::default()), 11111, started, &running, Path::new(".")).await;
         assert!(resp.contains("error: unknown command"), "expected unknown command error, got: {resp}");
     }
 
@@ -1488,7 +1873,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command(&format!("is-workspace {}", dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 11112, started, &running).await;
+        let resp = dispatch_command(&format!("is-workspace {}", dir.to_string_lossy()), &watchers, &active_pids, &Arc::new(Metrics::default()), 11112, started, &running, Path::new(".")).await;
         assert_eq!(resp.trim(), "false");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1501,7 +1886,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("daemon-pid", &watchers, &active_pids, &Arc::new(Metrics::default()), 55555, started, &running).await;
+        let resp = dispatch_command("daemon-pid", &watchers, &active_pids, &Arc::new(Metrics::default()), 55555, started, &running, Path::new(".")).await;
         assert_eq!(resp.trim(), "55555");
     }
 
@@ -1512,7 +1897,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("watch-count", &watchers, &active_pids, &Arc::new(Metrics::default()), 12345, started, &running).await;
+        let resp = dispatch_command("watch-count", &watchers, &active_pids, &Arc::new(Metrics::default()), 12345, started, &running, Path::new(".")).await;
         assert_eq!(resp.trim(), "0");
     }
 
@@ -1671,7 +2056,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        let resp = dispatch_command("exec --version", &watchers, &active_pids, &Arc::new(Metrics::default()), 1, started, &running).await;
+        let resp = dispatch_command("exec --version", &watchers, &active_pids, &Arc::new(Metrics::default()), 1, started, &running, Path::new(".")).await;
         assert!(!resp.is_empty(), "exec response must not be empty");
     }
 
@@ -1683,7 +2068,7 @@ mod tests {
         let started = Instant::now();
 
         // Pure "exec   " (no args) — the binary is invoked with no arguments.
-        let resp = dispatch_command("exec   ", &watchers, &active_pids, &Arc::new(Metrics::default()), 1, started, &running).await;
+        let resp = dispatch_command("exec   ", &watchers, &active_pids, &Arc::new(Metrics::default()), 1, started, &running, Path::new(".")).await;
         assert!(!resp.is_empty(), "exec must always return a non-empty line");
     }
 
@@ -2049,5 +2434,268 @@ mod tests {
 
         let ws = watchers.lock().await;
         assert!(ws.is_empty(), "watcher map must be cleared after shutdown");
+    }
+
+    // ── new IPC commands: workspace-status, scan, reindex, tail-log ────────
+
+    #[tokio::test]
+    async fn test_workspace_status_unknown_path_errors() {
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        // A path that exists on disk but isn't watched — workspace-status
+        // should still respond (with watcher_alive=false). For an outright
+        // missing path it must surface the canonicalize error as `error: ...`.
+        let resp = dispatch_command(
+            "workspace-status C:\\definitely\\not\\here",
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            Path::new("."),
+        )
+        .await;
+        assert!(resp.starts_with("error:"), "expected error, got: {resp}");
+    }
+
+    #[tokio::test]
+    async fn test_workspace_status_known_path_reports_no_watcher() {
+        let dir = std::env::temp_dir().join("speedy_d_ws_status_known");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            &format!("workspace-status {}", dir.to_string_lossy()),
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            Path::new("."),
+        )
+        .await;
+        let resp = resp.trim();
+        assert!(!resp.starts_with("error"), "expected JSON, got: {resp}");
+        let parsed: WorkspaceStatus = serde_json::from_str(resp).expect("valid JSON");
+        assert!(!parsed.watcher_alive, "not in watchers → not alive");
+        assert_eq!(parsed.index_size_bytes, 0, "no .speedy yet");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_scan_finds_directory_with_index_sqlite() {
+        // Create a root with one .speedy/index.sqlite inside.
+        let root = std::env::temp_dir().join(format!(
+            "speedy_d_scan_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("proj-a");
+        let speedy_dir = project.join(".speedy");
+        std::fs::create_dir_all(&speedy_dir).unwrap();
+        std::fs::write(speedy_dir.join("index.sqlite"), b"fake db content").unwrap();
+
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            &format!("scan\t{}", root.to_string_lossy()),
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            Path::new("."),
+        )
+        .await;
+        let resp = resp.trim();
+        let parsed: Vec<ScanResult> = serde_json::from_str(resp).expect("scan returns JSON array");
+        assert!(
+            parsed.iter().any(|r| r.path.contains("proj-a") && r.db_size_bytes > 0),
+            "scan should find proj-a, got: {parsed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_scan_missing_root_returns_empty_array() {
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            "scan\tC:\\absolutely-not-a-dir-zzz",
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            Path::new("."),
+        )
+        .await;
+        let resp = resp.trim();
+        let parsed: Vec<ScanResult> = serde_json::from_str(resp).unwrap_or_default();
+        assert!(parsed.is_empty(), "missing root → no results, got: {parsed:?}");
+    }
+
+    #[tokio::test]
+    async fn test_reindex_missing_path_errors() {
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            "reindex C:\\nowhere-1234567890",
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            Path::new("."),
+        )
+        .await;
+        assert!(resp.starts_with("error:"), "expected error, got: {resp}");
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_returns_empty_when_no_logs() {
+        let dir = std::env::temp_dir().join(format!(
+            "speedy_d_taillog_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            "tail-log 50",
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            &dir,
+        )
+        .await;
+        let resp = resp.trim();
+        let parsed: Vec<LogLine> = serde_json::from_str(resp).expect("tail-log returns array");
+        assert!(parsed.is_empty(), "no logs → empty array, got: {parsed:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_tail_log_parses_json_lines() {
+        let dir = std::env::temp_dir().join(format!(
+            "speedy_d_taillog_real_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let logs = dir.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        // Write three JSON lines + one junk line → only the JSON ones come back.
+        let file = logs.join("daemon.log.2026-05-15");
+        let content = "\
+{\"ts\":\"2026-05-15T10:00:00Z\",\"level\":\"info\",\"target\":\"ipc\",\"message\":\"one\",\"fields\":{}}\n\
+not-json-line\n\
+{\"ts\":\"2026-05-15T10:00:01Z\",\"level\":\"warn\",\"target\":\"sync\",\"message\":\"two\",\"fields\":{}}\n\
+{\"ts\":\"2026-05-15T10:00:02Z\",\"level\":\"error\",\"target\":\"watcher\",\"message\":\"three\",\"fields\":{}}\n";
+        std::fs::write(&file, content).unwrap();
+
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            "tail-log 10",
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            &dir,
+        )
+        .await;
+        let parsed: Vec<LogLine> = serde_json::from_str(resp.trim()).unwrap();
+        assert_eq!(parsed.len(), 3, "junk line should be skipped, got: {parsed:?}");
+        assert_eq!(parsed[2].level, "error");
+        assert_eq!(parsed[2].message, "three");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_stream_log_handshake_and_forward() {
+        // Spin up two ends of a duplex pipe, feed one LogLine through the
+        // broadcast, and assert the handshake `ok\n` + serialized JSON line
+        // arrive in order on the reader side.
+        let (tx, _) = broadcast::channel::<LogLine>(8);
+        let (mut client, mut server) = tokio::io::duplex(4096);
+
+        let tx_clone = tx.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = stream_log(&mut server, tx_clone).await;
+        });
+
+        // Give the server a moment to subscribe before we publish, otherwise
+        // the broadcast send happens with zero receivers and gets dropped.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let line = LogLine {
+            ts: "2026-05-15T11:11:11Z".to_string(),
+            level: "info".to_string(),
+            target: "test".to_string(),
+            message: "hello".to_string(),
+            fields: serde_json::Map::new(),
+        };
+        tx.send(line.clone()).unwrap();
+
+        let mut reader = tokio::io::BufReader::new(&mut client);
+        let mut handshake = String::new();
+        reader.read_line(&mut handshake).await.unwrap();
+        assert_eq!(handshake.trim(), "ok", "handshake mismatch: {handshake:?}");
+
+        let mut payload = String::new();
+        reader.read_line(&mut payload).await.unwrap();
+        let parsed: LogLine = serde_json::from_str(payload.trim()).unwrap();
+        assert_eq!(parsed.message, "hello");
+
+        drop(client);
+        // Closing the read end breaks the broadcast→write loop; the task
+        // returns after the next failed write. We don't wait — it's enough
+        // to confirm the assertions above.
+        server_task.abort();
     }
 }

@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::local_sock::{GenericNamespaced, Name, Stream as LocalStream, StreamTrait as _, ToNsName};
+use crate::types::{LogLine, ScanResult, WorkspaceStatus};
+
+pub use crate::types::DaemonStatus;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CMD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -14,19 +16,6 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// v2 (2026-05-14): added `query-all` for cross-workspace search.
 pub const SUPPORTED_PROTOCOL_VERSION: u32 = 2;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DaemonStatus {
-    pub pid: u32,
-    pub uptime_secs: u64,
-    pub workspace_count: usize,
-    pub watcher_count: usize,
-    pub version: String,
-    /// Wire-format version reported by the daemon. Field is optional so older
-    /// daemons that pre-date the field still deserialize (defaults to 0).
-    #[serde(default)]
-    pub protocol_version: u32,
-}
 
 /// Client per comunicare con il daemon centralizzato via local socket.
 pub struct DaemonClient {
@@ -166,6 +155,88 @@ impl DaemonClient {
     pub async fn stop(&self) -> Result<()> {
         self.cmd("stop").await?;
         Ok(())
+    }
+
+    pub async fn reload(&self) -> Result<String> {
+        self.cmd("reload").await
+    }
+
+    /// Walk `root` looking for `.speedy/index.sqlite` and return one entry per
+    /// hit. `max_depth` caps how deep the walker descends (default 8 on the
+    /// daemon side if `None`).
+    pub async fn scan(&self, root: &str, max_depth: Option<usize>) -> Result<Vec<ScanResult>> {
+        let req = match max_depth {
+            Some(d) => format!("scan\t{root}\t{d}"),
+            None => format!("scan\t{root}"),
+        };
+        let resp = self.cmd(&req).await?;
+        Ok(serde_json::from_str(&resp)?)
+    }
+
+    /// Force a clean re-index of the workspace. Equivalent in effect to
+    /// `exec <path> index .` but tracked separately on the daemon side.
+    pub async fn reindex(&self, path: &str) -> Result<String> {
+        let canonical = Path::new(path).canonicalize()?;
+        self.cmd(&format!("reindex {}", canonical.display())).await
+    }
+
+    pub async fn workspace_status(&self, path: &str) -> Result<WorkspaceStatus> {
+        let canonical = Path::new(path).canonicalize()?;
+        let resp = self.cmd(&format!("workspace-status {}", canonical.display())).await?;
+        Ok(serde_json::from_str(&resp)?)
+    }
+
+    /// Snapshot of the last `n` log lines from the current daemon log file.
+    pub async fn tail_log(&self, n: usize) -> Result<Vec<LogLine>> {
+        let resp = self.cmd(&format!("tail-log {n}")).await?;
+        Ok(serde_json::from_str(&resp)?)
+    }
+
+    /// Open a long-lived connection that streams one JSON-encoded `LogLine`
+    /// per `\n` from the daemon. The returned stream stays open until the
+    /// caller drops the receiver or the daemon shuts down.
+    ///
+    /// Returned tuple: `(rx, abort)`. Dropping `abort` (or calling `abort()`
+    /// on it) tears down the background task and closes the socket.
+    pub async fn subscribe_log(
+        &self,
+    ) -> Result<(
+        tokio::sync::mpsc::UnboundedReceiver<LogLine>,
+        tokio::task::JoinHandle<()>,
+    )> {
+        let mut stream = LocalStream::connect(self.socket_name.borrow())
+            .await
+            .context("Cannot connect to daemon for subscribe-log")?;
+        stream.write_all(b"subscribe-log\n").await?;
+        // Read the first line: the daemon answers with `ok\n` once the
+        // subscription is registered, then keeps streaming `LogLine` JSONs.
+        let mut reader = BufReader::new(stream);
+        let mut handshake = String::new();
+        reader.read_line(&mut handshake).await?;
+        if handshake.trim() != "ok" {
+            anyhow::bail!("subscribe-log handshake failed: {}", handshake.trim());
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let parsed: Result<LogLine, _> = serde_json::from_str(line.trim());
+                        if let Ok(item) = parsed {
+                            if tx.send(item).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok((rx, handle))
     }
 }
 
