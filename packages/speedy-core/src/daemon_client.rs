@@ -11,7 +11,9 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wire-format version this client understands. If a daemon reports a higher
 /// value in `status`, callers should treat it as incompatible.
-pub const SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 (2026-05-14): added `query-all` for cross-workspace search.
+pub const SUPPORTED_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
@@ -132,6 +134,16 @@ impl DaemonClient {
             anyhow::bail!("Daemon sync error: {resp}");
         }
         Ok(())
+    }
+
+    /// Query every registered workspace and return the top-K aggregated
+    /// results (sorted by similarity score). Each item in the returned array
+    /// carries a `workspace` field naming the source workspace.
+    ///
+    /// Requires daemon protocol version >= 2.
+    pub async fn query_all(&self, query: &str, top_k: usize) -> Result<serde_json::Value> {
+        let resp = self.cmd(&format!("query-all\t{top_k}\t{query}")).await?;
+        Ok(serde_json::from_str(&resp)?)
     }
 
     pub async fn watch_count(&self) -> Result<usize> {
