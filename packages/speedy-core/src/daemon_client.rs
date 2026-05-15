@@ -78,6 +78,13 @@ impl DaemonClient {
 
     // ─── Public API ───────────────────────────────────────────
 
+    /// Escape hatch: send an arbitrary line and return the daemon's reply.
+    /// Used by adjacent tools (e.g. speedy-language-context) that need to
+    /// piggy-back on the same IPC channel without owning the daemon protocol.
+    pub async fn cmd_raw(&self, req: &str) -> Result<String> {
+        self.cmd(req).await
+    }
+
     pub async fn ping(&self) -> Result<String> {
         self.cmd("ping").await
     }
