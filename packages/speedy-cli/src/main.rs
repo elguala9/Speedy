@@ -144,7 +144,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ListenerTrait as _, StreamTrait as _, ToNsName};
+    use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ListenerTrait as _, ToNsName};
 
     #[test]
     fn test_cli_assert() {
