@@ -22,9 +22,13 @@ test-crate crate:
 build:
     cargo build --workspace
 
-# build-all: alias per cargo build-all (tutti i 5 binari, release)
+# build-all: alias per cargo build-all (tutti i binari, release)
 build-all:
-    cargo build --release -p speedy -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui
+    cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context
+
+# build-slc: solo il binario speedy-language-context
+build-slc:
+    cargo build --release -p speedy-language-context
 
 # build-release: compila ottimizzato
 build-release:
@@ -44,15 +48,15 @@ clean:
 
 # run-speedy: esegue speedy dal workspace
 run-speedy cmd *args:
-    cargo run -p speedy --bin speedy -- {{cmd}} {{args}}
+    cargo run -p speedy-ai-context --bin speedy-ai-context -- {{cmd}} {{args}}
 
 # run-cli: esegue il cli demo
 run-cli:
-    cargo run -p speedy --bin cli
+    cargo run -p speedy-ai-context --bin cli
 
 # run-server: esegue il server demo
 run-server:
-    cargo run -p speedy --bin server
+    cargo run -p speedy-ai-context --bin server
 
 # tree: mostra l'albero dipendenze
 tree:
