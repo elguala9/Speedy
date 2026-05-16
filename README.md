@@ -220,7 +220,7 @@ arguments. Four tabs:
 | Tab          | What it does                                                                |
 |--------------|-----------------------------------------------------------------------------|
 | Dashboard    | Daemon status (pid/uptime/version), metrics, restart/reload/stop, "notify on error" toggle |
-| Workspaces   | List + add (native file picker) + per-workspace Index/Sync/Open folder/Remove |
+| Workspaces   | List + add (native file picker) + per-workspace Index/Sync/Open folder/Remove + **feature toggles** (Speedy Indexer / Language Context) |
 | Scan         | Walk a root path looking for existing `.speedy/index.sqlite` and bulk-register what it finds |
 | Logs         | Live tail (`subscribe-log` IPC) or historical view of any `daemon.log.*` file, with level/substring/target/workspace filters and JSON/JSONL export |
 
@@ -352,6 +352,27 @@ chunk_overlap = 200
 watch_delay_ms = 500
 ignore_patterns = ["target/", ".git/", "node_modules/"]
 ```
+
+### Feature toggles
+
+Each workspace can independently enable or disable the two Speedy subsystems. The setting is stored in `<workspace>/.speedy/config.toml` under `[features]`.
+
+**GUI** — Workspaces tab, per-workspace row:
+- **Speedy Indexer** checkbox — file indexer (`speedy-ai-context`)
+- **Language Context** checkbox — code intelligence / symbol graph (`speedy-language-context`)
+
+Changes take effect on the next daemon restart for that workspace.
+
+**CLI** — equivalent commands:
+```bash
+speedy enable speedy    # enable file indexer
+speedy enable slc       # enable language context
+speedy disable speedy
+speedy disable slc
+speedy features         # show current state
+```
+
+The GUI and CLI share the same config file; changes from one are immediately visible to the other.
 
 ### Embedding providers
 

@@ -1,9 +1,68 @@
 use crate::daemon::{DaemonBridge, DaemonState};
 use egui::{Color32, RichText, Ui};
+use std::collections::HashMap;
+
+#[derive(Clone)]
+struct WorkspaceFeatures {
+    speedy_indexer: bool,
+    language_context: bool,
+}
+
+impl Default for WorkspaceFeatures {
+    fn default() -> Self {
+        Self { speedy_indexer: true, language_context: true }
+    }
+}
+
+fn load_features(workspace_path: &str) -> WorkspaceFeatures {
+    let config = std::path::Path::new(workspace_path)
+        .join(".speedy")
+        .join("config.toml");
+    if let Ok(raw) = std::fs::read_to_string(&config) {
+        if let Ok(doc) = toml::from_str::<toml::Value>(&raw) {
+            let get_bool = |key: &str| {
+                doc.get("features")
+                    .and_then(|f| f.get(key))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
+            };
+            return WorkspaceFeatures {
+                speedy_indexer: get_bool("speedy_indexer"),
+                language_context: get_bool("language_context"),
+            };
+        }
+    }
+    WorkspaceFeatures::default()
+}
+
+fn save_features(workspace_path: &str, f: &WorkspaceFeatures) {
+    let dir = std::path::Path::new(workspace_path).join(".speedy");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let config_path = dir.join("config.toml");
+    let mut doc: toml::Value = if config_path.exists() {
+        let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+        toml::from_str(&raw)
+            .unwrap_or_else(|_| toml::Value::Table(toml::value::Table::new()))
+    } else {
+        toml::Value::Table(toml::value::Table::new())
+    };
+    let mut section = toml::value::Table::new();
+    section.insert("speedy_indexer".to_string(), toml::Value::Boolean(f.speedy_indexer));
+    section.insert("language_context".to_string(), toml::Value::Boolean(f.language_context));
+    if let toml::Value::Table(table) = &mut doc {
+        table.insert("features".to_string(), toml::Value::Table(section));
+    }
+    if let Ok(s) = toml::to_string_pretty(&doc) {
+        let _ = std::fs::write(&config_path, s);
+    }
+}
 
 #[derive(Default)]
 pub struct WorkspacesView {
     pub pending_remove: Option<String>,
+    features_cache: HashMap<String, WorkspaceFeatures>,
 }
 
 impl WorkspacesView {
@@ -117,6 +176,36 @@ impl WorkspacesView {
                 self.pending_remove = Some(path.to_string());
             }
         });
+
+        if !self.features_cache.contains_key(path) {
+            self.features_cache.insert(path.to_string(), load_features(path));
+        }
+        let features = self.features_cache.get_mut(path).unwrap();
+        let mut features_changed = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Features:").weak());
+            if ui
+                .checkbox(&mut features.speedy_indexer, "Speedy Indexer")
+                .on_hover_text("File indexer (speedy-ai-context)")
+                .changed()
+            {
+                features_changed = true;
+            }
+            if ui
+                .checkbox(&mut features.language_context, "Language Context")
+                .on_hover_text("Code intelligence (speedy-language-context)")
+                .changed()
+            {
+                features_changed = true;
+            }
+        });
+        if features_changed {
+            let snapshot = features.clone();
+            save_features(path, &snapshot);
+            if let Ok(mut s) = bridge.state.lock() {
+                s.set_toast("Features aggiornate", true);
+            }
+        }
     }
 
     fn confirm_remove(&mut self, ctx: &egui::Context, bridge: &DaemonBridge, target: String) {
