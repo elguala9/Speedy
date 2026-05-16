@@ -29,25 +29,29 @@ Il daemon rimane il percorso principale per modifiche non committate (salvataggi
 
 ### 1. Hook scripts — `scripts/git-hooks/`
 
-**`post-commit`** (template sh — `{{SPEEDY_EXE}}` sostituito da `install-hooks`)
+**`post-commit`** (template sh — `{{SPEEDY_WORKER_EXE}}` e `{{SPEEDY_CLI_EXE}}` sostituiti da `install-hooks`)
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
-SPEEDY="{{SPEEDY_EXE}}"
+# SPEEDY_WORKER = speedy-ai-context (standalone fallback, no daemon needed)
+# SPEEDY_CLI    = speedy-cli        (thin client, routes through daemon)
+SPEEDY_WORKER="{{SPEEDY_WORKER_EXE}}"
+SPEEDY_CLI="{{SPEEDY_CLI_EXE}}"
+
 CHANGED=$(git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null)
 [ -z "$CHANGED" ] && exit 0
 
 ROOT=$(git rev-parse --show-toplevel)
 
-if "$SPEEDY" ping 2>/dev/null | grep -q "pong"; then
-    # Daemon up: notify via IPC (fast path)
+if "$SPEEDY_CLI" daemon ping 2>/dev/null | grep -q "pong"; then
+    # Daemon up: index via daemon (speedy-cli routes automatically)
     for f in $CHANGED; do
-        [ -f "$ROOT/$f" ] && "$SPEEDY" daemon exec -- index "$f"
+        [ -f "$ROOT/$f" ] && "$SPEEDY_CLI" -p "$ROOT" index "$f"
     done
 else
-    # Daemon down: index direttamente
+    # Daemon down: index direttamente con il worker
     for f in $CHANGED; do
-        [ -f "$ROOT/$f" ] && SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" index "$f"
+        [ -f "$ROOT/$f" ] && SPEEDY_NO_DAEMON=1 "$SPEEDY_WORKER" -p "$ROOT" index "$f"
     done
 fi
 exit 0
@@ -57,16 +61,17 @@ exit 0
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
-SPEEDY="{{SPEEDY_EXE}}"
+SPEEDY_WORKER="{{SPEEDY_WORKER_EXE}}"
+SPEEDY_CLI="{{SPEEDY_CLI_EXE}}"
 # $3 = 1 se branch switch, 0 se file checkout
 [ "$3" = "0" ] && exit 0
 
 ROOT=$(git rev-parse --show-toplevel)
 
-if "$SPEEDY" ping 2>/dev/null | grep -q "pong"; then
-    "$SPEEDY" daemon sync "$ROOT"
+if "$SPEEDY_CLI" daemon ping 2>/dev/null | grep -q "pong"; then
+    "$SPEEDY_CLI" -p "$ROOT" sync
 else
-    SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" sync
+    SPEEDY_NO_DAEMON=1 "$SPEEDY_WORKER" -p "$ROOT" sync
 fi
 exit 0
 ```
@@ -75,13 +80,14 @@ exit 0
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
-SPEEDY="{{SPEEDY_EXE}}"
+SPEEDY_WORKER="{{SPEEDY_WORKER_EXE}}"
+SPEEDY_CLI="{{SPEEDY_CLI_EXE}}"
 ROOT=$(git rev-parse --show-toplevel)
 
-if "$SPEEDY" ping 2>/dev/null | grep -q "pong"; then
-    "$SPEEDY" daemon sync "$ROOT"
+if "$SPEEDY_CLI" daemon ping 2>/dev/null | grep -q "pong"; then
+    "$SPEEDY_CLI" -p "$ROOT" sync
 else
-    SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" sync
+    SPEEDY_NO_DAEMON=1 "$SPEEDY_WORKER" -p "$ROOT" sync
 fi
 exit 0
 ```
@@ -90,14 +96,15 @@ exit 0
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
-SPEEDY="{{SPEEDY_EXE}}"
+SPEEDY_WORKER="{{SPEEDY_WORKER_EXE}}"
+SPEEDY_CLI="{{SPEEDY_CLI_EXE}}"
 # $1 = "rebase" o "amend"
 ROOT=$(git rev-parse --show-toplevel)
 
-if "$SPEEDY" ping 2>/dev/null | grep -q "pong"; then
-    "$SPEEDY" daemon reindex "$ROOT"
+if "$SPEEDY_CLI" daemon ping 2>/dev/null | grep -q "pong"; then
+    "$SPEEDY_CLI" -p "$ROOT" index .
 else
-    SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" index .
+    SPEEDY_NO_DAEMON=1 "$SPEEDY_WORKER" -p "$ROOT" index .
 fi
 exit 0
 ```
@@ -105,22 +112,24 @@ exit 0
 **`post-commit.ps1`** (template PowerShell — alternativa Windows nativa)
 ```powershell
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
-$SPEEDY = "{{SPEEDY_EXE}}"
+$SPEEDY_WORKER = "{{SPEEDY_WORKER_EXE}}"   # speedy-ai-context (standalone fallback)
+$SPEEDY_CLI    = "{{SPEEDY_CLI_EXE}}"      # speedy-cli (daemon-mediated)
+
 $changed = git diff-tree --no-commit-id -r --name-only HEAD 2>$null
 if (-not $changed) { exit 0 }
 
 $root = git rev-parse --show-toplevel
 
-$daemonUp = (& $SPEEDY ping 2>$null) -eq "pong"
+$daemonUp = (& $SPEEDY_CLI daemon ping 2>$null) -eq "pong"
 
 foreach ($f in $changed) {
     $full = Join-Path $root $f
     if (Test-Path $full) {
         if ($daemonUp) {
-            & $SPEEDY daemon exec -- index $f
+            & $SPEEDY_CLI -p $root index $f
         } else {
             $env:SPEEDY_NO_DAEMON = "1"
-            & $SPEEDY -p $root index $f
+            & $SPEEDY_WORKER -p $root index $f
         }
     }
 }
@@ -140,13 +149,20 @@ Responsabilità:
 - `uninstall-hooks`: rimuove solo i file che hanno il marker `# Speedy — managed hook` in cima
 - Stampa un report: quali hook installati, dove, se ne ha trovati di preesistenti
 
-**Perché non `include_str!` verbatim**: i template hanno un placeholder `{{SPEEDY_EXE}}` che viene sostituito a runtime con il path assoluto risolto da `current_exe()`. Questo garantisce che il hook funzioni anche se `speedy-ai-context` non è in `PATH` (installazione locale, `cargo install --path`, path custom).
+**Perché non `include_str!` verbatim**: i template hanno due placeholder che vengono sostituiti a runtime:
+- `{{SPEEDY_WORKER_EXE}}` → path assoluto di `speedy-ai-context` (risolto da `current_exe()`)
+- `{{SPEEDY_CLI_EXE}}` → path assoluto di `speedy-cli` (cercato nella stessa directory del worker)
+
+Questo garantisce che i hook funzionino anche se i binari non sono in `PATH`.
 
 ```rust
 // hooks.rs — logica centrale
-let exe = std::env::current_exe()?.canonicalize()?;
+let worker = std::env::current_exe()?.canonicalize()?;
+// Cerca speedy-cli accanto al worker (stessa cartella di installazione)
+let cli = worker.with_file_name(format!("speedy-cli{}", std::env::consts::EXE_SUFFIX));
 let script = HOOK_POST_COMMIT_TEMPLATE
-    .replace("{{SPEEDY_EXE}}", &exe.to_string_lossy());
+    .replace("{{SPEEDY_WORKER_EXE}}", &worker.to_string_lossy())
+    .replace("{{SPEEDY_CLI_EXE}}", &cli.to_string_lossy());
 std::fs::write(&hook_path, script)?;
 #[cfg(unix)]
 {
@@ -188,14 +204,14 @@ Usato da `install-hooks` per decidere se fare skip e da eventuali warning.
 
 ### `packages/speedy-daemon/src/main.rs`
 
-**Nuovo IPC command: `ping`** — già esiste (`ping` → `pong`), usato dagli hook per check daemon-up. **Nessuna modifica necessaria** per questo.
+**IPC command `ping`** — già esiste (`ping` → `pong`). Gli hook lo invocano tramite `speedy-cli daemon ping`. **Nessuna modifica necessaria** al daemon.
 
 **Nuovo IPC command: `notify-commit\t<path>\t<file1>\t<file2>...`** (opzionale, fase 2):
-- Più efficiente di mandare N richieste `exec index <file>` separate
+- Più efficiente di mandare N richieste `speedy-cli index <file>` separate
 - Riceve una lista di file, li accoda all'indexer del workspace senza passare per subprocess
 - Handler in `dispatch_command()`, circa riga 887
 
-Per la fase 1 basta riusare `exec -- index <file>` già esistente (riga 1022-1026).
+Per la fase 1 basta usare `speedy-cli -p <ROOT> index <file>` che già instrada via daemon (IPC `exec index <file>`).
 
 ---
 
@@ -203,7 +219,7 @@ Per la fase 1 basta riusare `exec -- index <file>` già esistente (riga 1022-102
 
 ```
 # 1. Registra il workspace (già esistente)
-speedy-ai-context add .
+speedy-cli workspace add .
 
 # 2. Installa gli hook nel repo corrente
 speedy-ai-context install-hooks
@@ -232,12 +248,16 @@ const HOOK_POST_REWRITE_TPL:  &str = include_str!("../../scripts/git-hooks/post-
 const HOOK_POST_COMMIT_PS1_TPL: &str = include_str!("../../scripts/git-hooks/post-commit.ps1.tpl");
 ```
 
-Scrittura a disco:
+Scrittura a disco (due placeholder separati per i due binari):
 ```rust
-let exe = std::env::current_exe()?.canonicalize()?;
+let worker = std::env::current_exe()?.canonicalize()?;
+let cli = worker.with_file_name(format!("speedy-cli{}", std::env::consts::EXE_SUFFIX));
 // su Windows Git-Bash il path deve essere in formato POSIX: /c/Users/...
-let exe_str = normalize_for_sh(&exe);
-let script = TPL.replace("{{SPEEDY_EXE}}", &exe_str);
+let worker_str = normalize_for_sh(&worker);
+let cli_str    = normalize_for_sh(&cli);
+let script = TPL
+    .replace("{{SPEEDY_WORKER_EXE}}", &worker_str)
+    .replace("{{SPEEDY_CLI_EXE}}",    &cli_str);
 ```
 
 Su Windows si scrive sia lo script `.sh` (usato da Git-Bash) sia un `.bat` wrapper che invoca PowerShell per chi usa CMD.
@@ -272,16 +292,16 @@ Su Windows si scrive sia lo script `.sh` (usato da Git-Bash) sia un `.bat` wrapp
 8. Hook per PowerShell nativo (`.ps1`) con `.bat` wrapper su Windows
 
 ### Fase 3 — UX
-9. `speedy-ai-context add .` installa gli hook automaticamente se `hooks_enabled = true`
-10. `speedy-ai-context status` mostra se gli hook sono installati per il repo corrente
+9. `speedy-cli workspace add .` (o `speedy-ai-context install-hooks` esplicito) installa gli hook automaticamente se `hooks_enabled = true`
+10. `speedy-ai-context install-hooks --check` (o `status`) mostra se gli hook sono installati per il repo corrente
 
 ---
 
 ## Dipendenze nuove
 
-Nessuna. Tutto il codice necessario è già disponibile:
-- `speedy-ai-context ping` (IPC) — già esiste
-- `speedy-ai-context daemon exec` (IPC) — già esiste (riga 1022-1026 daemon/main.rs)
-- `speedy-ai-context daemon sync` (IPC) — già esiste (riga 979-986)
-- `speedy-ai-context daemon reindex` (IPC) — già esiste (riga 988-995)
-- `speedy-ai-context index <file>` (diretto) — già esiste
+Nessuna. Tutto il codice necessario è già disponibile lato IPC daemon:
+- `ping` → `pong` — già esiste; gli hook lo invocano via `speedy-cli daemon ping`
+- IPC `exec <args>` — già esiste (riga 1022-1026 daemon/main.rs); `speedy-cli index` lo usa automaticamente
+- IPC `sync <path>` — già esiste (riga 979-986); `speedy-cli sync` lo usa automaticamente
+- IPC `reindex <path>` — già esiste (riga 988-995)
+- `speedy-ai-context -p <ROOT> index <file>` (standalone) — già esiste, usato nel fallback daemon-down
