@@ -53,6 +53,16 @@ Pre-built binaries are available on the [Releases page](https://github.com/elgua
 
 ## Install
 
+### Windows — Installer automatico (consigliato)
+
+Scarica `speedy-setup-<versione>.exe` dalla [pagina Releases](https://github.com/elguala9/Speedy/releases) ed eseguilo.
+Nessun admin richiesto. Installa i binari, configura il PATH e l'avvio automatico del daemon.
+
+Per buildare l'installer dal sorgente:
+```powershell
+.\scripts\build-installer.ps1   # richiede Inno Setup 6: winget install JRSoftware.InnoSetup
+```
+
 ### Build the binaries
 
 ```bash

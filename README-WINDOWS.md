@@ -1,6 +1,27 @@
 # Installazione su Windows
 
-Guida passo-passo per installare i 5 binari di Speedy su Windows e configurare l'avvio automatico del daemon.
+---
+
+## Metodo rapido — Installer automatico (consigliato)
+
+Scarica `speedy-setup-<versione>.exe` dalla [pagina Releases](https://github.com/elguala9/Speedy/releases) ed eseguilo.
+
+L'installer:
+- Copia i 5 binari in `%LOCALAPPDATA%\Programs\Speedy\` (nessun admin richiesto)
+- Aggiunge la cartella al PATH utente
+- Crea un collegamento nella Startup folder per avviare il daemon automaticamente ad ogni login
+- Avvia il daemon subito al termine
+
+**Disinstallazione completa:** Pannello di Controllo → Programmi → *Speedy* → Disinstalla.
+Il wizard chiederà se eliminare anche i dati utente (workspaces registrati, log, configurazione).
+
+> Per buildare l'installer dal sorgente: `.\scripts\build-installer.ps1` (richiede Inno Setup 6).
+
+---
+
+## Installazione manuale (avanzata)
+
+Segui questi passi se preferisci installare manualmente senza usare l'installer.
 
 ---
 
