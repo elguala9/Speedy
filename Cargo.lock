@@ -4552,6 +4552,7 @@ dependencies = [
  "serde_json",
  "speedy-core",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "tray-icon",

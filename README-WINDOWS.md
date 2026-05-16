@@ -127,6 +127,18 @@ speedy-cli query "come funziona l'autenticazione?" -k 10
 
 In alternativa apri `speedy-gui.exe` → tab **Workspaces** → **Aggiungi**.
 
+Per ogni workspace puoi abilitare/disabilitare i due sottosistemi direttamente dalla GUI (checkbox **Speedy Indexer** e **Language Context** nella riga del workspace) oppure da CLI:
+
+```powershell
+speedy enable speedy    # file indexer
+speedy enable slc       # code intelligence
+speedy disable speedy
+speedy disable slc
+speedy features         # stato attuale
+```
+
+Le modifiche vengono scritte in `<workspace>\.speedy\config.toml` e sono condivise tra GUI e CLI.
+
 ---
 
 ## Configurare un AI agent (MCP)
