@@ -363,16 +363,17 @@ Each workspace can independently enable or disable the two Speedy subsystems. Th
 
 Changes take effect on the next daemon restart for that workspace.
 
-**CLI** — equivalent commands:
-```bash
-speedy enable speedy    # enable file indexer
-speedy enable slc       # enable language context
-speedy disable speedy
-speedy disable slc
-speedy features         # show current state
+**Config file** — edit `<workspace>/.speedy/config.toml` directly:
+
+```toml
+[features]
+speedy_indexer = true    # file indexer (speedy-ai-context)
+language_context = true  # code intelligence (speedy-language-context)
 ```
 
-The GUI and CLI share the same config file; changes from one are immediately visible to the other.
+The GUI and config file are always in sync: the GUI reads and writes the same `config.toml`.
+
+> CLI shorthand (`speedy enable speedy`, `speedy enable slc`, …) is planned but not yet implemented.
 
 ### Embedding providers
 

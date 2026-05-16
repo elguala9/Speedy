@@ -92,15 +92,17 @@ Or in `claude_desktop_config.json` for Claude Desktop:
 
 ## Feature toggles
 
-The daemon controls whether SLC indexing is active per workspace:
+The daemon controls whether SLC indexing is active per workspace via `<workspace>/.speedy/config.toml`:
 
-```
-speedy enable slc      # enable in current directory
-speedy disable slc     # disable in current directory
-speedy features        # show current status
+```toml
+[features]
+language_context = true   # SLC — default: true
+speedy_indexer = true     # file indexer — default: true
 ```
 
-Settings are written to `<workspace>/.speedy/config.toml` under `[features]`.
+Use the **speedy-gui** Workspaces tab to toggle these with checkboxes (changes are written to the same file immediately).
+
+> CLI shorthand (`speedy enable slc`, `speedy disable slc`, `speedy features`) is planned but not yet implemented.
 
 ## Data directory
 
