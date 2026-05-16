@@ -254,19 +254,19 @@ env var → workspace JSON → utente JSON → workspace TOML → default
 
 ## 6. Passi implementativi
 
-- [ ] Aggiungere `serde_json` e `dirs` a `speedy-core/Cargo.toml`
-- [ ] Creare `packages/speedy-core/src/provider_config.rs` con `ProviderConfig` e logica merge
-- [ ] Aggiornare `config.rs`: cascata completa (JSON + TOML + env) con regola override per `ignore_patterns`
-- [ ] Aggiornare `config.rs`: mapping TOML flat → `ProviderConfig` nested per retrocompatibilità
-- [ ] Refactoring `embed.rs`: `HttpEmbeddingProvider` generico + `AuthScheme` + `GenerativeEmbeddingProvider`
-- [ ] Integrare `AgentEmbeddingProvider` esistente come `type: "agent"` nella factory
-- [ ] Implementare factory `create_provider()` con tabella di mapping completa
-- [ ] Aggiungere validazione all'avvio: api_key mancante, command mancante per agent, base_url mancante per tipo sconosciuto/openai-compatible
-- [ ] Rinominare `SPEEDY_OLLAMA_URL` → `SPEEDY_BASE_URL` (mantenere alias legacy)
-- [ ] Aggiungere `.speedy/config.speedy.json` al `.gitignore` di default generato da `speedy init`
-- [ ] Aggiornare tests in `embed.rs` per i nuovi transport
-- [ ] Aggiornare `README.md` con tabella provider e esempi `config.speedy.json`
-- [ ] Aggiornare `CONFIG.md` con campo `dims` negli esempi provider generativi
+- [x] Aggiungere `serde_json` e `dirs` a `speedy-core/Cargo.toml` (già presenti)
+- [x] Creare `packages/speedy-core/src/provider_config.rs` con `ProviderConfig` e logica merge
+- [x] Aggiornare `config.rs`: cascata completa (JSON + TOML + env) con regola override per `ignore_patterns`
+- [x] Aggiornare `config.rs`: mapping TOML flat → `ProviderConfig` nested per retrocompatibilità
+- [x] Refactoring `embed.rs`: `HttpEmbeddingProvider` generico + `AuthScheme` + `GenerativeEmbeddingProvider`
+- [x] Integrare `AgentEmbeddingProvider` esistente come `type: "agent"` nella factory
+- [x] Implementare factory `create_provider()` con tabella di mapping completa
+- [x] Aggiungere validazione all'avvio: api_key mancante, command mancante per agent, base_url mancante per tipo sconosciuto/openai-compatible
+- [x] Rinominare `SPEEDY_OLLAMA_URL` → `SPEEDY_BASE_URL` (mantenere alias legacy)
+- [ ] Aggiungere `.speedy/config.speedy.json` al `.gitignore` di default generato da `speedy init` (comando non ancora implementato)
+- [x] Aggiornare tests in `embed.rs` per i nuovi transport
+- [x] Aggiornare `README.md` con tabella provider e esempi `config.speedy.json`
+- [x] Aggiornare `CONFIG.md` con campo `dims` negli esempi provider generativi
 
 ---
 

@@ -64,7 +64,7 @@ resource "aws_ecs_task_definition" "speedy" {
     portMappings = [{ containerPort = 8080, protocol = "tcp" }]
     environment = [
       { name = "SPEEDY_LOG",   value = "info" },
-      { name = "SPEEDY_MODEL", value = "all-minilm:l6-v2" }
+      { name = "SPEEDY_MODEL", value = "nomic-embed-text" }
     ]
     logConfiguration = {
       logDriver = "awslogs"

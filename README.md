@@ -58,7 +58,7 @@ Pre-built binaries are available on the [Releases page](https://github.com/elgua
 ```bash
 # 1. Install Rust: https://rustup.rs/
 # 2. Install Ollama and pull an embedding model
-ollama pull all-minilm:l6-v2
+ollama pull nomic-embed-text
 
 # 3. Build all 5 binaries in one shot
 cargo build-all
@@ -168,7 +168,7 @@ the last manual `index` / `sync` captured.
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (edition 2021)
-- [Ollama](https://ollama.ai/) running locally, with an embedding model pulled (default: `all-minilm:l6-v2`)
+- [Ollama](https://ollama.ai/) running locally, with an embedding model pulled (default: `nomic-embed-text`)
 
 ## CLI reference (summary)
 
@@ -298,10 +298,14 @@ The daemon listens on a **local socket** (Windows Named Pipe / Unix Domain Socke
 
 ## Configuration
 
-Speedy reads, in priority order:
+Speedy reads configuration in this priority order (highest first):
 
 1. Environment variables
-2. `speedy.toml` or `.speedy/config.toml` in the project root
+2. `.speedy/config.speedy.json` in the workspace root
+3. `~/.speedy/config.speedy.json` (user-level defaults)
+4. `speedy.toml` or `.speedy/config.toml` in the workspace root
+
+Full provider reference: **[`CONFIG.md`](./CONFIG.md)**.
 
 ### Environment variables
 
@@ -311,14 +315,32 @@ Speedy reads, in priority order:
 | `SPEEDY_DEFAULT_SOCKET`   | `speedy-daemon`            | Override the default IPC socket name                                       |
 | `SPEEDY_DAEMON_DIR`       | platform config dir        | Override the dir for `daemon.pid` / `workspaces.json`                      |
 | `SPEEDY_BIN`              | `speedy-cli`               | Binary that `speedy-mcp` invokes for tool calls                            |
-| `SPEEDY_MODEL`            | `all-minilm:l6-v2`         | Ollama embedding model                                                     |
-| `SPEEDY_OLLAMA_URL`       | `http://localhost:11434`   | Ollama server URL                                                          |
-| `SPEEDY_PROVIDER`         | `ollama`                   | Embedding provider (`ollama` or `agent`)                                   |
+| `SPEEDY_PROVIDER`         | `ollama`                   | Embedding provider type (`ollama`, `openai`, `gemini`, `anthropic`, `agent`, …) |
+| `SPEEDY_MODEL`            | `nomic-embed-text`         | Embedding model name                                                       |
+| `SPEEDY_BASE_URL`         | *(provider default)*       | Base URL of the embedding endpoint                                         |
+| `SPEEDY_API_KEY`          | *(empty)*                  | API key for remote providers                                               |
 | `SPEEDY_AGENT_COMMAND`    | *(empty)*                  | External command when `SPEEDY_PROVIDER=agent`                              |
+| `SPEEDY_OLLAMA_URL`       | `http://localhost:11434`   | Legacy alias for `SPEEDY_BASE_URL` (Ollama)                                |
 | `SPEEDY_TOP_K`            | `5`                        | Default top-K for `query`                                                  |
 | `RUST_LOG`                | *(empty)*                  | Tracing filter                                                             |
 
-### Config file (`speedy.toml` / `.speedy/config.toml`)
+### `config.speedy.json` (recommended)
+
+Place `.speedy/config.speedy.json` in your workspace (or `~/.speedy/config.speedy.json` for user-level defaults). This format supports all providers:
+
+```json
+{
+  "provider": {
+    "type": "ollama",
+    "model": "nomic-embed-text"
+  },
+  "top_k": 10
+}
+```
+
+> **Note:** add `.speedy/config.speedy.json` to your `.gitignore` — it may contain API keys.
+
+### TOML config file (`speedy.toml` / `.speedy/config.toml`)
 
 ```toml
 model = "nomic-embed-text"
@@ -333,8 +355,18 @@ ignore_patterns = ["target/", ".git/", "node_modules/"]
 
 ### Embedding providers
 
-- **`ollama`** (default) — calls Ollama's `/api/embeddings`. Requires Ollama running locally.
-- **`agent`** — delegates embedding to `SPEEDY_AGENT_COMMAND`. The command receives the text as its first argument and must output a JSON array of floats on stdout.
+| Provider | `type` | API key required | Notes |
+|---|---|---|---|
+| Ollama | `ollama` | No | Default. Requires Ollama running locally. |
+| OpenAI | `openai` | Yes | Native embedding API. |
+| Gemini | `gemini` | Yes | Native embedding API. |
+| Azure OpenAI | `azure-openai` | Yes | Set `base_url` to your deployment endpoint. |
+| Any OpenAI-compatible | `openai-compatible` | Optional | LM Studio, vLLM, etc. Requires `base_url`. |
+| Anthropic *(proxy)* | `anthropic` | Yes | No native embedding — uses generative model. |
+| DeepSeek *(proxy)* | `deepseek` | Yes | No native embedding — uses generative model. |
+| External process | `agent` | No | Process reads text, writes JSON float array to stdout. |
+
+Full examples and field reference in **[`CONFIG.md`](./CONFIG.md)**.
 
 ## Ignore files
 
@@ -359,9 +391,10 @@ The daemon's watcher additionally hardcodes ignores for: `target/`, `.git/`, `no
 
 <workspace>/
 ├── .speedy/
-│   ├── index.sqlite    ← vector store for THIS workspace
-│   └── config.toml     ← optional per-workspace overrides
-└── .speedyignore       ← optional, gitignore syntax
+│   ├── index.sqlite         ← vector store for THIS workspace
+│   ├── config.toml          ← optional per-workspace overrides (TOML)
+│   └── config.speedy.json   ← optional per-workspace overrides (JSON, supports all providers)
+└── .speedyignore            ← optional, gitignore syntax
 ```
 
 - Only the daemon writes to `workspaces.json`. CLI / MCP / scripts ask the daemon to `add` / `remove`; they never write the file directly.

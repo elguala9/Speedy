@@ -2,8 +2,8 @@
 //!
 //! All benches are self-contained: they do not require Ollama, the daemon, or
 //! the speedy binary. Embeddings are synthetic random vectors so similarity
-//! scoring exercises the cosine path with realistic data shapes (`d=384` for
-//! `all-minilm:l6-v2`, the default model).
+//! scoring exercises the cosine path with realistic data shapes (`d=768` for
+//! `nomic-embed-text`, the default model).
 //!
 //! Run with `cargo bench -p speedy-ai-context`.
 

@@ -9,7 +9,7 @@ Guida passo-passo per installare i 5 binari di Speedy su Windows e configurare l
 1. **Ollama** — [ollama.com](https://ollama.com) — deve girare in background.
 2. Scarica il modello di embedding (una volta sola):
    ```powershell
-   ollama pull all-minilm:l6-v2
+   ollama pull nomic-embed-text
    ```
 
 ---

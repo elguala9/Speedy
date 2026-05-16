@@ -28,7 +28,7 @@ COPY --from=builder \
     /build/target/x86_64-unknown-linux-musl/release/speedy-service \
     /usr/local/bin/speedy-service
 
-ENV SPEEDY_MODEL=all-minilm:l6-v2
+ENV SPEEDY_MODEL=nomic-embed-text
 ENV SPEEDY_LOG=info
 
 EXPOSE 8080

@@ -20,9 +20,10 @@ Se un campo è assente nel file workspace, viene ereditato dal file utente. Se m
   "provider": {
     "type": "ollama",
     "base_url": "http://localhost:11434",
-    "model": "all-minilm:l6-v2",
+    "model": "nomic-embed-text",
     "api_key": "",
-    "command": ""
+    "command": "",
+    "dims": 384
   },
   "max_chunk_size": 1000,
   "chunk_overlap": 200,
@@ -33,6 +34,15 @@ Se un campo è assente nel file workspace, viene ereditato dal file utente. Se m
 ```
 
 Tutti i campi sono opzionali. Il default è Ollama su localhost.
+
+| Campo provider | Tipo | Default | Descrizione |
+|---|---|---|---|
+| `type` | string | `"ollama"` | Tipo di provider |
+| `base_url` | string | *(provider default)* | URL base dell'endpoint |
+| `model` | string | `"nomic-embed-text"` | Modello embedding |
+| `api_key` | string | *(empty)* | API key (non necessaria per Ollama/agent) |
+| `command` | string | *(empty)* | Comando per `type: "agent"` |
+| `dims` | number | `384` | Dimensione vettore per provider generativi (Anthropic, DeepSeek) |
 
 ---
 
@@ -47,12 +57,12 @@ Nessuna API key richiesta. Richiede Ollama in esecuzione localmente.
   "provider": {
     "type": "ollama",
     "base_url": "http://localhost:11434",
-    "model": "all-minilm:l6-v2"
+    "model": "nomic-embed-text"
   }
 }
 ```
 
-Modelli consigliati: `all-minilm:l6-v2`, `nomic-embed-text`, `mxbai-embed-large`
+Modelli consigliati: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embedding:0.6b`
 
 ---
 
@@ -127,10 +137,13 @@ Claude non ha un'API di embedding nativa. Speedy usa il modello generativo per p
   "provider": {
     "type": "anthropic",
     "model": "claude-3-haiku-20240307",
-    "api_key": "sk-ant-..."
+    "api_key": "sk-ant-...",
+    "dims": 384
   }
 }
 ```
+
+`dims` controlla la dimensione del vettore richiesto al modello (default: 384). Deve essere coerente tra index e query.
 
 ---
 
@@ -143,7 +156,8 @@ Come Anthropic: usa il modello chat come proxy. Vedi nota sopra.
   "provider": {
     "type": "deepseek",
     "model": "deepseek-chat",
-    "api_key": "..."
+    "api_key": "...",
+    "dims": 384
   }
 }
 ```
