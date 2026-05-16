@@ -33,7 +33,7 @@ spec:
                   name: speedy-secrets
                   key: ollama-url
             - name: SPEEDY_MODEL
-              value: "all-minilm:l6-v2"
+              value: "nomic-embed-text"
           resources:
             requests:
               cpu: "250m"

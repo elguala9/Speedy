@@ -11,14 +11,14 @@ speedy-gui 5).
 
 ## P1 — Smoke E2E manuale GUI
 
-Richiede macchina fisica. Checklist completa in **[`TODO-platform.md`](./TODO-platform.md)**.
+Richiede macchina fisica. Checklist completa in **[`TODO-platform.md`](./os/TODO-platform.md)**.
 
 ---
 
 ## P2 — Fedora / Linux packaging
 
 Tutto il resto (§1 build Fedora, §3 README Linux, §4 autostart, §5 .desktop)
-è già dettagliato in **[`todo-fedora.md`](./todo-fedora.md)**.
+è già dettagliato in **[`todo-fedora.md`](./os/todo-fedora.md)**.
 
 ---
 

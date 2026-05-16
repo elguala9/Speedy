@@ -15,7 +15,7 @@ idle_timeout    = "10m"
 
 [embeddings]
 provider = "ollama"
-model    = "all-minilm:l6-v2"
+model    = "nomic-embed-text"
 ollama_url  = "http://localhost:11434"
 batch_size  = 64
 cache_size  = 10_000

@@ -59,7 +59,7 @@ impl Indexer {
             let _ = std::fs::write(&speedyignore, content);
         }
 
-        let embedder = embed::create_provider(config);
+        let embedder = embed::create_provider(config)?;
 
         // Compatibility check: warn if the DB was built with a different model
         // than what's configured now. Old chunks won't be in the same vector
