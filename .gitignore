@@ -1,6 +1,9 @@
 /target
+/dist
 .speedy
 .speedy_db
 .vscode
 .serena
 .claude
+# icona generata da make-icon.ps1 (non committare binary generati)
+installer/assets/speedy.ico
