@@ -8,12 +8,12 @@ $target = Join-Path (Join-Path $root 'target') 'release'
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-Write-Host '==> Build release dei 6 binari...' -ForegroundColor Yellow
-cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context
+Write-Host '==> Build release dei 7 binari...' -ForegroundColor Yellow
+cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-gui -p speedy-language-context
 if ($LASTEXITCODE -ne 0) { throw 'Build fallito' }
 
 # Copia in dist/
-@('speedy-ai-context.exe', 'speedy-daemon.exe', 'speedy-cli.exe', 'speedy-mcp.exe', 'speedy-gui.exe', 'speedy-language-context.exe') | ForEach-Object {
+@('speedy-ai-context.exe', 'speedy-daemon.exe', 'speedy-cli.exe', 'speedy-ai-context-mcp.exe', 'speedy-gui.exe', 'speedy-language-context.exe', 'speedy-language-context-mcp.exe') | ForEach-Object {
     $src = Join-Path $target $_
     if (Test-Path $src) {
         Copy-Item $src $dist
