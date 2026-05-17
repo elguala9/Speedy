@@ -4475,6 +4475,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "speedy-core",
+ "sqlite-vec",
  "tempfile",
  "tokio",
  "toml",
@@ -4482,6 +4483,20 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "speedy-ai-context-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "speedy-core",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4596,17 +4611,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "speedy-mcp"
-version = "0.1.0"
+name = "sqlite-vec"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0ba424237a9a5db2f6071f193319e2b6a32f7f3961debb2fbbfe67067abce3f"
 dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "speedy-core",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
+ "cc",
 ]
 
 [[package]]
