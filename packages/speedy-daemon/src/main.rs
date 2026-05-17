@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! # Speedy Daemon
 //!
 //! IPC protocol reference: see `docs/ipc-protocol.md`.
@@ -1052,6 +1053,25 @@ async fn dispatch_command(
 
         _ if line.starts_with("exec ") || line.starts_with("exec\t") => {
             let args = line[4..].trim_start_matches(|c: char| c == ' ').trim_end();
+            // Auto-register the workspace so `list` returns it immediately and
+            // file-watchers start. Persist to workspaces.json best-effort (may
+            // fail under lock contention); always update in-memory watchers.
+            let (cwd_opt, _parts) = parse_exec_args(args);
+            if let Some(ref cwd) = cwd_opt {
+                if let Ok(canonical) = std::path::Path::new(cwd.as_str()).canonicalize() {
+                    let path_str = canonical.to_string_lossy().to_string();
+                    if !workspace::is_registered(&path_str) {
+                        if let Err(e) = workspace::add(&path_str) {
+                            tracing::warn!("failed to persist workspace {path_str}: {e}");
+                        }
+                    }
+                    let mut ws = watchers.lock().await;
+                    if !ws.contains_key(&path_str) {
+                        let handle = start_workspace_watcher(&path_str, active_pids.clone(), metrics.clone());
+                        ws.insert(path_str, handle);
+                    }
+                }
+            }
             let result = exec_speedy_command(args, metrics).await;
             format!("{result}\n")
         }
