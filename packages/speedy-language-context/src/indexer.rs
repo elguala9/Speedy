@@ -106,13 +106,17 @@ fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
     }
 
     let now = chrono::Utc::now().to_rfc3339();
+    let duration_ms = started.elapsed().as_millis() as u64;
     let _ = store.set_meta("last_indexed_at", &now);
+    let _ = store.set_meta("last_files_indexed", &files_indexed.to_string());
+    let _ = store.set_meta("last_symbols_found", &symbols_found.to_string());
+    let _ = store.set_meta("last_index_duration_ms", &duration_ms.to_string());
 
     Ok(IndexStats {
         files_indexed,
         files_skipped,
         symbols_found,
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms,
     })
 }
 
@@ -142,13 +146,17 @@ fn index_files_blocking(root: &Path, store: &GraphStore, files: &[PathBuf]) -> R
         }
     }
     let now = chrono::Utc::now().to_rfc3339();
+    let duration_ms = started.elapsed().as_millis() as u64;
     let _ = store.set_meta("last_indexed_at", &now);
+    let _ = store.set_meta("last_files_indexed", &files_indexed.to_string());
+    let _ = store.set_meta("last_symbols_found", &symbols_found.to_string());
+    let _ = store.set_meta("last_index_duration_ms", &duration_ms.to_string());
 
     Ok(IndexStats {
         files_indexed,
         files_skipped,
         symbols_found,
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms,
     })
 }
 

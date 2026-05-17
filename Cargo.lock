@@ -4541,6 +4541,7 @@ dependencies = [
  "dirs 5.0.1",
  "notify",
  "notify-debouncer-mini",
+ "rusqlite",
  "serde",
  "serde_json",
  "speedy-core",
