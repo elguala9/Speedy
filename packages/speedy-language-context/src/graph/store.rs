@@ -286,7 +286,31 @@ fn row_to_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<Symbol> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{EdgeKind, SymbolKind};
+    use crate::parser::ParsedSymbol;
     use tempfile::tempdir;
+
+    fn make_sym(kind: SymbolKind, name: &str, is_public: bool) -> ParsedSymbol {
+        ParsedSymbol {
+            kind,
+            name: name.to_string(),
+            start_line: 0,
+            end_line: 5,
+            signature: format!("fn {}()", name),
+            is_public,
+        }
+    }
+
+    fn make_sym_at(name: &str, start: u32, end: u32) -> ParsedSymbol {
+        ParsedSymbol {
+            kind: SymbolKind::Function,
+            name: name.to_string(),
+            start_line: start,
+            end_line: end,
+            signature: format!("fn {}()", name),
+            is_public: true,
+        }
+    }
 
     #[test]
     fn test_open_and_counts() {
@@ -305,5 +329,226 @@ mod tests {
         let id2 = store.upsert_file("foo.rs", 200, "h2").unwrap();
         assert_eq!(id1, id2);
         assert_eq!(store.get_file_hash("foo.rs").unwrap().as_deref(), Some("h2"));
+    }
+
+    #[test]
+    fn test_insert_and_get_symbol_by_id() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("src/lib.rs", 100, "h1").unwrap();
+        let sym_id = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "my_fn", true))
+            .unwrap();
+        assert!(sym_id > 0);
+        assert_eq!(store.symbol_count().unwrap(), 1);
+
+        let sym = store.get_symbol_by_id(sym_id).unwrap().unwrap();
+        assert_eq!(sym.name, "my_fn");
+        assert_eq!(sym.file, "src/lib.rs");
+        assert!(sym.is_public);
+        assert!(matches!(sym.kind, SymbolKind::Function));
+    }
+
+    #[test]
+    fn test_get_symbol_by_id_nonexistent() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        assert!(store.get_symbol_by_id(9999).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_symbols_for_file_ordered_by_start_line() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("a.rs", 0, "h").unwrap();
+
+        // Insert in non-line order
+        store.insert_symbol(file_id, &make_sym_at("c_fn", 20, 25)).unwrap();
+        store.insert_symbol(file_id, &make_sym_at("a_fn", 1, 5)).unwrap();
+        store.insert_symbol(file_id, &make_sym_at("b_fn", 10, 15)).unwrap();
+
+        let syms = store.get_symbols_for_file("a.rs").unwrap();
+        assert_eq!(syms.len(), 3);
+        assert_eq!(syms[0].name, "a_fn");
+        assert_eq!(syms[1].name, "b_fn");
+        assert_eq!(syms[2].name, "c_fn");
+    }
+
+    #[test]
+    fn test_get_symbols_for_nonexistent_file_returns_empty() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        assert!(store.get_symbols_for_file("nonexistent.rs").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_delete_file_symbols_cascades() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("del.rs", 0, "h").unwrap();
+        store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "to_delete", true))
+            .unwrap();
+        assert_eq!(store.symbol_count().unwrap(), 1);
+        store.delete_file_symbols(file_id).unwrap();
+        assert_eq!(store.symbol_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_insert_edge_dedup() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("e.rs", 0, "h").unwrap();
+        let a = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "a", true))
+            .unwrap();
+        let b = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "b", true))
+            .unwrap();
+        store.insert_edge(a, b, EdgeKind::Calls).unwrap();
+        assert_eq!(store.edge_count().unwrap(), 1);
+        // Duplicate — INSERT OR IGNORE
+        store.insert_edge(a, b, EdgeKind::Calls).unwrap();
+        assert_eq!(store.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_find_referencing_symbols_direct_caller() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("f.rs", 0, "h").unwrap();
+        let caller = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "caller", true))
+            .unwrap();
+        let callee = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "callee", true))
+            .unwrap();
+        store.insert_edge(caller, callee, EdgeKind::Calls).unwrap();
+
+        let refs = store.find_referencing_symbols(callee, 1).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "caller");
+    }
+
+    #[test]
+    fn test_find_referencing_symbols_transitive_chain() {
+        // a -> b -> c.  Referencing(c, depth=10) = [b, a]
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("chain.rs", 0, "h").unwrap();
+        let a = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "a", true))
+            .unwrap();
+        let b = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "b", true))
+            .unwrap();
+        let c = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "c", true))
+            .unwrap();
+        store.insert_edge(a, b, EdgeKind::Calls).unwrap();
+        store.insert_edge(b, c, EdgeKind::Calls).unwrap();
+
+        let refs = store.find_referencing_symbols(c, 10).unwrap();
+        let names: Vec<&str> = refs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"b"), "b is a direct caller of c");
+        assert!(names.contains(&"a"), "a is a transitive caller of c");
+    }
+
+    #[test]
+    fn test_find_referencing_symbols_depth_1_only_direct() {
+        // a -> b -> c.  depth=1 should only return b (not a)
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("depth.rs", 0, "h").unwrap();
+        let a = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "a", true))
+            .unwrap();
+        let b = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "b", true))
+            .unwrap();
+        let c = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "c", true))
+            .unwrap();
+        store.insert_edge(a, b, EdgeKind::Calls).unwrap();
+        store.insert_edge(b, c, EdgeKind::Calls).unwrap();
+
+        let refs = store.find_referencing_symbols(c, 1).unwrap();
+        let names: Vec<&str> = refs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"b"), "b is a direct caller");
+        assert!(!names.contains(&"a"), "a is too deep at depth=1");
+    }
+
+    #[test]
+    fn test_find_referencing_symbols_root_node_returns_empty() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("root.rs", 0, "h").unwrap();
+        let sym = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "root_fn", true))
+            .unwrap();
+        let refs = store.find_referencing_symbols(sym, 10).unwrap();
+        assert!(refs.is_empty(), "root node has no callers");
+    }
+
+    #[test]
+    fn test_find_referencing_symbols_cycle_terminates() {
+        // a -> b -> c -> a (cycle). BFS must terminate without infinite loop.
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let file_id = store.upsert_file("cycle.rs", 0, "h").unwrap();
+        let a = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "a", true))
+            .unwrap();
+        let b = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "b", true))
+            .unwrap();
+        let c = store
+            .insert_symbol(file_id, &make_sym(SymbolKind::Function, "c", true))
+            .unwrap();
+        store.insert_edge(a, b, EdgeKind::Calls).unwrap();
+        store.insert_edge(b, c, EdgeKind::Calls).unwrap();
+        store.insert_edge(c, a, EdgeKind::Calls).unwrap();
+
+        let refs = store.find_referencing_symbols(c, 100).unwrap();
+        // BFS terminates because `seen` prevents revisiting. The result is bounded.
+        assert!(refs.len() <= 3, "cycle BFS must terminate: got {} refs", refs.len());
+        let names: Vec<&str> = refs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"b"), "b references c directly");
+    }
+
+    #[test]
+    fn test_meta_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        assert!(store.get_meta("schema_version").unwrap().is_none());
+        store.set_meta("schema_version", "2").unwrap();
+        assert_eq!(
+            store.get_meta("schema_version").unwrap().as_deref(),
+            Some("2")
+        );
+        store.set_meta("schema_version", "3").unwrap();
+        assert_eq!(
+            store.get_meta("schema_version").unwrap().as_deref(),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn test_get_all_symbols_across_files() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+        let fa = store.upsert_file("a.rs", 0, "ha").unwrap();
+        let fb = store.upsert_file("b.rs", 0, "hb").unwrap();
+        store
+            .insert_symbol(fa, &make_sym(SymbolKind::Function, "fn_a", true))
+            .unwrap();
+        store
+            .insert_symbol(fb, &make_sym(SymbolKind::Struct, "StructB", true))
+            .unwrap();
+        let all = store.get_all_symbols().unwrap();
+        assert_eq!(all.len(), 2);
+        let names: Vec<&str> = all.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"fn_a"));
+        assert!(names.contains(&"StructB"));
     }
 }
