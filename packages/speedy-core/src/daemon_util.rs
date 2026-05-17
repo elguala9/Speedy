@@ -6,6 +6,19 @@ pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Returns the `logs/` directory next to the running executable, creating it
+/// if necessary. Falls back to `current_dir()/logs` when the exe path cannot
+/// be resolved.
+pub fn exe_log_dir() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let logs = exe_dir.join("logs");
+    let _ = std::fs::create_dir_all(&logs);
+    logs
+}
+
 pub fn daemon_dir_path() -> Result<PathBuf> {
     if let Ok(custom) = std::env::var("SPEEDY_DAEMON_DIR") {
         if !custom.is_empty() {

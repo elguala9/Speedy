@@ -42,7 +42,8 @@ async-trait = "0.1"
 indicatif = "0.17"
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
