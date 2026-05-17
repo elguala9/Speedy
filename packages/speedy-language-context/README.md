@@ -106,7 +106,7 @@ Use the **speedy-gui** Workspaces tab to toggle these with checkboxes (changes a
 
 ## Data directory
 
-All data lives in `<workspace>/.speedy/slc.db` (SQLite, WAL mode). The file is safe to delete; the next `index` run recreates it.
+All data lives in `<workspace>/.speedy/slc.sqlite` (SQLite, WAL mode). The file is safe to delete; the next `index` run recreates it.
 
 ## Supported languages
 

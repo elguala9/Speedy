@@ -69,15 +69,24 @@ Per buildare l'installer dal sorgente:
 # 1. Install Rust: https://rustup.rs/
 # 2. Install Ollama and pull an embedding model
 ollama pull nomic-embed-text
-
-# 3. Build all 5 binaries in one shot
-cargo build-all
-# (alias for: cargo build --release -p speedy-ai-context -p speedy-daemon \
-#                            -p speedy-cli -p speedy-mcp -p speedy-gui)
 ```
 
-Or run `scripts/build-release.ps1` / `scripts/build-release.sh` — they build
-**and** copy every `.exe` into `dist/`.
+**Build + copy to `dist/` in one shot (recommended):**
+
+```powershell
+cargo xtask dist            # incremental build — only recompiles what changed
+cargo xtask dist --clean    # force full rebuild of all 6 binaries
+```
+
+The `xtask` command builds all binaries in release mode and copies them into `dist/`.
+
+Or, if you just want the raw release artifacts in `target/release/` without copying:
+
+```powershell
+cargo build-all
+# (alias for: cargo build --release -p speedy-ai-context -p speedy-daemon
+#             -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context)
+```
 
 ### Recommended layout (Windows)
 

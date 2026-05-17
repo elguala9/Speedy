@@ -325,17 +325,17 @@ impl CentralDaemon {
 }
 
 fn find_speedy_exe() -> PathBuf {
-    let exe_name = format!("speedy{}", std::env::consts::EXE_SUFFIX);
+    let exe_name = format!("speedy-ai-context{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe() {
         let Some(dir) = exe.parent() else {
-            return PathBuf::from("speedy");
+            return PathBuf::from("speedy-ai-context");
         };
         let candidate = dir.join(&exe_name);
         if candidate.exists() {
             return candidate;
         }
         // When running under `cargo test`, current_exe is in target/debug/deps/
-        // — speedy.exe lives one directory up.
+        // — speedy-ai-context lives one directory up.
         if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
             if let Some(parent) = dir.parent() {
                 let candidate = parent.join(&exe_name);
@@ -345,7 +345,7 @@ fn find_speedy_exe() -> PathBuf {
             }
         }
     }
-    PathBuf::from("speedy")
+    PathBuf::from("speedy-ai-context")
 }
 
 fn should_ignore_watch_path(p: &Path) -> bool {
@@ -896,14 +896,20 @@ async fn exec_speedy_command(args: &str, metrics: &Metrics) -> String {
     cmd.creation_flags(CREATE_NO_WINDOW);
     match cmd.output().await {
         Ok(out) => {
-            let mut result = String::from_utf8_lossy(&out.stdout).to_string();
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                result.push_str(&format!("\nstderr: {stderr}"));
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if out.status.success() {
+                tracing::info!(exe = %exe.display(), stdout = %stdout.trim(), "exec ok");
+                stdout.to_string()
+            } else {
+                tracing::error!(exe = %exe.display(), stderr = %stderr.trim(), "exec failed");
+                format!("error: {}", stderr.trim())
             }
-            result
         }
-        Err(e) => format!("error: failed to run speedy: {e}"),
+        Err(e) => {
+            tracing::error!(exe = %exe.display(), error = %e, "exec spawn failed");
+            format!("error: failed to run speedy-ai-context: {e}")
+        }
     }
 }
 
@@ -918,6 +924,7 @@ async fn dispatch_command(
     running: &AtomicBool,
     daemon_dir: &Path,
 ) -> String {
+    tracing::debug!(cmd = %line, "ipc command received");
     match line {
         "ping" => "pong\n".to_string(),
 
@@ -1287,11 +1294,12 @@ async fn handle_sync(
     let output = cmd.output().await?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!(target: "sync", workspace = %path_str, ms = elapsed_ms, "Sync failed: {stderr}");
+        error!(target: "sync", workspace = %path_str, ms = elapsed_ms, stderr = %stderr.trim(), "Sync failed");
     } else {
-        info!(target: "sync", workspace = %path_str, ms = elapsed_ms, "Sync done");
+        info!(target: "sync", workspace = %path_str, ms = elapsed_ms, stdout = %stdout.trim(), "Sync done");
         let ws = watchers.lock().await;
         if let Some(h) = ws.get(&path_str) {
             h.last_sync_at.store(unix_now_secs(), Ordering::Relaxed);
@@ -1316,13 +1324,45 @@ async fn handle_reindex(raw_path: &str) -> Result<String> {
     let output = cmd.output().await?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!(target: "index", workspace = %path_str, ms = elapsed_ms, "Reindex failed: {stderr}");
-        anyhow::bail!("reindex failed: {stderr}");
+        error!(target: "index", workspace = %path_str, ms = elapsed_ms, stderr = %stderr.trim(), "Reindex failed");
+        anyhow::bail!("reindex failed: {}", stderr.trim());
     }
-    info!(target: "index", workspace = %path_str, ms = elapsed_ms, "Reindex done");
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    info!(target: "index", workspace = %path_str, ms = elapsed_ms, stdout = %stdout.trim(), "Reindex done");
+
+    // Also full-index the symbol graph when language_context is enabled.
+    let features = slc_features::load_features(Some(&path_str));
+    if features.language_context {
+        if let Some(slc_exe) = slc_features::find_slc_exe() {
+            let mut slc_cmd = tokio::process::Command::new(&slc_exe);
+            slc_cmd
+                .arg("--path").arg(&path_str)
+                .arg("index")
+                .env("SPEEDY_NO_DAEMON", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            #[cfg(windows)]
+            slc_cmd.creation_flags(CREATE_NO_WINDOW);
+            match slc_cmd.output().await {
+                Ok(o) if o.status.success() => {
+                    info!(target: "index", workspace = %path_str, "SLC index done");
+                }
+                Ok(o) => {
+                    warn!(target: "index", workspace = %path_str, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "SLC index failed");
+                }
+                Err(e) => {
+                    warn!(target: "index", workspace = %path_str, error = %e, "failed to run slc index");
+                }
+            }
+        } else {
+            tracing::debug!("speedy-language-context not found; skipping slc index");
+        }
+    }
+
+    Ok(stdout.trim().to_string())
 }
 
 async fn handle_workspace_status(
@@ -1345,7 +1385,7 @@ async fn handle_workspace_status(
         }
     };
 
-    let db_path = Path::new(&path_str).join(".speedy").join("index.sqlite");
+    let db_path = Path::new(&path_str).join(".speedy").join("sac.sqlite");
     let index_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(WorkspaceStatus {
@@ -1359,7 +1399,7 @@ async fn handle_workspace_status(
 }
 
 /// Parse `[\t<root>[\t<max_depth>]]` and walk the filesystem reporting every
-/// directory that contains `.speedy/index.sqlite`. Skips common build dirs.
+/// directory that contains `.speedy/sac.sqlite`. Skips common build dirs.
 async fn handle_scan(args: &str) -> String {
     let trimmed = args.trim_start_matches(['\t', ' ']);
     let mut parts = trimmed.split(['\t', '\n']);
@@ -1404,7 +1444,7 @@ fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
             continue;
         }
         let path = entry.path();
-        let db = path.join(".speedy").join("index.sqlite");
+        let db = path.join(".speedy").join("sac.sqlite");
         if !db.exists() {
             continue;
         }
@@ -1477,12 +1517,7 @@ fn main() -> Result<()> {
         std::env::set_var("SPEEDY_DAEMON_DIR", dir);
     }
 
-    let daemon_dir = match &cli.daemon_dir {
-        Some(d) => d.clone(),
-        None => speedy_core::daemon_util::daemon_dir_path()?,
-    };
-    let logs_dir = daemon_dir.join("logs");
-    std::fs::create_dir_all(&logs_dir).ok();
+    let logs_dir = speedy_core::daemon_util::exe_log_dir();
 
     let file_appender = tracing_appender::rolling::daily(&logs_dir, "daemon.log");
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
@@ -1689,7 +1724,7 @@ mod tests {
 
     #[test]
     fn test_should_ignore_watch_path_speedy_internal() {
-        assert!(should_ignore_watch_path(Path::new(".speedy/index.sqlite")));
+        assert!(should_ignore_watch_path(Path::new(".speedy/sac.sqlite")));
         assert!(should_ignore_watch_path(Path::new(".speedy-daemon/foo")));
     }
 
@@ -2776,8 +2811,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scan_finds_directory_with_index_sqlite() {
-        // Create a root with one .speedy/index.sqlite inside.
+    async fn test_scan_finds_directory_with_sac_sqlite() {
+        // Create a root with one .speedy/sac.sqlite inside.
         let root = std::env::temp_dir().join(format!(
             "speedy_d_scan_{}",
             std::time::SystemTime::now()
@@ -2788,7 +2823,7 @@ mod tests {
         let project = root.join("proj-a");
         let speedy_dir = project.join(".speedy");
         std::fs::create_dir_all(&speedy_dir).unwrap();
-        std::fs::write(speedy_dir.join("index.sqlite"), b"fake db content").unwrap();
+        std::fs::write(speedy_dir.join("sac.sqlite"), b"fake db content").unwrap();
 
         let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let active_pids = Arc::new(StdMutex::new(HashSet::new()));

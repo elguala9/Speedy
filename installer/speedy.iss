@@ -91,11 +91,12 @@ Name: "desktopicon"; Description: "Crea collegamento sul Desktop per Speedy GUI"
 [Files]
 ; ============================================================
 ; Binari principali (ignoreversion = sovrascrive sempre, utile per aggiornamenti)
-Source: "..\dist\speedy-ai-context.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-daemon.exe";     DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-cli.exe";        DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-mcp.exe";        DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-gui.exe";        DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-ai-context.exe";        DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-daemon.exe";            DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-cli.exe";               DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-mcp.exe";               DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-gui.exe";               DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-language-context.exe";  DestDir: "{app}"; Flags: ignoreversion
 
 ; Wrapper VBScript: avvia speedy-daemon.exe senza finestra console visibile.
 ; wscript.exe chiama questo script con WindowStyle=0 (hidden).
@@ -130,10 +131,14 @@ Name: "{userdesktop}\Speedy"; Filename: "{app}\speedy-gui.exe"; WorkingDir: "{ap
 ; Aggiunge {app} al PATH utente (REG_EXPAND_SZ in HKCU\Environment\Path).
 ; {olddata} = valore attuale del registry.
 ; La funzione Check: NeedsAddPath evita duplicati.
+; uninsneveruninstall: Inno Setup NON ripristina il vecchio valore PATH durante
+; la disinstallazione — lo fa RemoveFromPath nel [Code], che rimuove solo il
+; segmento Speedy invece di ripristinare un valore potenzialmente obsoleto.
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
   ValueData: "{olddata};{app}"; \
   Tasks: addtopath; \
-  Check: NeedsAddPath(ExpandConstant('{app}'))
+  Check: NeedsAddPath(ExpandConstant('{app}')); \
+  Flags: noerror
 
 ; ============================================================
 [Run]
@@ -155,10 +160,17 @@ Filename: "{app}\speedy-gui.exe"; \
   Flags: nowait postinstall shellexec
 
 ; ============================================================
+[UninstallDelete]
+; ============================================================
+
+; La cartella logs/ viene creata a runtime (non è in [Files]) — la eliminiamo sempre.
+Type: filesandordirs; Name: "{app}\logs"
+
+; ============================================================
 [UninstallRun]
 ; ============================================================
 
-; Prima di rimuovere i file: ferma il daemon via IPC.
+; 1. Stop graceful del daemon via IPC.
 ; skipifdoesntexist: tollera installazioni parziali.
 ; waituntilterminated: aspetta che speedy-cli.exe finisca prima di procedere.
 Filename: "{app}\speedy-cli.exe"; \
@@ -166,6 +178,29 @@ Filename: "{app}\speedy-cli.exe"; \
   Flags: runhidden skipifdoesntexist waituntilterminated; \
   RunOnceId: "StopDaemon"; \
   StatusMsg: "Arresto Speedy Daemon in corso..."
+
+; 2. Force-kill dei processi rimasti (in caso il daemon non risponda all'IPC).
+; taskkill esce con errore se il processo non e' in esecuzione — ignorato da Inno Setup.
+Filename: "{sys}\taskkill.exe"; \
+  Parameters: "/F /IM speedy-daemon.exe /T"; \
+  Flags: runhidden; \
+  RunOnceId: "KillDaemon"; \
+  StatusMsg: "Chiusura forzata processi Speedy..."
+
+Filename: "{sys}\taskkill.exe"; \
+  Parameters: "/F /IM speedy-gui.exe /T"; \
+  Flags: runhidden; \
+  RunOnceId: "KillGui"
+
+Filename: "{sys}\taskkill.exe"; \
+  Parameters: "/F /IM speedy-ai-context.exe /T"; \
+  Flags: runhidden; \
+  RunOnceId: "KillAiCtx"
+
+Filename: "{sys}\taskkill.exe"; \
+  Parameters: "/F /IM speedy-language-context.exe /T"; \
+  Flags: runhidden; \
+  RunOnceId: "KillLangCtx"
 
 ; ============================================================
 [Code]
@@ -263,18 +298,39 @@ end;
 
 { ----------------------------------------------------------------
   UNINSTALL - CurUninstallStepChanged
-  usUninstall:    rimuove la dir di installazione dal PATH utente
+  usUninstall:     rimuove la dir di installazione dal PATH utente
+                   e cancella le chiavi di registro specifiche di Speedy
   usPostUninstall: se l'utente ha scelto Si, cancella le dir dati
   ---------------------------------------------------------------- }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   AppData, LocalAppData, UserProfile: string;
+  ResultCode: Integer;
 begin
   case CurUninstallStep of
 
     usUninstall:
     begin
+      // Kill difensivo: se i processi fossero ancora vivi bloccano i file.
+      // ResultCode ignorato (taskkill esce con errore se il processo non gira).
+      Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-daemon.exe /T',
+           '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-gui.exe /T',
+           '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-ai-context.exe /T',
+           '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-language-context.exe /T',
+           '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Sleep(1200); // attende che il SO rilasci i file lock prima della cancellazione
+
+      // Rimuove solo il segmento {app} dal PATH, non tocca il resto
       RemoveFromPath(ExpandConstant('{app}'));
+
+      { Chiavi di registro specifiche di Speedy (no-op se non esistono) }
+      RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Speedy');
+      RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Omnia Group\Speedy');
+      { Rimuove il parent solo se rimasto vuoto (altri prodotti Omnia potrebbero esserci) }
+      RegDeleteKeyIfEmpty(HKCU, 'Software\Omnia Group');
     end;
 
     usPostUninstall:

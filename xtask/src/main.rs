@@ -1,0 +1,121 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const BINARIES: &[&str] = &[
+    "speedy-ai-context",
+    "speedy-daemon",
+    "speedy-cli",
+    "speedy-mcp",
+    "speedy-gui",
+    "speedy-language-context",
+];
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let task = args.first().map(String::as_str);
+    let clean = args.contains(&"--clean".to_string());
+    let installer = args.contains(&"--installer".to_string());
+
+    match task {
+        Some("dist") => dist(clean, installer),
+        _ => {
+            eprintln!("Usage: cargo xtask <task> [flags]");
+            eprintln!("Tasks:");
+            eprintln!("  dist                      Incremental build + copy to dist/");
+            eprintln!("  dist --clean              Force full rebuild of all binaries");
+            eprintln!("  dist --installer          Also build the Windows installer (.exe)");
+            eprintln!("  dist --clean --installer  Full rebuild + installer");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn dist(clean: bool, installer: bool) {
+    let root = workspace_root();
+    let dist = root.join("dist");
+    let target = root.join("target").join("release");
+
+    if clean {
+        println!("==> Cleaning packages...");
+        let packages: Vec<_> = BINARIES.iter().flat_map(|b| ["-p", b]).collect();
+        let status = Command::new("cargo")
+            .arg("clean")
+            .args(&packages)
+            .current_dir(&root)
+            .status()
+            .expect("failed to run cargo clean");
+        if !status.success() {
+            eprintln!("cargo clean failed");
+            std::process::exit(1);
+        }
+    }
+
+    std::fs::create_dir_all(&dist).expect("failed to create dist/");
+
+    println!("==> Building release binaries...");
+    let packages: Vec<_> = BINARIES.iter().flat_map(|b| ["-p", b]).collect();
+    let status = Command::new("cargo")
+        .arg("build")
+        .arg("--release")
+        .args(&packages)
+        .current_dir(&root)
+        .status()
+        .expect("failed to run cargo build");
+
+    if !status.success() {
+        eprintln!("cargo build --release failed");
+        std::process::exit(1);
+    }
+
+    println!();
+    for bin in BINARIES {
+        let exe = exe_name(bin);
+        let src = target.join(&exe);
+        let dst = dist.join(&exe);
+        if src.exists() {
+            std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("copy {exe}: {e}"));
+            let kb = std::fs::metadata(&dst).map(|m| m.len() / 1024).unwrap_or(0);
+            println!("  dist/{exe}  ({kb} KB)");
+        } else {
+            eprintln!("  WARNING: {exe} not found in target/release");
+        }
+    }
+
+    println!("\nBinaries ready in {}", dist.display());
+
+    if installer {
+        build_installer(&root);
+    }
+}
+
+fn build_installer(root: &Path) {
+    println!("\n==> Building Windows installer...");
+    let script = root.join("scripts").join("build-installer.ps1");
+    let status = Command::new("powershell")
+        .args(["-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .arg("-SkipBuild")
+        .current_dir(root)
+        .status()
+        .expect("failed to launch build-installer.ps1");
+    if !status.success() {
+        eprintln!("build-installer.ps1 failed");
+        std::process::exit(1);
+    }
+}
+
+fn exe_name(bin: &str) -> String {
+    if cfg!(windows) {
+        format!("{bin}.exe")
+    } else {
+        bin.to_string()
+    }
+}
+
+fn workspace_root() -> PathBuf {
+    // CARGO_MANIFEST_DIR points to xtask/, go one level up
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask has no parent")
+        .to_path_buf()
+}

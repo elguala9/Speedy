@@ -10,6 +10,7 @@ pub use crate::types::DaemonStatus;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CMD_TIMEOUT: Duration = Duration::from_secs(10);
+const LONG_CMD_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Wire-format version this client understands. If a daemon reports a higher
 /// value in `status`, callers should treat it as incompatible.
@@ -58,9 +59,17 @@ impl DaemonClient {
     }
 
     async fn cmd(&self, req: &str) -> Result<String> {
+        self.cmd_with_timeout(req, CMD_TIMEOUT).await
+    }
+
+    async fn cmd_long(&self, req: &str) -> Result<String> {
+        self.cmd_with_timeout(req, LONG_CMD_TIMEOUT).await
+    }
+
+    async fn cmd_with_timeout(&self, req: &str, timeout: Duration) -> Result<String> {
         let req = req.to_string();
         let socket_name = self.socket_name.borrow();
-        tokio::time::timeout(CMD_TIMEOUT, async move {
+        tokio::time::timeout(timeout, async move {
             let mut stream = LocalStream::connect(socket_name)
                 .await
                 .context("Cannot connect to daemon. Is it running?")?;
@@ -181,7 +190,7 @@ impl DaemonClient {
         Ok(parsed.paths)
     }
 
-    /// Walk `root` looking for `.speedy/index.sqlite` and return one entry per
+    /// Walk `root` looking for `.speedy/sac.sqlite` and return one entry per
     /// hit. `max_depth` caps how deep the walker descends (default 8 on the
     /// daemon side if `None`).
     pub async fn scan(&self, root: &str, max_depth: Option<usize>) -> Result<Vec<ScanResult>> {
@@ -197,7 +206,11 @@ impl DaemonClient {
     /// `exec <path> index .` but tracked separately on the daemon side.
     pub async fn reindex(&self, path: &str) -> Result<String> {
         let canonical = Path::new(path).canonicalize()?;
-        self.cmd(&format!("reindex {}", canonical.display())).await
+        let resp = self.cmd_long(&format!("reindex {}", canonical.display())).await?;
+        if resp.starts_with("error") {
+            anyhow::bail!("{resp}");
+        }
+        Ok(resp)
     }
 
     pub async fn workspace_status(&self, path: &str) -> Result<WorkspaceStatus> {

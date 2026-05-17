@@ -1,5 +1,5 @@
 //! Free-form notes that the AI can save and retrieve via the MCP server.
-//! Backed by SQLite + FTS5 in the shared `.speedy/slc.db`.
+//! Backed by SQLite + FTS5 in the shared `.speedy/slc.sqlite`.
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -24,7 +24,7 @@ impl Memory {
             std::fs::create_dir_all(&speedy_dir)
                 .with_context(|| format!("creating .speedy/ at {}", speedy_dir.display()))?;
         }
-        let db_path = speedy_dir.join("slc.db");
+        let db_path = speedy_dir.join("slc.sqlite");
         let conn = Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")?;
         // Schema is created by GraphStore::open as well; safe to re-run.

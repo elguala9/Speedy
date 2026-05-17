@@ -1,2 +1,12 @@
 [alias]
-build-all = "build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui"
+build-all = "build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context"
+xtask = "run -p xtask --"
+
+[profile.dev]
+# Disabilita incremental: risparmia ~40% spazio in debug (rebuild leggermente piu' lenti)
+incremental = false
+
+[profile.dev.package."*"]
+# Le dipendenze esterne in debug mode vengono compilate con opt-level=1:
+# binari piu' veloci durante i test, file oggetto piu' piccoli rispetto a opt-level=0.
+opt-level = 1

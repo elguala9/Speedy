@@ -99,7 +99,7 @@ impl SqliteVectorStore {
         let db_dir = Path::new(path).join(".speedy");
         std::fs::create_dir_all(&db_dir)
             .context(format!("failed to create .speedy directory in {path}"))?;
-        let db_path = db_dir.join("vectors.db");
+        let db_path = db_dir.join("sac.sqlite");
         let conn = Connection::open(&db_path)
             .context(format!("failed to open database at {}", db_path.display()))?;
 
