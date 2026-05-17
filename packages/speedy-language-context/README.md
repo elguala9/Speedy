@@ -42,53 +42,7 @@ All commands accept `--json` to emit machine-readable output.
 
 ## MCP server
 
-### Configuring in Claude Code
-
-Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
-
-```json
-{
-  "mcpServers": {
-    "speedy-language-context": {
-      "command": "speedy-language-context",
-      "args": ["--path", "/absolute/path/to/workspace", "serve"]
-    }
-  }
-}
-```
-
-Or in `claude_desktop_config.json` for Claude Desktop:
-
-```json
-{
-  "mcpServers": {
-    "speedy-language-context": {
-      "command": "/usr/local/bin/speedy-language-context",
-      "args": ["--path", "/absolute/path/to/workspace", "serve"]
-    }
-  }
-}
-```
-
-### Available tools
-
-| Tool | Description |
-|------|-------------|
-| `index_status` | Returns file/symbol/edge counts and `last_indexed` timestamp |
-| `get_skeleton` | Renders file skeletons. Args: `files[]`, `detail` (`minimal`\|`standard`\|`detailed`) |
-| `run_pipeline` | Search + impact analysis for a free-form task. Args: `task`, `preset`, `top_k` |
-| `save_observation` | Persist a note about the codebase to the FTS memory store |
-| `search_observations` | Full-text search over saved observations. Args: `query`, `limit` |
-
-### Presets for `run_pipeline`
-
-| Preset | Impact depth | Use for |
-|--------|-------------|---------|
-| `auto` | 1 | General exploration |
-| `explore` | 1 | Read-only investigation |
-| `modify` | 3 | Planning a change |
-| `refactor` | 3 | Large structural changes |
-| `debug` | 2 | Tracing a bug |
+Use the dedicated `speedy-language-context-mcp` binary to register the server in your MCP client config. See **[README-mcp.md](README-mcp.md)** for full configuration examples (Claude Code, Claude Desktop, VS Code) and tool reference.
 
 ## Feature toggles
 
