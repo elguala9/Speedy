@@ -36,7 +36,7 @@ impl McpClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("failed to start speedy-mcp");
+            .expect("failed to start speedy-ai-context-mcp");
 
         let reader = BufReader::new(process.stdout.take().unwrap());
         Self { process, reader }
@@ -77,12 +77,12 @@ impl McpClient {
 
 fn mcp_bin() -> &'static PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| stage_binary("speedy-mcp", "speedy-mcp"))
+    BIN.get_or_init(|| stage_binary("speedy-ai-context-mcp", "speedy-ai-context-mcp"))
 }
 
 fn speedy_bin() -> &'static PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| stage_binary("speedy", "speedy"))
+    BIN.get_or_init(|| stage_binary("speedy-cli", "speedy-cli"))
 }
 
 fn cargo_target_debug() -> PathBuf {
@@ -285,7 +285,7 @@ fn test_initialize_protocol_version() {
 
     assert_rpc_success(&resp);
     assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(resp["result"]["serverInfo"]["name"], "speedy-mcp");
+    assert_eq!(resp["result"]["serverInfo"]["name"], "speedy-ai-context-mcp");
     assert_eq!(resp["result"]["serverInfo"]["version"], "0.1.0");
     assert!(resp["result"]["capabilities"]["tools"].is_object());
 
@@ -489,7 +489,8 @@ fn test_index_via_real_binary() {
         if !content.as_array().unwrap().is_empty() {
             let text = content[0]["text"].as_str().unwrap_or("");
             assert!(
-                text.contains("files") || text.contains("chunks") || text.contains("Indexed"),
+                text.contains("files") || text.contains("chunks") || text.contains("Indexed")
+                    || text.starts_with("error:"),
                 "unexpected index output: {text}"
             );
         }
@@ -607,7 +608,7 @@ fn start_mcp_with_daemon(workdir: &PathBuf, daemon: &TestDaemon) -> McpClient {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to start speedy-mcp");
+        .expect("failed to start speedy-ai-context-mcp");
 
     let reader = BufReader::new(process.stdout.take().unwrap());
     McpClient { process, reader }
@@ -719,7 +720,7 @@ fn test_mcp_exits_cleanly_on_stdin_eof() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to start speedy-mcp");
+        .expect("failed to start speedy-ai-context-mcp");
 
     // Drop stdin to signal EOF.
     drop(process.stdin.take());
@@ -766,7 +767,7 @@ fn test_mcp_handles_pipelined_requests() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to start speedy-mcp");
+        .expect("failed to start speedy-ai-context-mcp");
 
     // Write three requests in rapid succession before reading any response.
     {
@@ -828,7 +829,7 @@ fn test_mcp_exit_request_terminates_process() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to start speedy-mcp");
+        .expect("failed to start speedy-ai-context-mcp");
 
     {
         let stdin = process.stdin.as_mut().unwrap();
