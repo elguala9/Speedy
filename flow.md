@@ -54,9 +54,12 @@ speedy-cli.exe           ← thin client (solo tokio + serde + clap +
                            parla con il daemon via local socket
                            se daemon morto → lo spawna (speedy-daemon.exe)
 
-speedy-mcp.exe           ← server MCP (JSON-RPC su stdio) per AI agent
+speedy-ai-context-mcp.exe           ← server MCP (JSON-RPC su stdio) per ai-context (semantic search)
                            usa SPEEDY_BIN (default: speedy-cli) per
                            eseguire i tool → daemon → speedy-ai-context.exe
+
+speedy-language-context-mcp.exe ← server MCP (JSON-RPC su stdio) per code intelligence
+                           opera direttamente su GraphStore SQLite, senza daemon
 
 speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
                            usa DaemonClient di speedy-core direttamente
@@ -72,7 +75,8 @@ speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
 | `speedy-ai-context` | `speedy-core` + tutta la logica pesante       |
 | `speedy-daemon`  | `speedy-core` + tutta la logica pesante          |
 | `speedy-cli`     | solo `speedy-core` (DaemonClient + local_sock)   |
-| `speedy-mcp`     | solo `speedy-core` (chiama `SPEEDY_BIN`)         |
+| `speedy-ai-context-mcp`     | solo `speedy-core` (chiama `SPEEDY_BIN`)         |
+| `speedy-language-context-mcp` | `speedy-language-context` lib (GraphStore, mcp) |
 | `speedy-gui`     | solo `speedy-core` (DaemonClient + types) + egui |
 
 ---
@@ -214,11 +218,15 @@ Il PID-check serve come secondo livello difensivo, in caso un giorno il worker d
 
 ## 5. Flusso "AI Agent via MCP"
 
+Due server MCP indipendenti, registrabili separatamente nei config degli agent.
+
+### 5a. `speedy-ai-context-mcp.exe` — semantic search (ai-context)
+
 ```
 Claude / altro agent
   │  (stdio JSON-RPC)
   ▼
-speedy-mcp.exe
+speedy-ai-context-mcp.exe
   │  per ogni tool call invoca: SPEEDY_BIN <args>
   │  (default SPEEDY_BIN = speedy-cli.exe)
   ▼
@@ -235,6 +243,38 @@ stdout risale fino all'agent come result MCP
 ```
 
 `SPEEDY_BIN` permette di puntare a `speedy-ai-context.exe` direttamente (bypass daemon) per scenari batch / test.
+
+### 5b. `speedy-language-context-mcp.exe` — code intelligence
+
+```
+Claude / altro agent
+  │  (stdio JSON-RPC)
+  ▼
+speedy-language-context-mcp.exe
+  │  opera direttamente su GraphStore SQLite
+  │  (nessun daemon, nessun IPC)
+  ▼
+.speedy/graph.db  (SQLite locale al workspace)
+  │  index_status / get_skeleton / run_pipeline / search_observations / save_observation
+  ▼
+result MCP risale fino all'agent
+```
+
+Configurazione esempio (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "speedy-ai": {
+      "command": "speedy-ai-context-mcp",
+      "args": []
+    },
+    "speedy-lang": {
+      "command": "speedy-language-context-mcp",
+      "args": ["--workspace", "/path/to/project"]
+    }
+  }
+}
+```
 
 ---
 
@@ -368,6 +408,9 @@ $ speedy-ai-context index .
 - **`.speedy/index.sqlite`** vive invece **dentro** il singolo workspace:
   ogni progetto ha il suo DB vettoriale locale. Il daemon non centralizza
   i dati indicizzati — centralizza solo l'orchestrazione.
+  Il DB usa l'estensione **sqlite-vec** (`vec0` virtual table) per l'ANN
+  cosine similarity search; gli embedding non sono più salvati come BLOB
+  in `chunks` ma in una tabella separata `vec_chunks`.
 - **Concorrenza su `workspaces.json`** ancora **non** protetta da file-lock
   cross-process (TODO). Comunque solo il daemon ci scrive, quindi in
   pratica il problema si manifesta solo se due daemon partono insieme —
