@@ -16,6 +16,10 @@ keywords = ["mcp", "code-intelligence", "tree-sitter", "symbol-graph", "ai"]
 name = "speedy-language-context"
 path = "src/main.rs"
 
+[[bin]]
+name = "speedy-language-context-mcp"
+path = "src/mcp_main.rs"
+
 [lib]
 name = "speedy_language_context"
 path = "src/lib.rs"
@@ -51,3 +55,4 @@ tree-sitter-scala = "0.26"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = "1"
