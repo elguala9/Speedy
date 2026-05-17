@@ -1,13 +1,26 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// Packages to build with `cargo build -p <name>`
+const PACKAGES: &[&str] = &[
+    "speedy-ai-context",
+    "speedy-daemon",
+    "speedy-cli",
+    "speedy-ai-context-mcp",
+    "speedy-gui",
+    "speedy-language-context",
+];
+
+// Binaries to copy from target/release/ to dist/ (may differ from PACKAGES
+// when one package produces multiple [[bin]] targets)
 const BINARIES: &[&str] = &[
     "speedy-ai-context",
     "speedy-daemon",
     "speedy-cli",
-    "speedy-mcp",
+    "speedy-ai-context-mcp",
     "speedy-gui",
     "speedy-language-context",
+    "speedy-language-context-mcp",
 ];
 
 fn main() {
@@ -37,7 +50,7 @@ fn dist(clean: bool, installer: bool) {
 
     if clean {
         println!("==> Cleaning packages...");
-        let packages: Vec<_> = BINARIES.iter().flat_map(|b| ["-p", b]).collect();
+        let packages: Vec<_> = PACKAGES.iter().flat_map(|b| ["-p", b]).collect();
         let status = Command::new("cargo")
             .arg("clean")
             .args(&packages)
@@ -53,7 +66,7 @@ fn dist(clean: bool, installer: bool) {
     std::fs::create_dir_all(&dist).expect("failed to create dist/");
 
     println!("==> Building release binaries...");
-    let packages: Vec<_> = BINARIES.iter().flat_map(|b| ["-p", b]).collect();
+    let packages: Vec<_> = PACKAGES.iter().flat_map(|b| ["-p", b]).collect();
     let status = Command::new("cargo")
         .arg("build")
         .arg("--release")

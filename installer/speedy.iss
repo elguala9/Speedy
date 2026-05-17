@@ -94,24 +94,21 @@ Name: "desktopicon"; Description: "Crea collegamento sul Desktop per Speedy GUI"
 Source: "..\dist\speedy-ai-context.exe";        DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\speedy-daemon.exe";            DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\speedy-cli.exe";               DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-mcp.exe";               DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-ai-context-mcp.exe";               DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\speedy-gui.exe";               DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-language-context.exe";  DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-language-context.exe";      DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-language-context-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; Wrapper VBScript: avvia speedy-daemon.exe senza finestra console visibile.
-; wscript.exe chiama questo script con WindowStyle=0 (hidden).
-Source: "assets\launch-daemon.vbs"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ============================================================
 [Icons]
 ; ============================================================
 
 ; --- Avvio automatico al login (task: autostart) ---
-; wscript.exe lancia launch-daemon.vbs che apre il daemon con finestra nascosta.
-; In questo modo speedy-daemon.exe non mostra nessuna finestra console all'avvio.
+; speedy-daemon.exe è compilato con windows_subsystem="windows" in release build,
+; quindi parte senza finestra console — nessun wrapper VBS necessario.
 Name: "{userstartup}\Speedy Daemon"; \
-  Filename: "{sys}\wscript.exe"; \
-  Parameters: "/nologo ""{app}\launch-daemon.vbs"""; \
+  Filename: "{app}\speedy-daemon.exe"; \
   WorkingDir: "{app}"; \
   Comment: "Speedy semantic search daemon — avvio automatico"; \
   Tasks: autostart
@@ -145,10 +142,9 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; ============================================================
 
 ; Avvia il daemon subito al termine dell'installazione (senza aspettare il prossimo login).
-; runhidden: non apre una finestra. nowait: non blocca l'installer.
+; runhidden: non apre una finestra (supportato da windows_subsystem in release build).
 ; Nota: non ha il flag postinstall, quindi gira automaticamente senza mostrarlo come checkbox.
-Filename: "{sys}\wscript.exe"; \
-  Parameters: "/nologo ""{app}\launch-daemon.vbs"""; \
+Filename: "{app}\speedy-daemon.exe"; \
   WorkingDir: "{app}"; \
   Flags: nowait runhidden; \
   StatusMsg: "Avvio daemon in background..."
