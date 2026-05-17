@@ -105,6 +105,117 @@ fn test_concurrent_add_across_processes_no_corruption() {
     let _ = std::fs::remove_dir_all(&daemon_dir);
 }
 
+/// Concurrently add N entries then concurrently remove them all. The final
+/// file must be valid JSON with zero entries and no corruption.
+#[test]
+fn test_concurrent_add_then_concurrent_remove_across_processes() {
+    let exe = fixture_bin();
+    assert!(exe.exists(), "workspace-fixture not built");
+
+    let daemon_dir = unique_daemon_dir("xp_rm");
+    const N: usize = 6;
+
+    // Sequential adds first (so removes have something to remove)
+    for i in 0..N {
+        let status = quiet_command(&exe)
+            .args(["add", &format!("/rm-base-{i}")])
+            .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+            .output()
+            .expect("spawn add")
+            .status;
+        assert!(status.success(), "pre-add {i} failed with {status}");
+    }
+
+    // Concurrent removes
+    let mut children: Vec<_> = (0..N)
+        .map(|i| {
+            quiet_command(&exe)
+                .args(["remove", &format!("/rm-base-{i}")])
+                .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn remove")
+        })
+        .collect();
+
+    for (i, child) in children.iter_mut().enumerate() {
+        let status = child.wait().expect("wait remove");
+        assert!(status.success(), "remove #{i} failed with {status}");
+    }
+
+    let content = std::fs::read_to_string(daemon_dir.join("workspaces.json")).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&content)
+        .unwrap_or_else(|e| panic!("corrupt JSON after concurrent removes: {e}\n{content}"));
+    assert_eq!(entries.len(), 0, "all entries removed: {content}");
+
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
+/// Spawn concurrent adds and concurrent removes at the same time.
+/// The final JSON must be well-formed regardless of interleaving.
+#[test]
+fn test_concurrent_add_and_remove_interleaved_stays_consistent() {
+    let exe = fixture_bin();
+    assert!(exe.exists(), "workspace-fixture not built");
+
+    let daemon_dir = unique_daemon_dir("xp_interleave");
+    const PRE: usize = 4;
+    const NEW: usize = 4;
+
+    // Pre-populate entries that will be removed concurrently
+    for i in 0..PRE {
+        let status = quiet_command(&exe)
+            .args(["add", &format!("/interleave-pre-{i}")])
+            .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+            .output()
+            .expect("spawn pre-add")
+            .status;
+        assert!(status.success(), "pre-add {i} failed");
+    }
+
+    // Concurrent: PRE removes + NEW adds
+    let mut handles: Vec<_> = (0..PRE)
+        .map(|i| {
+            quiet_command(&exe)
+                .args(["remove", &format!("/interleave-pre-{i}")])
+                .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn remove")
+        })
+        .collect();
+
+    handles.extend((0..NEW).map(|i| {
+        quiet_command(&exe)
+            .args(["add", &format!("/interleave-new-{i}")])
+            .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn add")
+    }));
+
+    for h in &mut handles {
+        let _ = h.wait();
+    }
+
+    // Final state must be valid JSON (integrity check)
+    let content = std::fs::read_to_string(daemon_dir.join("workspaces.json")).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&content)
+        .unwrap_or_else(|e| panic!("corrupt JSON after interleaved ops: {e}\n{content}"));
+    // All NEW adds should have succeeded; PRE removes may or may not have all
+    // succeeded depending on ordering. The key invariant is valid JSON.
+    assert_eq!(
+        entries.len(),
+        NEW,
+        "expected {NEW} entries (adds) after all removes finished: {content}"
+    );
+
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
 /// Mix readers (`list`) and writers (`add`) across processes. The reader
 /// always reads valid JSON — if the lock leaked, a reader could occasionally
 /// observe a half-written file and panic on parse.

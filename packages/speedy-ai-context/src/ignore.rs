@@ -117,4 +117,73 @@ mod tests {
         assert!(FileFilter::is_binary(Path::new("module.pyc")));
         assert!(FileFilter::is_binary(Path::new("module.pyo")));
     }
+
+    #[test]
+    fn test_filtered_files_excludes_gitignored_patterns() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+
+        fs::write(dir.path().join("main.rs"), b"fn main() {}").unwrap();
+        fs::write(dir.path().join("generated.min.js"), b"...").unwrap();
+        // .speedyignore is used because git_ignore only activates inside a git repo;
+        // in production, Indexer::new() copies .gitignore patterns into .speedyignore.
+        fs::write(dir.path().join(".speedyignore"), b"*.min.js\n").unwrap();
+
+        let files = FileFilter::new(root).filtered_files();
+
+        assert!(
+            files.iter().any(|f| f.ends_with("main.rs")),
+            "main.rs should be included"
+        );
+        assert!(
+            !files.iter().any(|f| f.ends_with("generated.min.js")),
+            "generated.min.js should be excluded by .speedyignore (mirrors .gitignore patterns)"
+        );
+    }
+
+    #[test]
+    fn test_filtered_files_excludes_speedyignore_patterns() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+
+        fs::write(dir.path().join("keep.rs"), b"pub fn keep() {}").unwrap();
+        fs::write(dir.path().join("ignore_me.log"), b"ignored log").unwrap();
+        fs::write(dir.path().join(".speedyignore"), b"*.log\n").unwrap();
+
+        let files = FileFilter::new(root).filtered_files();
+
+        assert!(
+            files.iter().any(|f| f.ends_with("keep.rs")),
+            "keep.rs should be included"
+        );
+        assert!(
+            !files.iter().any(|f| f.ends_with("ignore_me.log")),
+            "ignore_me.log should be excluded by .speedyignore"
+        );
+    }
+
+    #[test]
+    fn test_filtered_files_excludes_directories() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+
+        fs::create_dir_all(dir.path().join("subdir")).unwrap();
+        fs::write(dir.path().join("subdir").join("nested.rs"), b"fn f() {}").unwrap();
+        fs::write(dir.path().join("top.rs"), b"fn top() {}").unwrap();
+
+        let files = FileFilter::new(root).filtered_files();
+
+        // Only files, not directories
+        for f in &files {
+            assert!(
+                std::path::Path::new(f).is_file(),
+                "filtered_files must return only files, got dir: {f}"
+            );
+        }
+        assert!(files.iter().any(|f| f.ends_with("top.rs")));
+        assert!(files.iter().any(|f| f.ends_with("nested.rs")));
+    }
 }

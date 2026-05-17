@@ -443,6 +443,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_migration_from_old_blob_schema() {
+        // Simulate a DB created by an old version of speedy that stored embeddings
+        // as a BLOB column directly inside `chunks`.  SqliteVectorStore::new() must
+        // detect the old column, drop the stale tables, and recreate the new schema.
+        let dir = tempfile::TempDir::new().unwrap();
+        let speedy_dir = dir.path().join(".speedy");
+        std::fs::create_dir_all(&speedy_dir).unwrap();
+        let db_path = speedy_dir.join("sac.sqlite");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE chunks (
+                    rowid INTEGER PRIMARY KEY,
+                    id TEXT NOT NULL UNIQUE,
+                    file_path TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    last_modified TEXT NOT NULL
+                );
+                INSERT INTO chunks(id, file_path, text, hash, embedding, last_modified)
+                VALUES ('old-1', 'old.rs', 'old content', 'h1', X'00000000', '2024-01-01');",
+            )
+            .unwrap();
+        }
+
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap())
+            .await
+            .expect("store should open and migrate successfully");
+
+        assert_eq!(store.count_chunks().await.unwrap(), 0, "old data should be dropped");
+
+        // New schema must be fully functional after migration
+        let records = vec![ChunkRecord {
+            id: "new-1".to_string(),
+            file_path: "new.rs".to_string(),
+            line: 1,
+            text: "new content".to_string(),
+            hash: "h2".to_string(),
+            embedding: vec![1.0, 0.0],
+            last_modified: "2024-01-02".to_string(),
+        }];
+        store.insert_chunks(&records).await.unwrap();
+        assert_eq!(store.count_chunks().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_tables_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        store.ensure_tables().await.unwrap();
+        store.ensure_tables().await.unwrap();
+        assert_eq!(store.count_chunks().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_insert_chunks_after_clear_accepts_different_dimension() {
+        // After clear_all_chunks() drops vec_chunks, a subsequent insert with a
+        // different embedding dimension should succeed (vec_chunks is recreated).
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let r1 = vec![ChunkRecord {
+            id: "d1".into(),
+            file_path: "f.rs".into(),
+            line: 1,
+            text: "hello".into(),
+            hash: "h".into(),
+            embedding: vec![1.0, 0.0, 0.0],
+            last_modified: "t".into(),
+        }];
+        store.insert_chunks(&r1).await.unwrap();
+        assert_eq!(store.count_chunks().await.unwrap(), 1);
+
+        store.clear_all_chunks().await.unwrap();
+
+        let r2 = vec![ChunkRecord {
+            id: "d2".into(),
+            file_path: "g.rs".into(),
+            line: 1,
+            text: "world".into(),
+            hash: "h2".into(),
+            embedding: vec![0.0, 1.0],
+            last_modified: "t".into(),
+        }];
+        store.insert_chunks(&r2).await.unwrap();
+        assert_eq!(store.count_chunks().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn test_sqlite_persists() {
         let dir = std::env::temp_dir().join("speedy_test_persist_vec");
         let _ = std::fs::remove_dir_all(&dir);
@@ -474,5 +569,325 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_remove_chunks_for_file_leaves_others_intact() {
+        // Verifies that removing chunks for one file does not affect chunks from another file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let chunks = vec![
+            ChunkRecord {
+                id: "a-1".to_string(),
+                file_path: "alpha.rs".to_string(),
+                line: 1,
+                text: "fn alpha() {}".to_string(),
+                hash: "ha1".to_string(),
+                embedding: vec![1.0, 0.0, 0.0],
+                last_modified: "2024-01-01".to_string(),
+            },
+            ChunkRecord {
+                id: "b-1".to_string(),
+                file_path: "beta.rs".to_string(),
+                line: 1,
+                text: "fn beta() {}".to_string(),
+                hash: "hb1".to_string(),
+                embedding: vec![0.0, 1.0, 0.0],
+                last_modified: "2024-01-01".to_string(),
+            },
+        ];
+        store.insert_chunks(&chunks).await.unwrap();
+        assert_eq!(store.count_chunks().await.unwrap(), 2);
+
+        store.remove_chunks_for_file("alpha.rs").await.unwrap();
+
+        assert_eq!(store.count_chunks().await.unwrap(), 1, "only beta.rs chunk should remain");
+        let paths = store.get_all_file_paths().await.unwrap();
+        assert_eq!(paths, vec!["beta.rs"], "only beta.rs should be in file paths");
+    }
+
+    #[tokio::test]
+    async fn test_get_last_hash_returns_none_for_unknown_file() {
+        // Verifies that get_last_hash returns None for a file that was never inserted.
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let result = store.get_last_hash("nonexistent.rs").await.unwrap();
+        assert!(result.is_none(), "hash for unknown file should be None");
+    }
+
+    #[tokio::test]
+    async fn test_get_all_file_paths_after_multi_insert() {
+        // Verifies that get_all_file_paths returns all distinct file paths after inserting chunks for 3 files.
+        use std::collections::HashSet;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let chunks = vec![
+            ChunkRecord {
+                id: "f1-1".to_string(),
+                file_path: "file1.rs".to_string(),
+                line: 1,
+                text: "fn one() {}".to_string(),
+                hash: "h1".to_string(),
+                embedding: vec![1.0, 0.0, 0.0],
+                last_modified: "2024-01-01".to_string(),
+            },
+            ChunkRecord {
+                id: "f2-1".to_string(),
+                file_path: "file2.rs".to_string(),
+                line: 1,
+                text: "fn two() {}".to_string(),
+                hash: "h2".to_string(),
+                embedding: vec![0.0, 1.0, 0.0],
+                last_modified: "2024-01-01".to_string(),
+            },
+            ChunkRecord {
+                id: "f3-1".to_string(),
+                file_path: "file3.rs".to_string(),
+                line: 1,
+                text: "fn three() {}".to_string(),
+                hash: "h3".to_string(),
+                embedding: vec![0.0, 0.0, 1.0],
+                last_modified: "2024-01-01".to_string(),
+            },
+        ];
+        store.insert_chunks(&chunks).await.unwrap();
+
+        let paths: HashSet<String> = store.get_all_file_paths().await.unwrap().into_iter().collect();
+        assert_eq!(paths.len(), 3);
+        assert!(paths.contains("file1.rs"));
+        assert!(paths.contains("file2.rs"));
+        assert!(paths.contains("file3.rs"));
+    }
+
+    // ── Mock-based tests ──────────────────────────────────────────────────────────
+    // [MOCK] The MockVectorStore below replaces SQLite with an in-memory store,
+    // letting us test VectorStore contract behaviour without any I/O.
+    mod mocked {
+        use super::*;
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        use anyhow::anyhow;
+        use async_trait::async_trait;
+
+        /// [MOCK] In-memory VectorStore for unit testing.
+        /// Tracks insert/remove calls and supports controlled error injection.
+        struct MockVectorStore {
+            chunks: Mutex<Vec<ChunkRecord>>,
+            hashes: Mutex<HashMap<String, String>>,
+            metadata: Mutex<HashMap<String, String>>,
+            fail_insert: Mutex<bool>,
+        }
+
+        #[allow(dead_code)]
+        impl MockVectorStore {
+            fn new() -> Arc<Self> {
+                Arc::new(Self {
+                    chunks: Mutex::new(vec![]),
+                    hashes: Mutex::new(HashMap::new()),
+                    metadata: Mutex::new(HashMap::new()),
+                    fail_insert: Mutex::new(false),
+                })
+            }
+
+            fn set_fail_insert(&self, fail: bool) {
+                *self.fail_insert.lock().unwrap() = fail;
+            }
+
+            fn chunk_count_for_file(&self, file_path: &str) -> usize {
+                self.chunks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c.file_path == file_path)
+                    .count()
+            }
+
+            fn all_chunks(&self) -> Vec<ChunkRecord> {
+                self.chunks.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl VectorStore for MockVectorStore {
+            async fn ensure_tables(&self) -> Result<()> {
+                Ok(())
+            }
+
+            async fn insert_chunks(&self, chunks: &[ChunkRecord]) -> Result<()> {
+                if *self.fail_insert.lock().unwrap() {
+                    return Err(anyhow!("mock insert error"));
+                }
+                let mut store = self.chunks.lock().unwrap();
+                let mut hashes = self.hashes.lock().unwrap();
+                for c in chunks {
+                    store.push(c.clone());
+                    hashes.insert(c.file_path.clone(), c.hash.clone());
+                }
+                Ok(())
+            }
+
+            async fn remove_chunks_for_file(&self, file_path: &str) -> Result<()> {
+                self.chunks.lock().unwrap().retain(|c| c.file_path != file_path);
+                self.hashes.lock().unwrap().remove(file_path);
+                Ok(())
+            }
+
+            async fn similarity_search(&self, _embedding: &[f32], top_k: usize) -> Result<Vec<SearchResult>> {
+                let results: Vec<SearchResult> = self
+                    .chunks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .take(top_k)
+                    .map(|c| SearchResult {
+                        path: c.file_path.clone(),
+                        line: c.line,
+                        text: c.text.clone(),
+                        score: 1.0,
+                    })
+                    .collect();
+                Ok(results)
+            }
+
+            async fn get_all_file_paths(&self) -> Result<Vec<String>> {
+                let mut seen = std::collections::HashSet::new();
+                let paths: Vec<String> = self
+                    .chunks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|c| {
+                        if seen.insert(c.file_path.clone()) {
+                            Some(c.file_path.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Ok(paths)
+            }
+
+            async fn count_chunks(&self) -> Result<usize> {
+                Ok(self.chunks.lock().unwrap().len())
+            }
+
+            async fn get_last_hash(&self, file_path: &str) -> Result<Option<String>> {
+                Ok(self.hashes.lock().unwrap().get(file_path).cloned())
+            }
+
+            async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
+                Ok(self.metadata.lock().unwrap().get(key).cloned())
+            }
+
+            async fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
+                self.metadata.lock().unwrap().insert(key.to_string(), value.to_string());
+                Ok(())
+            }
+
+            async fn clear_all_chunks(&self) -> Result<()> {
+                self.chunks.lock().unwrap().clear();
+                self.hashes.lock().unwrap().clear();
+                Ok(())
+            }
+        }
+
+        fn make_chunk(id: &str, file: &str) -> ChunkRecord {
+            ChunkRecord {
+                id: id.to_string(),
+                file_path: file.to_string(),
+                line: 1,
+                text: format!("fn {}() {{}}", id),
+                hash: format!("hash_{}", id),
+                embedding: vec![0.1, 0.2, 0.3],
+                last_modified: "2024-01-01".to_string(),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_mock_insert_and_count() {
+            // Verifies that inserting chunks increases the count correctly.
+            let store = MockVectorStore::new();
+            store.insert_chunks(&[make_chunk("c1", "a.rs"), make_chunk("c2", "b.rs")]).await.unwrap();
+            assert_eq!(store.count_chunks().await.unwrap(), 2);
+        }
+
+        #[tokio::test]
+        async fn test_mock_remove_clears_chunks_and_hash() {
+            // Verifies that remove_chunks_for_file clears both chunks and the cached hash.
+            let store = MockVectorStore::new();
+            store.insert_chunks(&[make_chunk("c1", "a.rs")]).await.unwrap();
+            assert_eq!(store.get_last_hash("a.rs").await.unwrap(), Some("hash_c1".to_string()));
+
+            store.remove_chunks_for_file("a.rs").await.unwrap();
+
+            assert_eq!(store.count_chunks().await.unwrap(), 0);
+            assert!(store.get_last_hash("a.rs").await.unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn test_mock_insert_error_propagates() {
+            // Verifies that a failing insert returns an error and leaves the store empty.
+            let store = MockVectorStore::new();
+            store.set_fail_insert(true);
+            let result = store.insert_chunks(&[make_chunk("c1", "a.rs")]).await;
+            assert!(result.is_err(), "expected error from mock insert");
+            assert_eq!(store.count_chunks().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn test_mock_clear_all_resets_state() {
+            // Verifies that clear_all_chunks removes all chunks and resets hashes.
+            let store = MockVectorStore::new();
+            store.insert_chunks(&[make_chunk("c1", "a.rs"), make_chunk("c2", "b.rs")]).await.unwrap();
+            assert_eq!(store.count_chunks().await.unwrap(), 2);
+
+            store.clear_all_chunks().await.unwrap();
+
+            assert_eq!(store.count_chunks().await.unwrap(), 0);
+            assert!(store.get_last_hash("a.rs").await.unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn test_mock_get_last_hash_tracks_inserts() {
+            // Verifies that get_last_hash returns the hash set during the last insert for a file.
+            let store = MockVectorStore::new();
+            store.insert_chunks(&[make_chunk("c1", "src/lib.rs")]).await.unwrap();
+            assert_eq!(
+                store.get_last_hash("src/lib.rs").await.unwrap(),
+                Some("hash_c1".to_string())
+            );
+        }
+
+        #[tokio::test]
+        async fn test_mock_metadata_roundtrip() {
+            // Verifies that metadata written with set_metadata is returned by get_metadata.
+            let store = MockVectorStore::new();
+            assert!(store.get_metadata("model").await.unwrap().is_none());
+            store.set_metadata("model", "test-model").await.unwrap();
+            assert_eq!(store.get_metadata("model").await.unwrap(), Some("test-model".to_string()));
+        }
+
+        #[tokio::test]
+        async fn test_mock_similarity_search_respects_top_k() {
+            // Verifies that similarity_search returns at most top_k results.
+            let store = MockVectorStore::new();
+            let chunks: Vec<ChunkRecord> = (0..5)
+                .map(|i| make_chunk(&format!("c{}", i), &format!("f{}.rs", i)))
+                .collect();
+            store.insert_chunks(&chunks).await.unwrap();
+
+            let results = store.similarity_search(&[0.1, 0.2, 0.3], 3).await.unwrap();
+            assert_eq!(results.len(), 3, "top_k=3 should return exactly 3 results");
+        }
     }
 }

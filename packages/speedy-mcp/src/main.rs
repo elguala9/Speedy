@@ -278,7 +278,7 @@ mod tests {
         assert_success(&resp, &serde_json::json!({
             "protocolVersion": "2025-03-26",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "speedy-mcp", "version": "0.1.0"}
+            "serverInfo": {"name": "speedy-ai-context-mcp", "version": "0.1.0"}
         }));
     }
 

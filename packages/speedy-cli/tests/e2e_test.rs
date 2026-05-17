@@ -251,7 +251,7 @@ fn test_standalone_index_and_query() {
     let dir = std::env::temp_dir().join(&name);
     create_test_project(&dir);
     let _guard = DaemonGuard::start(&name, &dir);
-    let speedy = bin_path("speedy");
+    let speedy = bin_path("speedy-cli");
 
     let index = quiet_command(&speedy)
         .args(["--daemon-socket", &name, "index", "."])
@@ -338,7 +338,7 @@ fn test_watcher_index_query_pipeline() {
     );
 }
 
-/// Standalone worker path: `speedy.exe` invoked directly with
+/// Standalone worker path: `speedy-ai-context` invoked directly with
 /// `SPEEDY_NO_DAEMON=1`, against a tempdir, must complete `index`/`query`/
 /// `context`/`sync` without ever contacting a daemon. We assert this by
 /// pointing it at a socket name that no daemon owns — if the worker tried to
@@ -360,7 +360,7 @@ fn test_standalone_no_daemon_flag() {
     let daemon_dir = dir.join(".speedy-daemon-iso");
     std::fs::create_dir_all(&daemon_dir).unwrap();
 
-    let speedy = bin_path("speedy");
+    let speedy = bin_path("speedy-ai-context");
 
     let run = |args: &[&str]| -> std::process::Output {
         quiet_command(&speedy)
@@ -433,7 +433,7 @@ fn test_standalone_index_nonexistent_path() {
     std::fs::create_dir_all(&dir).unwrap();
     let _guard = DaemonGuard::start(&name, &dir);
 
-    let speedy = bin_path("speedy");
+    let speedy = bin_path("speedy-cli");
     let out = quiet_command(&speedy)
         .args(["--daemon-socket", &name, "index", "C:\\questa_dir_non_esiste_xyz789"])
         .current_dir(&dir)

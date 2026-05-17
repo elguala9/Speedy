@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use speedy_core::daemon_client::DaemonClient;
 use speedy_core::daemon_util;
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::warn;
 
 use speedy_core::local_sock::{GenericNamespaced, Stream as LocalStream, StreamTrait as _, ToNsName};
@@ -106,7 +106,7 @@ async fn send_raw_cmd(socket_name: &str, req: &str) -> Result<String> {
 
     let mut reader = BufReader::new(&mut stream);
     let mut resp = String::new();
-    reader.read_line(&mut resp).await?;
+    reader.read_to_string(&mut resp).await?;
     Ok(resp.trim().to_string())
 }
 
@@ -468,7 +468,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let resp = send_raw_cmd(&name, "ping").await.unwrap_or_default();
-        // read_line on an empty stream returns 0 bytes → empty string after trim.
+        // read_to_string on an empty stream returns 0 bytes → empty string after trim.
         assert!(resp.is_empty(), "expected empty response on EOF, got: {resp:?}");
     }
 }

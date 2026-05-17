@@ -150,4 +150,33 @@ mod tests {
         assert_eq!(s[0], "Hello.");
         assert_eq!(s[1], "World");
     }
+
+    #[test]
+    fn test_truncate_cjk_chars_counted_correctly() {
+        let s = "你好世界测试代码"; // 8 CJK chars
+        assert_eq!(preprocessor::truncate(s, 4), "你好世界");
+        assert_eq!(preprocessor::truncate(s, 0), "");
+        assert_eq!(preprocessor::truncate(s, 100), s);
+    }
+
+    #[test]
+    fn test_normalize_whitespace_preserves_cjk() {
+        assert_eq!(preprocessor::normalize_whitespace("你好 世界"), "你好 世界");
+        assert_eq!(preprocessor::normalize_whitespace("  你好  世界  "), "你好 世界");
+    }
+
+    #[test]
+    fn test_by_paragraphs_cjk_content() {
+        let p = chunking::by_paragraphs("第一段\n\n第二段\n\n第三段");
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0], "第一段");
+        assert_eq!(p[2], "第三段");
+    }
+
+    #[test]
+    fn test_count_tokens_cjk_words() {
+        // CJK characters joined without spaces count as one token
+        assert_eq!(tokenizer::count_tokens("你好世界"), 1);
+        assert_eq!(tokenizer::count_tokens("hello 世界"), 2);
+    }
 }

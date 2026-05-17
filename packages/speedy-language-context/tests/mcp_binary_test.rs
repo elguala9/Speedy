@@ -240,3 +240,110 @@ fn test_unknown_method_returns_error() {
     client.stop();
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+// ── Tool implementation tests ──────────────────────────────────────────────
+
+#[test]
+fn test_save_observation_and_search_returns_result() {
+    let ws = temp_workspace();
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    // Save an observation
+    let save_resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"save_observation","arguments":{"text":"the add function handles integer addition"}}}"#,
+    ))
+    .unwrap();
+    assert!(
+        save_resp["error"].is_null(),
+        "save_observation should not error: {save_resp}"
+    );
+
+    // Search for it
+    let search_resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_observations","arguments":{"query":"integer addition"}}}"#,
+    ))
+    .unwrap();
+    assert!(
+        search_resp["error"].is_null(),
+        "search_observations should not error: {search_resp}"
+    );
+    let content = &search_resp["result"]["content"];
+    assert!(content.is_array(), "expected content array: {search_resp}");
+    let text = content[0]["text"].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "search_observations returned empty content");
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_search_observations_on_empty_store_returns_ok() {
+    let ws = temp_workspace();
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_observations","arguments":{"query":"anything"}}}"#,
+    ))
+    .unwrap();
+    assert!(
+        resp["error"].is_null(),
+        "search_observations on empty store should not error: {resp}"
+    );
+    let content = &resp["result"]["content"];
+    assert!(content.is_array(), "expected content array: {resp}");
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_get_skeleton_unindexed_file_returns_placeholder() {
+    let ws = temp_workspace();
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_skeleton","arguments":{"files":["nonexistent.rs"],"detail":"standard"}}}"#,
+    ))
+    .unwrap();
+    assert!(
+        resp["error"].is_null(),
+        "get_skeleton should not error for unindexed file: {resp}"
+    );
+    let content = &resp["result"]["content"];
+    assert!(content.is_array(), "expected content array: {resp}");
+    let text = content[0]["text"].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "get_skeleton returned empty text for unindexed file");
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_save_multiple_observations_and_search() {
+    let ws = temp_workspace();
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    // Save two observations
+    client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"save_observation","arguments":{"text":"function foo handles error cases"}}}"#);
+    client.send(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"save_observation","arguments":{"text":"struct Bar is the main data container"}}}"#);
+
+    // Search for first
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_observations","arguments":{"query":"error handling"}}}"#,
+    ))
+    .unwrap();
+    assert!(resp["error"].is_null(), "search should succeed: {resp}");
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "should find relevant observations");
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
