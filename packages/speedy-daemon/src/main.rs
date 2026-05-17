@@ -1408,13 +1408,33 @@ async fn handle_workspace_status(
     let db_path = Path::new(&path_str).join(".speedy").join("sac.sqlite");
     let index_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
+    let chunk_count = if db_path.exists() {
+        let db_path_clone = db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open_with_flags(
+                &db_path_clone,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .ok()
+            .and_then(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0))
+                    .ok()
+                    .map(|n| n as u64)
+            })
+        })
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
     Ok(WorkspaceStatus {
         path: path_str,
         watcher_alive: alive,
         last_event_at: last_event,
         last_sync_at: last_sync,
         index_size_bytes,
-        chunk_count: None,
+        chunk_count,
     })
 }
 
@@ -2989,6 +3009,179 @@ not-json-line\n\
         assert_eq!(parsed.len(), 3, "junk line should be skipped, got: {parsed:?}");
         assert_eq!(parsed[2].level, "error");
         assert_eq!(parsed[2].message, "three");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── prune-missing ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_prune_missing_returns_json_with_removed_and_paths_keys() {
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            "prune-missing",
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            Path::new("."),
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(resp.trim())
+            .expect("prune-missing must return valid JSON");
+        assert!(parsed.get("removed").is_some(), "missing 'removed' key: {parsed}");
+        assert!(parsed.get("paths").is_some(), "missing 'paths' key: {parsed}");
+        assert_eq!(parsed["removed"], 0);
+        assert!(parsed["paths"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_prune_missing_removes_orphaned_watcher() {
+        // Serialize against other tests that touch workspaces.json.
+        let _lock = acquire_lock();
+
+        // Create a dir, register it in workspaces.json and the watcher map,
+        // then delete it — prune-missing must remove the watcher and report
+        // the path in the JSON response.
+        let orphan = std::env::temp_dir().join(format!(
+            "speedy_orphan_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&orphan).unwrap();
+        let canonical = orphan.canonicalize().unwrap();
+        let canonical_str = canonical.to_string_lossy().to_string();
+
+        // Back up and clear existing workspaces.json so we start clean.
+        let ws_backup = speedy_core::workspace::list().ok();
+        if let Some(cfg) = dirs::config_dir() {
+            let _ = std::fs::remove_file(cfg.join("speedy").join("workspaces.json"));
+        }
+
+        // Register the workspace so handle_prune_missing can find it.
+        speedy_core::workspace::add(&canonical_str).unwrap();
+
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        {
+            let handle = WatcherHandle {
+                stop: Arc::new(AtomicBool::new(true)),
+                last_heartbeat: Arc::new(AtomicU64::new(0)),
+                last_event_at: Arc::new(AtomicU64::new(0)),
+                last_sync_at: Arc::new(AtomicU64::new(0)),
+            };
+            watchers.lock().await.insert(canonical_str.clone(), handle);
+        }
+
+        // Delete the directory → orphan.
+        std::fs::remove_dir_all(&canonical).unwrap();
+
+        let active_pids = Arc::new(StdMutex::new(HashSet::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+
+        let resp = dispatch_command(
+            "prune-missing",
+            &watchers,
+            &active_pids,
+            &Arc::new(Metrics::default()),
+            1,
+            started,
+            &running,
+            Path::new("."),
+        )
+        .await;
+
+        // Restore workspaces.json before assertions (so cleanup always runs).
+        if let Some(cfg) = dirs::config_dir() {
+            let path = cfg.join("speedy").join("workspaces.json");
+            let _ = std::fs::create_dir_all(path.parent().unwrap());
+            if let Some(ws) = ws_backup {
+                let _ = std::fs::write(&path, serde_json::to_string_pretty(&ws).unwrap());
+            }
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
+        assert_eq!(parsed["removed"], 1, "one orphan should be removed: {parsed}");
+        let paths = parsed["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], canonical_str);
+        assert!(
+            watchers.lock().await.is_empty(),
+            "orphan watcher must be removed from the map"
+        );
+    }
+
+    // ── chunk_count in workspace-status ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_workspace_status_chunk_count_populated_from_db() {
+        let dir = std::env::temp_dir().join(format!(
+            "speedy_ws_cc_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let speedy_dir = dir.join(".speedy");
+        std::fs::create_dir_all(&speedy_dir).unwrap();
+        let db_path = speedy_dir.join("sac.sqlite");
+
+        // Create a minimal chunks table and insert 3 rows.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS chunks (
+                    id TEXT PRIMARY KEY,
+                    file_path TEXT NOT NULL,
+                    line INTEGER NOT NULL DEFAULT 0,
+                    text TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    last_modified INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO chunks VALUES ('c1','a.rs',1,'fn foo(){}','h1',0);
+                INSERT INTO chunks VALUES ('c2','a.rs',5,'fn bar(){}','h2',0);
+                INSERT INTO chunks VALUES ('c3','b.rs',1,'fn baz(){}','h3',0);",
+            )
+            .unwrap();
+        }
+
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let status = handle_workspace_status(&dir.to_string_lossy(), &watchers)
+            .await
+            .unwrap();
+
+        assert_eq!(status.chunk_count, Some(3), "expected 3 chunks, got: {:?}", status.chunk_count);
+        assert!(status.index_size_bytes > 0, "db size must be non-zero");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_workspace_status_chunk_count_none_when_no_db() {
+        let dir = std::env::temp_dir().join(format!(
+            "speedy_ws_nodb_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let status = handle_workspace_status(&dir.to_string_lossy(), &watchers)
+            .await
+            .unwrap();
+
+        assert_eq!(status.chunk_count, None, "no DB → chunk_count must be None");
+        assert_eq!(status.index_size_bytes, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

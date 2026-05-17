@@ -495,6 +495,39 @@ pub fn create_provider(config: &Config) -> anyhow::Result<Arc<dyn EmbeddingProvi
     }
 }
 
+// ---------------------------------------------------------------------------
+// CascadeEmbeddingProvider — tries providers in order, falls back on error
+// ---------------------------------------------------------------------------
+
+/// Tries each provider in order; falls back to the next one when a call fails.
+/// Returns an error only when all providers have been exhausted.
+pub struct CascadeEmbeddingProvider {
+    providers: Vec<Arc<dyn EmbeddingProvider>>,
+}
+
+impl CascadeEmbeddingProvider {
+    pub fn new(providers: Vec<Arc<dyn EmbeddingProvider>>) -> Self {
+        Self { providers }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for CascadeEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let mut last_err = anyhow::anyhow!("CascadeEmbeddingProvider: no providers configured");
+        for provider in &self.providers {
+            match provider.embed(text).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    tracing::warn!("cascade: provider failed, trying next: {e}");
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
+    }
+}
+
 fn require_api_key(provider_type: &str, api_key: Option<&str>) -> anyhow::Result<String> {
     api_key.map(|k| k.to_string()).ok_or_else(|| anyhow::anyhow!(
         "Provider '{}' requires an API key. Set 'api_key' in .speedy/config.speedy.json or SPEEDY_API_KEY env var.",
@@ -527,6 +560,70 @@ pub mod tests {
             Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
             })
+        }
+    }
+
+    /// Deterministic mock provider for unit tests.
+    ///
+    /// Vectors are stable across calls: same input always produces the same output.
+    /// Supports optional error injection via `set_fail_next` and latency injection
+    /// via `set_latency_ms`.
+    pub struct MockEmbeddingProvider {
+        pub dims: usize,
+        pub calls: std::sync::Mutex<Vec<String>>,
+        fail_next: std::sync::atomic::AtomicBool,
+        latency_ms: std::sync::atomic::AtomicU64,
+    }
+
+    impl MockEmbeddingProvider {
+        pub fn new(dims: usize) -> Arc<Self> {
+            Arc::new(Self {
+                dims,
+                calls: std::sync::Mutex::new(Vec::new()),
+                fail_next: std::sync::atomic::AtomicBool::new(false),
+                latency_ms: std::sync::atomic::AtomicU64::new(0),
+            })
+        }
+
+        /// Cause the next `embed` call to return an error. Resets after one call.
+        pub fn set_fail_next(&self, fail: bool) {
+            self.fail_next.store(fail, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Add artificial latency (ms) to each `embed` call.
+        pub fn set_latency_ms(&self, ms: u64) {
+            self.latency_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn hash_to_vec(text: &str, dims: usize) -> Vec<f32> {
+            // FNV-1a hash seeded per dimension for stable, unique vectors per input
+            let mut seed: u64 = 14695981039346656037;
+            for b in text.bytes() {
+                seed ^= b as u64;
+                seed = seed.wrapping_mul(1099511628211);
+            }
+            (0..dims)
+                .map(|i| {
+                    let h = seed.wrapping_add(i as u64).wrapping_mul(2654435761);
+                    // Map to (-1.0, 1.0)
+                    (h as f32 / u64::MAX as f32) * 2.0 - 1.0
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for MockEmbeddingProvider {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            let ms = self.latency_ms.load(std::sync::atomic::Ordering::Relaxed);
+            if ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+            if self.fail_next.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("MockEmbeddingProvider: injected failure");
+            }
+            self.calls.lock().unwrap().push(text.to_string());
+            Ok(Self::hash_to_vec(text, self.dims))
         }
     }
 
@@ -691,5 +788,123 @@ pub mod tests {
         let result2 = create_provider(&config2);
         assert!(result2.is_err());
         assert!(result2.err().unwrap().to_string().contains("API key"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_deterministic() {
+        let p = MockEmbeddingProvider::new(8);
+        let v1 = p.embed("hello").await.unwrap();
+        let v2 = p.embed("hello").await.unwrap();
+        assert_eq!(v1, v2, "same input must produce same vector");
+        assert_eq!(v1.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_different_inputs() {
+        let p = MockEmbeddingProvider::new(8);
+        let v1 = p.embed("hello").await.unwrap();
+        let v2 = p.embed("world").await.unwrap();
+        assert_ne!(v1, v2, "different inputs must produce different vectors");
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_vectors_bounded() {
+        let p = MockEmbeddingProvider::new(16);
+        let v = p.embed("test text").await.unwrap();
+        for f in &v {
+            assert!(
+                *f >= -1.0 && *f <= 1.0,
+                "vector components must be in [-1.0, 1.0], got {}",
+                f
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_fail_next() {
+        let p = MockEmbeddingProvider::new(8);
+        p.set_fail_next(true);
+        assert!(p.embed("a").await.is_err(), "should fail on first call");
+        assert!(p.embed("b").await.is_ok(), "should succeed after reset");
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_tracks_calls() {
+        let p = MockEmbeddingProvider::new(4);
+        p.embed("x").await.unwrap();
+        p.embed("y").await.unwrap();
+        let calls = p.calls.lock().unwrap();
+        assert_eq!(calls.as_slice(), &["x", "y"]);
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_fail_does_not_record_call() {
+        let p = MockEmbeddingProvider::new(4);
+        p.set_fail_next(true);
+        let _ = p.embed("fail-me").await;
+        assert!(p.calls.lock().unwrap().is_empty(), "failed call must not be recorded");
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_latency_is_measurable() {
+        let p = MockEmbeddingProvider::new(4);
+        p.set_latency_ms(50);
+        let start = std::time::Instant::now();
+        p.embed("slow").await.unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() >= 40,
+            "expected ≥40ms latency, got {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    // ── CascadeEmbeddingProvider ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cascade_uses_first_provider_when_healthy() {
+        let p1 = MockEmbeddingProvider::new(4);
+        let p2 = MockEmbeddingProvider::new(4);
+        let cascade = Arc::new(CascadeEmbeddingProvider::new(vec![
+            p1.clone() as Arc<dyn EmbeddingProvider>,
+            p2.clone() as Arc<dyn EmbeddingProvider>,
+        ]));
+        cascade.embed("hello").await.unwrap();
+        assert_eq!(p1.calls.lock().unwrap().len(), 1, "first provider should have been called");
+        assert!(p2.calls.lock().unwrap().is_empty(), "second provider must not be called if first succeeds");
+    }
+
+    #[tokio::test]
+    async fn test_cascade_falls_back_to_second_when_first_fails() {
+        let p1 = MockEmbeddingProvider::new(4);
+        let p2 = MockEmbeddingProvider::new(4);
+        p1.set_fail_next(true);
+        let cascade = Arc::new(CascadeEmbeddingProvider::new(vec![
+            p1.clone() as Arc<dyn EmbeddingProvider>,
+            p2.clone() as Arc<dyn EmbeddingProvider>,
+        ]));
+        let v = cascade.embed("hello").await.unwrap();
+        assert_eq!(v.len(), 4, "result should come from second provider");
+        assert!(p1.calls.lock().unwrap().is_empty(), "failed p1 should not record the call");
+        assert_eq!(p2.calls.lock().unwrap().len(), 1, "second provider should have been called");
+    }
+
+    #[tokio::test]
+    async fn test_cascade_all_fail_returns_error() {
+        let p1 = MockEmbeddingProvider::new(4);
+        let p2 = MockEmbeddingProvider::new(4);
+        p1.set_fail_next(true);
+        p2.set_fail_next(true);
+        let cascade = CascadeEmbeddingProvider::new(vec![
+            p1 as Arc<dyn EmbeddingProvider>,
+            p2 as Arc<dyn EmbeddingProvider>,
+        ]);
+        assert!(cascade.embed("fail").await.is_err(), "all providers failed → cascade should error");
+    }
+
+    #[tokio::test]
+    async fn test_cascade_empty_providers_errors() {
+        let cascade = CascadeEmbeddingProvider::new(vec![]);
+        assert!(cascade.embed("x").await.is_err(), "no providers → must error");
     }
 }

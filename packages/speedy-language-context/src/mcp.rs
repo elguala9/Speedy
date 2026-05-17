@@ -194,10 +194,10 @@ async fn handle_tools_call(
 
 async fn tool_index_status(
     store: &Arc<GraphStore>,
-    _indexer: &Arc<Indexer>,
+    indexer: &Arc<Indexer>,
     _workspace_root: &std::path::Path,
 ) -> Result<String> {
-    let status = add_indexer_status_method(store)?;
+    let status = add_indexer_status_method(store, indexer)?;
     Ok(serde_json::to_string_pretty(&status)?)
 }
 
@@ -292,13 +292,28 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// Public helper: returns a JSON value describing the current index state.
-pub fn add_indexer_status_method(store: &GraphStore) -> Result<Value> {
+/// Includes live graph counts from `store` plus persisted stats from the last
+/// indexing run (files_indexed, symbols_found, duration_ms stored in metadata).
+pub fn add_indexer_status_method(store: &GraphStore, indexer: &Arc<Indexer>) -> Result<Value> {
     let last_indexed = store.get_meta("last_indexed_at")?.unwrap_or_else(|| "never".to_string());
+    let last_files_indexed = store.get_meta("last_files_indexed")?
+        .and_then(|s| s.parse::<u64>().ok());
+    let last_symbols_found = store.get_meta("last_symbols_found")?
+        .and_then(|s| s.parse::<u64>().ok());
+    let last_index_duration_ms = store.get_meta("last_index_duration_ms")?
+        .and_then(|s| s.parse::<u64>().ok());
+    let workspace = indexer.root.to_string_lossy().to_string();
     Ok(json!({
+        "workspace": workspace,
         "files": store.file_count()?,
         "symbols": store.symbol_count()?,
         "edges": store.edge_count()?,
         "last_indexed": last_indexed,
+        "last_run": {
+            "files_indexed": last_files_indexed,
+            "symbols_found": last_symbols_found,
+            "duration_ms": last_index_duration_ms,
+        },
     }))
 }
 
@@ -367,6 +382,50 @@ mod tests {
         assert_eq!(status["files"], 0);
         assert_eq!(status["symbols"], 0);
         assert_eq!(status["edges"], 0);
+        assert_eq!(status["last_indexed"], "never");
+        assert!(status.get("last_run").is_some(), "last_run key must be present");
+        assert!(status.get("workspace").is_some(), "workspace key must be present");
+    }
+
+    #[tokio::test]
+    async fn tool_index_status_shows_last_run_stats_after_indexing() {
+        let dir = tempdir().unwrap();
+        // Write a small Rust file so the indexer has something to process.
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+
+        let store = make_store(dir.path());
+        let memory = make_memory(dir.path());
+        let indexer = make_indexer(dir.path());
+
+        // Trigger a full index.
+        indexer.full_index().await.unwrap();
+
+        let resp = handle_tools_call(
+            json!(1),
+            json!({"name": "index_status", "arguments": {}}),
+            &store,
+            &memory,
+            &indexer,
+            dir.path(),
+        )
+        .await;
+
+        let text = &resp["result"]["content"][0]["text"];
+        let status: serde_json::Value = serde_json::from_str(text.as_str().unwrap()).unwrap();
+        assert_ne!(status["last_indexed"], "never", "should have an indexed-at timestamp");
+        let last_run = &status["last_run"];
+        assert!(
+            last_run["files_indexed"].as_u64().unwrap_or(0) > 0,
+            "at least one file should have been indexed: {last_run}"
+        );
+        assert!(
+            last_run["symbols_found"].as_u64().unwrap_or(0) > 0,
+            "at least one symbol should have been found: {last_run}"
+        );
+        assert!(
+            last_run["duration_ms"].as_u64().is_some(),
+            "duration_ms must be present: {last_run}"
+        );
     }
 
     #[tokio::test]

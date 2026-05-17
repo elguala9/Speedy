@@ -33,5 +33,7 @@ walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1"

@@ -225,6 +225,22 @@ impl DaemonClient {
         Ok(serde_json::from_str(&resp)?)
     }
 
+    /// Verify that the daemon's reported `protocol_version` is compatible with
+    /// this client. Returns a readable `Err` when the daemon is newer than the
+    /// client understands, so callers can surface a helpful message instead of
+    /// silently producing wrong results.
+    pub fn check_protocol_version(status: &DaemonStatus) -> Result<()> {
+        if status.protocol_version > SUPPORTED_PROTOCOL_VERSION {
+            anyhow::bail!(
+                "Daemon protocol version {} is newer than this client supports ({}). \
+                 Please upgrade speedy.",
+                status.protocol_version,
+                SUPPORTED_PROTOCOL_VERSION
+            );
+        }
+        Ok(())
+    }
+
     /// Open a long-lived connection that streams one JSON-encoded `LogLine`
     /// per `\n` from the daemon. The returned stream stays open until the
     /// caller drops the receiver or the daemon shuts down.
@@ -630,6 +646,71 @@ mod tests {
         let socket = unique_socket("refused");
         let client = DaemonClient::new(&socket);
         assert!(client.ping().await.is_err());
+    }
+
+    // ── protocol version check ────────────────────────────────────────────
+
+    #[test]
+    fn test_check_protocol_version_same_version_ok() {
+        let status = DaemonStatus {
+            pid: 1,
+            uptime_secs: 0,
+            workspace_count: 0,
+            watcher_count: 0,
+            version: "1.0.0".to_string(),
+            protocol_version: SUPPORTED_PROTOCOL_VERSION,
+        };
+        assert!(DaemonClient::check_protocol_version(&status).is_ok());
+    }
+
+    #[test]
+    fn test_check_protocol_version_older_daemon_ok() {
+        let status = DaemonStatus {
+            pid: 1,
+            uptime_secs: 0,
+            workspace_count: 0,
+            watcher_count: 0,
+            version: "0.9.0".to_string(),
+            protocol_version: SUPPORTED_PROTOCOL_VERSION.saturating_sub(1),
+        };
+        assert!(
+            DaemonClient::check_protocol_version(&status).is_ok(),
+            "older daemon protocol should be tolerated"
+        );
+    }
+
+    #[test]
+    fn test_check_protocol_version_newer_daemon_readable_error() {
+        let status = DaemonStatus {
+            pid: 1,
+            uptime_secs: 0,
+            workspace_count: 0,
+            watcher_count: 0,
+            version: "99.0.0".to_string(),
+            protocol_version: SUPPORTED_PROTOCOL_VERSION + 1,
+        };
+        let err = DaemonClient::check_protocol_version(&status).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upgrade speedy"), "error must guide user to upgrade: {msg}");
+        assert!(msg.contains(&(SUPPORTED_PROTOCOL_VERSION + 1).to_string()), "error must mention daemon version: {msg}");
+        assert!(msg.contains(&SUPPORTED_PROTOCOL_VERSION.to_string()), "error must mention client version: {msg}");
+    }
+
+    #[test]
+    fn test_check_protocol_version_legacy_zero_ok() {
+        // Pre-versioning daemons report 0; client must accept this.
+        let status = DaemonStatus {
+            pid: 1,
+            uptime_secs: 0,
+            workspace_count: 0,
+            watcher_count: 0,
+            version: "0.1.0".to_string(),
+            protocol_version: 0,
+        };
+        assert!(
+            DaemonClient::check_protocol_version(&status).is_ok(),
+            "legacy protocol version 0 must be accepted"
+        );
     }
 
     #[tokio::test]
