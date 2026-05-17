@@ -1,5 +1,5 @@
 [package]
-name = "speedy-mcp"
+name = "speedy-ai-context-mcp"
 description = "MCP server exposing Speedy semantic search as tools for AI coding agents"
 version.workspace = true
 edition.workspace = true

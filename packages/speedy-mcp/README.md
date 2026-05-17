@@ -1,4 +1,4 @@
-# speedy-mcp
+# speedy-ai-context-mcp
 
 MCP server that exposes [Speedy](https://github.com/elguala9/Speedy) semantic search as tools for AI coding agents.
 
@@ -15,7 +15,7 @@ Compatible with any MCP client: opencode, Claude Code, Cursor, Windsurf, and mor
 ## Install
 
 ```bash
-cargo install speedy-mcp
+cargo install speedy-ai-context-mcp
 ```
 
 ## Usage
@@ -26,7 +26,7 @@ Add to your MCP client config:
 {
   "mcpServers": {
     "speedy": {
-      "command": "speedy-mcp",
+      "command": "speedy-ai-context-mcp",
       "args": []
     }
   }
@@ -41,7 +41,7 @@ Set `SPEEDY_BIN` env var to point to the speedy binary if not in PATH.
 {
   "mcpServers": {
     "speedy": {
-      "command": "C:\\Program Files\\Speedy\\speedy-mcp.exe",
+      "command": "C:\\Program Files\\Speedy\\speedy-ai-context-mcp.exe",
       "args": [],
       "env": {
         "SPEEDY_BIN": "speedy-cli",

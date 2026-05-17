@@ -3,13 +3,13 @@ use std::io::{self, BufRead, Write};
 use std::process::Command;
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
-const SERVER_NAME: &str = "speedy-mcp";
+const SERVER_NAME: &str = "speedy-ai-context-mcp";
 const SERVER_VERSION: &str = "0.1.0";
 
 fn main() {
     use tracing_subscriber::prelude::*;
     let logs_dir = speedy_core::daemon_util::exe_log_dir();
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "speedy-mcp.log");
+    let file_appender = tracing_appender::rolling::daily(&logs_dir, "speedy-ai-context-mcp.log");
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
