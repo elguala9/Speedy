@@ -51,6 +51,8 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          cp installer/README.txt target/${{ matrix.target }}/release/README.txt
+          cp installer/INSTALLATION.md target/${{ matrix.target }}/release/INSTALLATION.md
           cd target/${{ matrix.target }}/release
           tar czf speedy-${{ matrix.target }}.tar.gz \
             speedy-ai-context${{ matrix.suffix }} \
@@ -58,7 +60,9 @@ jobs:
             speedy-cli${{ matrix.suffix }} \
             speedy-ai-context-mcp${{ matrix.suffix }} \
             speedy-gui${{ matrix.suffix }} \
-            speedy-language-context${{ matrix.suffix }}
+            speedy-language-context${{ matrix.suffix }} \
+            README.txt \
+            INSTALLATION.md
           mv speedy-${{ matrix.target }}.tar.gz ../../../
 
       - name: Upload artifact
@@ -72,7 +76,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: speedy-*.tar.gz
-          generate_release_notes: true
+          generate_release_notes: false
 
   installer:
     name: Windows Installer

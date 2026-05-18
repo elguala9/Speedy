@@ -6,11 +6,15 @@ Compatible with any MCP client: opencode, Claude Code, Cursor, Windsurf, and mor
 
 ## Tools
 
-| Tool | Description |
-|---|---|
-| `speedy_query` | Semantic search over the codebase using natural language |
-| `speedy_index` | Index a directory into the vector database |
-| `speedy_context` | Show project context summary |
+| Tool | Parameters | Description |
+|---|---|---|
+| `speedy_query` | `query` (req), `top_k` (opt, default 5) | Semantic search over the codebase using natural language |
+| `speedy_index` | `path` (opt, default `.`) | Index a directory into the vector database |
+| `speedy_context` | — | Show project context summary |
+| `speedy_workspace_add` | `path` (req) | Add a directory to the workspace registry |
+| `speedy_workspace_remove` | `path` (req) | Remove a directory from the workspace registry |
+| `speedy_workspace_list` | — | List all registered workspaces |
+| `speedy_force_reindex` | `path` (opt, default `.`) | Force a full reindex of a workspace |
 
 ## Install
 
