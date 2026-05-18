@@ -4459,7 +4459,7 @@ dependencies = [
 
 [[package]]
 name = "speedy-ai-context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4487,7 +4487,7 @@ dependencies = [
 
 [[package]]
 name = "speedy-ai-context-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -4501,7 +4501,7 @@ dependencies = [
 
 [[package]]
 name = "speedy-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4517,7 +4517,7 @@ dependencies = [
 
 [[package]]
 name = "speedy-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4533,7 +4533,7 @@ dependencies = [
 
 [[package]]
 name = "speedy-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4556,7 +4556,7 @@ dependencies = [
 
 [[package]]
 name = "speedy-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4579,7 +4579,7 @@ dependencies = [
 
 [[package]]
 name = "speedy-language-context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6594,7 +6594,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "yoke"

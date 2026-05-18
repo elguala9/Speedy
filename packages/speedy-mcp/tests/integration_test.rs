@@ -302,10 +302,18 @@ fn test_tools_list_three_tools() {
 
     assert_rpc_success(&resp);
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 7);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, vec!["speedy_query", "speedy_index", "speedy_context"]);
+    assert_eq!(names, vec![
+        "speedy_query",
+        "speedy_index",
+        "speedy_context",
+        "speedy_workspace_add",
+        "speedy_workspace_remove",
+        "speedy_workspace_list",
+        "speedy_force_reindex",
+    ]);
 
     client.stop();
     let _ = std::fs::remove_dir_all(&workdir);
@@ -363,7 +371,7 @@ fn test_full_lifecycle() {
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
     ))
     .unwrap();
-    assert!(list["result"]["tools"].as_array().unwrap().len() == 3);
+    assert!(list["result"]["tools"].as_array().unwrap().len() == 7);
 
     let shutdown: serde_json::Value = serde_json::from_str(&client.send(
         r#"{"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}"#,
@@ -891,7 +899,239 @@ fn test_notification_read_write_ordering() {
     ))
     .unwrap();
     assert_rpc_success(&list);
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// ── Workspace & reindex tool tests (real binary) ───────────────────────────
+
+#[test]
+fn test_workspace_list_via_real_binary() {
+    let workdir = temp_project();
+    let mut client = McpClient::start(&workdir);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"speedy_workspace_list","arguments":{}}}"#,
+    ))
+    .unwrap();
+
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert_eq!(resp["id"], 2);
+    if resp["error"].is_null() {
+        assert!(resp["result"]["content"].is_array());
+    } else {
+        assert_eq!(resp["error"]["code"], -32000);
+        assert!(resp["error"]["message"].as_str().unwrap_or("").contains("speedy workspace list failed"));
+    }
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn test_workspace_add_via_real_binary() {
+    let workdir = temp_project();
+    let mut client = McpClient::start(&workdir);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "speedy_workspace_add", "arguments": {"path": workdir.to_str().unwrap()}}
+    });
+    let resp: serde_json::Value = serde_json::from_str(&client.send(&call.to_string())).unwrap();
+
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert_eq!(resp["id"], 2);
+    if resp["error"].is_null() {
+        assert!(resp["result"]["content"].is_array());
+    } else {
+        assert_eq!(resp["error"]["code"], -32000);
+        assert!(resp["error"]["message"].as_str().unwrap_or("").contains("speedy workspace add failed"));
+    }
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn test_workspace_remove_via_real_binary() {
+    let workdir = temp_project();
+    let mut client = McpClient::start(&workdir);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "speedy_workspace_remove", "arguments": {"path": workdir.to_str().unwrap()}}
+    });
+    let resp: serde_json::Value = serde_json::from_str(&client.send(&call.to_string())).unwrap();
+
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert_eq!(resp["id"], 2);
+    if resp["error"].is_null() {
+        assert!(resp["result"]["content"].is_array());
+    } else {
+        assert_eq!(resp["error"]["code"], -32000);
+        assert!(resp["error"]["message"].as_str().unwrap_or("").contains("speedy workspace remove failed"));
+    }
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn test_force_reindex_via_real_binary() {
+    let workdir = temp_project();
+    let mut client = McpClient::start(&workdir);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"speedy_force_reindex","arguments":{}}}"#,
+    ))
+    .unwrap();
+
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert_eq!(resp["id"], 2);
+    if resp["error"].is_null() {
+        assert!(resp["result"]["content"].is_array());
+    } else {
+        assert_eq!(resp["error"]["code"], -32000);
+        assert!(resp["error"]["message"].as_str().unwrap_or("").contains("speedy force reindex failed"));
+    }
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// ── Workspace & reindex tool tests (daemon integration) ────────────────────
+
+#[test]
+fn test_mcp_workspace_add_registers_with_daemon() {
+    let workdir = temp_project();
+    let extra_ws = temp_project();
+    let daemon = TestDaemon::start("ws_add");
+
+    assert_eq!(daemon.list_workspaces().len(), 0);
+
+    let mut client = start_mcp_with_daemon(&workdir, &daemon);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "speedy_workspace_add", "arguments": {"path": extra_ws.to_str().unwrap()}}
+    });
+    let resp: serde_json::Value = serde_json::from_str(&client.send(&call.to_string())).unwrap();
+
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert!(resp["error"].is_null(), "workspace_add should succeed: {resp}");
+
+    let registered = daemon.list_workspaces();
+    let extra_ws_canonical = extra_ws.canonicalize().unwrap();
+    let found = registered.iter().any(|p| {
+        std::path::Path::new(p).canonicalize().ok().as_ref() == Some(&extra_ws_canonical)
+    });
+    assert!(
+        found,
+        "daemon should have the workspace after speedy_workspace_add, list={registered:?} expected={}",
+        extra_ws_canonical.display()
+    );
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn test_mcp_workspace_list_with_daemon() {
+    let workdir = temp_project();
+    let daemon = TestDaemon::start("ws_list");
+
+    let mut client = start_mcp_with_daemon(&workdir, &daemon);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    // Register a workspace so the list is non-trivial.
+    let add_call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "speedy_workspace_add", "arguments": {"path": workdir.to_str().unwrap()}}
+    });
+    client.send(&add_call.to_string());
+
+    let list_resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"speedy_workspace_list","arguments":{}}}"#,
+    ))
+    .unwrap();
+
+    assert_eq!(list_resp["jsonrpc"], "2.0");
+    assert!(list_resp["error"].is_null(), "workspace_list should succeed: {list_resp}");
+    let text = list_resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "workspace_list returned empty text");
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn test_mcp_workspace_remove_unregisters_from_daemon() {
+    let workdir = temp_project();
+    let extra_ws = temp_project();
+    let daemon = TestDaemon::start("ws_rem");
+
+    let mut client = start_mcp_with_daemon(&workdir, &daemon);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    // Add first.
+    let add_call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "speedy_workspace_add", "arguments": {"path": extra_ws.to_str().unwrap()}}
+    });
+    client.send(&add_call.to_string());
+    assert!(!daemon.list_workspaces().is_empty(), "workspace should be registered after add");
+
+    // Now remove it.
+    let remove_call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "speedy_workspace_remove", "arguments": {"path": extra_ws.to_str().unwrap()}}
+    });
+    let resp: serde_json::Value = serde_json::from_str(&client.send(&remove_call.to_string())).unwrap();
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert!(resp["error"].is_null(), "workspace_remove should succeed: {resp}");
+
+    let registered = daemon.list_workspaces();
+    let extra_canonical = extra_ws.canonicalize().unwrap();
+    let still_present = registered.iter().any(|p| {
+        std::path::Path::new(p).canonicalize().ok().as_ref() == Some(&extra_canonical)
+    });
+    assert!(
+        !still_present,
+        "workspace should be gone after speedy_workspace_remove, list={registered:?}"
+    );
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn test_mcp_force_reindex_with_daemon() {
+    let workdir = temp_project();
+    let daemon = TestDaemon::start("force_ri");
+
+    let mut client = start_mcp_with_daemon(&workdir, &daemon);
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"speedy_force_reindex","arguments":{}}}"#,
+    ))
+    .unwrap();
+
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert_eq!(resp["id"], 2);
+    if resp["error"].is_null() {
+        assert!(resp["result"]["content"].is_array());
+    } else {
+        assert_eq!(resp["error"]["code"], -32000);
+        assert!(resp["error"]["message"].as_str().unwrap_or("").contains("speedy force reindex failed"));
+    }
 
     client.stop();
     let _ = std::fs::remove_dir_all(&workdir);

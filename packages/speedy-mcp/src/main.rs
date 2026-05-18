@@ -90,6 +90,28 @@ fn handle_request(req: &JsonRpcRequest, run_cmd: &dyn Fn(&[&str]) -> Result<Stri
                     "Show project context summary: files and chunks indexed.",
                     serde_json::json!({}),
                     &[]),
+                tool_json("speedy_workspace_add",
+                    "Add a directory to the speedy workspace registry.",
+                    serde_json::json!({
+                        "path": {"type": "string", "description": "Workspace path to add"}
+                    }),
+                    &["path"]),
+                tool_json("speedy_workspace_remove",
+                    "Remove a directory from the speedy workspace registry.",
+                    serde_json::json!({
+                        "path": {"type": "string", "description": "Workspace path to remove"}
+                    }),
+                    &["path"]),
+                tool_json("speedy_workspace_list",
+                    "List all registered speedy workspaces.",
+                    serde_json::json!({}),
+                    &[]),
+                tool_json("speedy_force_reindex",
+                    "Force a full reindex of a workspace.",
+                    serde_json::json!({
+                        "path": {"type": "string", "description": "Workspace path to reindex (default: .)", "default": "."}
+                    }),
+                    &[]),
             ];
             Some(JsonRpcResponse::success(req.id, serde_json::json!({"tools": tools})))
         }
@@ -124,6 +146,37 @@ fn handle_request(req: &JsonRpcRequest, run_cmd: &dyn Fn(&[&str]) -> Result<Stri
                     match run_cmd(&cmd_args) {
                         Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
                         Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy context failed: {e}"))),
+                    }
+                }
+                "speedy_workspace_add" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    let cmd_args = ["workspace", "add", path, "--json"];
+                    match run_cmd(&cmd_args) {
+                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy workspace add failed: {e}"))),
+                    }
+                }
+                "speedy_workspace_remove" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    let cmd_args = ["workspace", "remove", path, "--json"];
+                    match run_cmd(&cmd_args) {
+                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy workspace remove failed: {e}"))),
+                    }
+                }
+                "speedy_workspace_list" => {
+                    let cmd_args = ["workspace", "list", "--json"];
+                    match run_cmd(&cmd_args) {
+                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy workspace list failed: {e}"))),
+                    }
+                }
+                "speedy_force_reindex" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    let cmd_args = ["force", "-p", path];
+                    match run_cmd(&cmd_args) {
+                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy force reindex failed: {e}"))),
                     }
                 }
                 _ => Some(JsonRpcResponse::error(req.id, -32601, format!("Unknown tool: {name}"))),
@@ -302,11 +355,11 @@ mod tests {
     // ── tools/list ──────────────────────────────────────
 
     #[test]
-    fn test_tools_list_has_three_tools() {
+    fn test_tools_list_has_seven_tools() {
         let resp = send("tools/list", serde_json::json!({}));
         let tools = &resp["result"]["tools"];
         assert!(tools.is_array());
-        assert_eq!(tools.as_array().unwrap().len(), 3);
+        assert_eq!(tools.as_array().unwrap().len(), 7);
     }
 
     #[test]
@@ -317,7 +370,15 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["speedy_query", "speedy_index", "speedy_context"]);
+        assert_eq!(names, vec![
+            "speedy_query",
+            "speedy_index",
+            "speedy_context",
+            "speedy_workspace_add",
+            "speedy_workspace_remove",
+            "speedy_workspace_list",
+            "speedy_force_reindex",
+        ]);
     }
 
     #[test]
@@ -385,6 +446,103 @@ mod tests {
             "arguments": {}
         }));
         assert_eq!(resp["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn test_call_workspace_add_success() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_workspace_add",
+            "arguments": {"path": "/tmp/myproject"}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+        assert_eq!(resp["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn test_call_workspace_remove_success() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_workspace_remove",
+            "arguments": {"path": "/tmp/myproject"}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+        assert_eq!(resp["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn test_call_workspace_list_success() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_workspace_list",
+            "arguments": {}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+        assert_eq!(resp["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn test_call_force_reindex_success() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_force_reindex",
+            "arguments": {"path": "/tmp/myproject"}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+        assert_eq!(resp["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn test_call_force_reindex_default_path() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_force_reindex",
+            "arguments": {}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn test_call_workspace_add_binary_failure() {
+        let fail_runner = |_: &[&str]| Err("binary not found".to_string());
+        let line = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "speedy_workspace_add", "arguments": {"path": "/tmp/x"}}
+        });
+        let json = process_line(&line.to_string(), &fail_runner);
+        let resp = parse_response(&json.unwrap());
+        assert_error(&resp, -32000, "speedy workspace add failed");
+    }
+
+    #[test]
+    fn test_call_workspace_remove_binary_failure() {
+        let fail_runner = |_: &[&str]| Err("binary not found".to_string());
+        let line = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "speedy_workspace_remove", "arguments": {"path": "/tmp/x"}}
+        });
+        let json = process_line(&line.to_string(), &fail_runner);
+        let resp = parse_response(&json.unwrap());
+        assert_error(&resp, -32000, "speedy workspace remove failed");
+    }
+
+    #[test]
+    fn test_call_workspace_list_binary_failure() {
+        let fail_runner = |_: &[&str]| Err("binary not found".to_string());
+        let line = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "speedy_workspace_list", "arguments": {}}
+        });
+        let json = process_line(&line.to_string(), &fail_runner);
+        let resp = parse_response(&json.unwrap());
+        assert_error(&resp, -32000, "speedy workspace list failed");
+    }
+
+    #[test]
+    fn test_call_force_reindex_binary_failure() {
+        let fail_runner = |_: &[&str]| Err("binary not found".to_string());
+        let line = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "speedy_force_reindex", "arguments": {"path": "/tmp/x"}}
+        });
+        let json = process_line(&line.to_string(), &fail_runner);
+        let resp = parse_response(&json.unwrap());
+        assert_error(&resp, -32000, "speedy force reindex failed");
     }
 
     // ── tools/call: errors ───────────────────────────────

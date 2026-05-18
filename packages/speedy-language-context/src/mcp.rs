@@ -142,6 +142,34 @@ fn handle_tools_list(id: Value) -> Value {
                         },
                         "required": ["query"]
                     }
+                },
+                {
+                    "name": "force_reindex",
+                    "description": "Force a full reindex of the workspace and return updated stats",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "workspace_add",
+                    "description": "Add a directory to the speedy workspace registry",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "workspace_remove",
+                    "description": "Remove a directory from the speedy workspace registry",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "workspace_list",
+                    "description": "List all registered speedy workspaces",
+                    "inputSchema": { "type": "object", "properties": {} }
                 }
             ]
         }
@@ -179,6 +207,22 @@ async fn handle_tools_call(
         "search_observations" => match tool_search_observations(memory, args) {
             Ok(t) => t,
             Err(e) => return error_response(id, -32602, &format!("search_observations failed: {e}")),
+        },
+        "force_reindex" => match tool_force_reindex(store, indexer).await {
+            Ok(t) => t,
+            Err(e) => return error_response(id, -32602, &format!("force_reindex failed: {e}")),
+        },
+        "workspace_add" => match tool_run_cli(&["workspace", "add", args.get("path").and_then(|v| v.as_str()).unwrap_or(""), "--json"]) {
+            Ok(t) => t,
+            Err(e) => return error_response(id, -32602, &format!("workspace_add failed: {e}")),
+        },
+        "workspace_remove" => match tool_run_cli(&["workspace", "remove", args.get("path").and_then(|v| v.as_str()).unwrap_or(""), "--json"]) {
+            Ok(t) => t,
+            Err(e) => return error_response(id, -32602, &format!("workspace_remove failed: {e}")),
+        },
+        "workspace_list" => match tool_run_cli(&["workspace", "list", "--json"]) {
+            Ok(t) => t,
+            Err(e) => return error_response(id, -32602, &format!("workspace_list failed: {e}")),
         },
         _ => return error_response(id, -32601, &format!("unknown tool: {name}")),
     };
@@ -283,6 +327,26 @@ fn tool_save_observation(memory: &Arc<Memory>, args: Value) -> Result<String> {
     Ok(format!("saved observation #{id}"))
 }
 
+async fn tool_force_reindex(store: &Arc<GraphStore>, indexer: &Arc<Indexer>) -> Result<String> {
+    indexer.full_index().await?;
+    let status = add_indexer_status_method(store, indexer)?;
+    Ok(serde_json::to_string_pretty(&status)?)
+}
+
+fn tool_run_cli(args: &[&str]) -> Result<String> {
+    let bin = std::env::var("SPEEDY_BIN").unwrap_or_else(|_| "speedy-cli".to_string());
+    let output = std::process::Command::new(&bin)
+        .args(args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to execute {bin}: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{bin} exited with {}: {stderr}", output.status)
+    }
+}
+
 fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -357,6 +421,10 @@ mod tests {
         assert!(tools.contains(&"run_pipeline"), "run_pipeline missing");
         assert!(tools.contains(&"save_observation"), "save_observation missing");
         assert!(tools.contains(&"search_observations"), "search_observations missing");
+        assert!(tools.contains(&"force_reindex"), "force_reindex missing");
+        assert!(tools.contains(&"workspace_add"), "workspace_add missing");
+        assert!(tools.contains(&"workspace_remove"), "workspace_remove missing");
+        assert!(tools.contains(&"workspace_list"), "workspace_list missing");
     }
 
     #[tokio::test]
@@ -457,6 +525,67 @@ mod tests {
 
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("edge extraction was added"), "search did not return the saved observation");
+    }
+
+    #[tokio::test]
+    async fn tool_force_reindex_runs_indexer() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+
+        let store = make_store(dir.path());
+        let memory = make_memory(dir.path());
+        let indexer = make_indexer(dir.path());
+
+        let resp = handle_tools_call(
+            json!(1),
+            json!({"name": "force_reindex", "arguments": {}}),
+            &store,
+            &memory,
+            &indexer,
+            dir.path(),
+        )
+        .await;
+
+        assert_eq!(resp["id"], 1);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let status: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_ne!(status["last_indexed"], "never", "should have an indexed-at timestamp after reindex");
+        assert!(
+            status["symbols"].as_u64().unwrap_or(0) > 0,
+            "should have found symbols after reindex"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_tools_fail_gracefully_without_binary() {
+        let dir = tempdir().unwrap();
+        let store = make_store(dir.path());
+        let memory = make_memory(dir.path());
+        let indexer = make_indexer(dir.path());
+
+        // With an invalid binary name, all three workspace tools should return
+        // an MCP error response rather than panicking.
+        std::env::set_var("SPEEDY_BIN", "nonexistent-speedy-binary-xyz");
+
+        for tool in ["workspace_add", "workspace_remove", "workspace_list"] {
+            let args = if tool == "workspace_list" {
+                json!({"name": tool, "arguments": {}})
+            } else {
+                json!({"name": tool, "arguments": {"path": "/tmp/test"}})
+            };
+            let resp = handle_tools_call(
+                json!(1),
+                args,
+                &store,
+                &memory,
+                &indexer,
+                dir.path(),
+            )
+            .await;
+            assert!(resp.get("error").is_some(), "{tool} should return error when binary missing");
+        }
+
+        std::env::remove_var("SPEEDY_BIN");
     }
 
     #[tokio::test]

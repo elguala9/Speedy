@@ -1,0 +1,130 @@
+# === Rust ===
+target/
+**/*.pdb
+
+# === .NET / C# ===
+bin/
+obj/
+
+# === Java / Kotlin / Gradle ===
+*.class
+.gradle/
+.mvn/
+
+# === CMake / C / C++ ===
+CMakeFiles/
+cmake-build-*/
+
+# === Python ===
+__pycache__/
+*.egg-info/
+.eggs/
+.tox/
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Go ===
+vendor/
+
+# === JS / TS ===
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+
+# === Dipendenze ===
+node_modules/
+bower_components/
+.bundle/
+
+# === VCS / tool cache ===
+.git/
+.cargo/
+
+# === Speedy internal ===
+.speedy/
+.speedy-daemon/
+
+# === IDE ===
+.idea/
+.vscode/
+*.iml
+
+# === Lock file (basso valore semantico) ===
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Gemfile.lock
+poetry.lock
+composer.lock
+go.sum
+
+# === Log e file temporanei ===
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# === Environment e segreti ===
+.env
+.env.local
+.env.*.local
+
+# === Coverage ===
+coverage/
+.nyc_output/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# === Binary extensions ===
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+*.webp
+*.mp3
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wav
+*.flac
+*.ogg
+*.zip
+*.tar
+*.gz
+*.bz2
+*.7z
+*.rar
+*.pdf
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.ttf
+*.otf
+*.woff
+*.woff2
+*.pyc
+*.pyo
+*.class
