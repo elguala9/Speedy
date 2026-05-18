@@ -1,58 +1,58 @@
-# Installazione su Windows
+# Installation on Windows
 
 ---
 
-## Metodo rapido — Installer automatico (consigliato)
+## Quick method — Automatic installer (recommended)
 
-Scarica `speedy-setup-<versione>.exe` dalla [pagina Releases](https://github.com/elguala9/Speedy/releases) ed eseguilo.
+Download `speedy-setup-<version>.exe` from the [Releases page](https://github.com/elguala9/Speedy/releases) and run it.
 
-L'installer:
-- Copia i 5 binari in `%LOCALAPPDATA%\Programs\Speedy\` (nessun admin richiesto)
-- Aggiunge la cartella al PATH utente
-- Crea un collegamento nella Startup folder per avviare il daemon automaticamente ad ogni login
-- Avvia il daemon subito al termine
+The installer:
+- Copies the 5 binaries to `%LOCALAPPDATA%\Programs\Speedy\` (no admin required)
+- Adds the folder to the user PATH
+- Creates a shortcut in the Startup folder to launch the daemon automatically at every login
+- Starts the daemon immediately when done
 
-**Disinstallazione completa:** Pannello di Controllo → Programmi → *Speedy* → Disinstalla.
-Il wizard chiederà se eliminare anche i dati utente (workspaces registrati, log, configurazione).
+**Full uninstall:** Control Panel → Programs → *Speedy* → Uninstall.
+The wizard will ask whether to also delete user data (registered workspaces, logs, configuration).
 
-> Per buildare l'installer dal sorgente: `.\scripts\build-installer.ps1` (richiede Inno Setup 6).
-
----
-
-## Installazione manuale (avanzata)
-
-Segui questi passi se preferisci installare manualmente senza usare l'installer.
+> To build the installer from source: `.\scripts\build-installer.ps1` (requires Inno Setup 6).
 
 ---
 
-## Prerequisiti
+## Manual installation (advanced)
 
-1. **Ollama** — [ollama.com](https://ollama.com) — deve girare in background.
-2. Scarica il modello di embedding (una volta sola):
+Follow these steps if you prefer to install manually without using the installer.
+
+---
+
+## Prerequisites
+
+1. **Ollama** — [ollama.com](https://ollama.com) — must be running in the background.
+2. Download the embedding model (once only):
    ```powershell
    ollama pull nomic-embed-text
    ```
 
 ---
 
-## I 5 binari e i loro ruoli
+## The 5 binaries and their roles
 
-| Binario | Ruolo | Lifecycle |
+| Binary | Role | Lifecycle |
 |---|---|---|
-| `speedy-ai-context.exe` | Worker — indexing, query, embedding, SQLite | Lanciato dal daemon, o standalone |
-| `speedy-daemon.exe` | Daemon globale — file watcher, IPC server | **Sempre in esecuzione** (uno per utente) |
-| `speedy-cli.exe` | Client thin — scriptabile, per AI agent | Lanciato on-demand |
-| `speedy-mcp.exe` | Server MCP per AI agent (Claude, Cursor, …) | Lanciato dall'agent MCP |
-| `speedy-gui.exe` | GUI desktop — gestione workspaces e log | Lanciato on-demand |
+| `speedy-ai-context.exe` | Worker — indexing, query, embedding, SQLite | Launched by the daemon, or standalone |
+| `speedy-daemon.exe` | Global daemon — file watcher, IPC server | **Always running** (one per user) |
+| `speedy-cli.exe` | Thin client — scriptable, for AI agents | Launched on-demand |
+| `speedy-mcp.exe` | MCP server for AI agents (Claude, Cursor, …) | Launched by the MCP agent |
+| `speedy-gui.exe` | Desktop GUI — workspace management and logs | Launched on-demand |
 
-I primi quattro (`speedy-ai-context`, `speedy-cli`, `speedy-mcp`, `speedy-gui`) si lanciano e terminano in secondi. Il daemon è l'unico che deve restare sempre vivo.
+The first four (`speedy-ai-context`, `speedy-cli`, `speedy-mcp`, `speedy-gui`) launch and terminate in seconds. The daemon is the only one that must stay alive at all times.
 
 ---
 
-## Layout consigliato
+## Recommended layout
 
 ```
-C:\Program Files\Speedy\        ← o %LOCALAPPDATA%\Programs\Speedy\ senza admin
+C:\Program Files\Speedy\        ← or %LOCALAPPDATA%\Programs\Speedy\ without admin
 ├── speedy-ai-context.exe
 ├── speedy-daemon.exe
 ├── speedy-cli.exe
@@ -60,13 +60,13 @@ C:\Program Files\Speedy\        ← o %LOCALAPPDATA%\Programs\Speedy\ senza admi
 └── speedy-gui.exe
 ```
 
-Tutti e 5 nella stessa cartella: così `speedy-gui.exe` trova il daemon automaticamente via auto-detect (cerca `speedy-daemon.exe` accanto a sé).
+All 5 in the same folder: this way `speedy-gui.exe` finds the daemon automatically via auto-detect (looks for `speedy-daemon.exe` next to itself).
 
 ---
 
-## Step 1 — Copia i binari
+## Step 1 — Copy the binaries
 
-Scarica i `.exe` dalla [pagina Releases](https://github.com/elguala9/Speedy/releases) (o buildali con `cargo build --release --workspace`) e copiamoli nella cartella:
+Download the `.exe` files from the [Releases page](https://github.com/elguala9/Speedy/releases) (or build them with `cargo build --release --workspace`) and copy them to the folder:
 
 ```powershell
 $dir = 'C:\Program Files\Speedy'
@@ -79,13 +79,13 @@ Copy-Item dist\speedy-mcp.exe    $dir
 Copy-Item dist\speedy-gui.exe    $dir
 ```
 
-> Se non hai admin rights usa `$dir = "$env:LOCALAPPDATA\Programs\Speedy"`.
+> If you don't have admin rights use `$dir = "$env:LOCALAPPDATA\Programs\Speedy"`.
 
 ---
 
-## Step 2 — Aggiungi la cartella al PATH
+## Step 2 — Add the folder to PATH
 
-Facoltativo ma consigliato: permette di scrivere `speedy-cli daemon status` da qualsiasi shell e di referenziare `speedy-mcp` negli MCP client senza percorso assoluto.
+Optional but recommended: allows typing `speedy-cli daemon status` from any shell and referencing `speedy-mcp` in MCP clients without an absolute path.
 
 ```powershell
 $dir = 'C:\Program Files\Speedy'
@@ -95,17 +95,17 @@ $dir = 'C:\Program Files\Speedy'
     'User')
 ```
 
-Apri un nuovo terminale dopo.
+Open a new terminal afterwards.
 
 ---
 
-## Step 3 — Autostart del daemon al login
+## Step 3 — Autostart the daemon at login
 
-`speedy-daemon.exe` deve partire automaticamente ad ogni login. Il modo più semplice è creare uno **shortcut nella cartella Startup** dell'utente.
+`speedy-daemon.exe` must start automatically at every login. The simplest way is to create a **shortcut in the user's Startup folder**.
 
-Apri la cartella Startup: `Win + R` → digita `shell:startup` → Invio.
+Open the Startup folder: `Win + R` → type `shell:startup` → Enter.
 
-Poi crea lo shortcut via PowerShell:
+Then create the shortcut via PowerShell:
 
 ```powershell
 $startup = [Environment]::GetFolderPath('Startup')
@@ -116,7 +116,7 @@ $lnk.TargetPath = $target
 $lnk.Save()
 ```
 
-Al prossimo login il daemon parte in background senza finestra (flag `CREATE_NO_WINDOW` già attivo). Per avviarlo subito senza rilogarsi:
+At the next login the daemon starts in the background without a window (`CREATE_NO_WINDOW` flag already active). To start it immediately without re-logging in:
 
 ```powershell
 Start-Process 'C:\Program Files\Speedy\speedy-daemon.exe' -WindowStyle Hidden
@@ -124,31 +124,31 @@ Start-Process 'C:\Program Files\Speedy\speedy-daemon.exe' -WindowStyle Hidden
 
 ---
 
-## Step 4 — Verifica
+## Step 4 — Verify
 
 ```powershell
-speedy-cli daemon ping      # deve rispondere: pong
-speedy-cli daemon status    # JSON con pid, uptime, watcher_count
+speedy-cli daemon ping      # should respond: pong
+speedy-cli daemon status    # JSON with pid, uptime, watcher_count
 ```
 
 ---
 
-## Step 5 — Primo workspace
+## Step 5 — First workspace
 
 ```powershell
-# Registra il progetto (il daemon avvia un file watcher)
+# Register the project (the daemon starts a file watcher)
 speedy-cli workspace add C:\path\to\project
 
-# Indicizza
+# Index
 speedy-cli index
 
-# Cerca
-speedy-cli query "come funziona l'autenticazione?" -k 10
+# Search
+speedy-cli query "how does authentication work?" -k 10
 ```
 
-In alternativa apri `speedy-gui.exe` → tab **Workspaces** → **Aggiungi**.
+Alternatively open `speedy-gui.exe` → **Workspaces** tab → **Add**.
 
-Per ogni workspace puoi abilitare/disabilitare i due sottosistemi direttamente dalla GUI (checkbox **Speedy Indexer** e **Language Context** nella riga del workspace) oppure modificando direttamente il file di config:
+For each workspace you can enable/disable the two subsystems directly from the GUI (checkboxes **Speedy Indexer** and **Language Context** in the workspace row) or by editing the config file directly:
 
 ```toml
 # <workspace>\.speedy\config.toml
@@ -157,15 +157,15 @@ speedy_indexer = true    # file indexer (speedy-ai-context)
 language_context = true  # code intelligence (speedy-language-context)
 ```
 
-La GUI legge e scrive lo stesso `config.toml`: le modifiche sono immediatamente visibili in entrambe le direzioni.
+The GUI reads and writes the same `config.toml`: changes are immediately visible in both directions.
 
-> I comandi CLI rapidi (`speedy enable speedy`, `speedy enable slc`, …) sono pianificati ma non ancora implementati.
+> Quick CLI commands (`speedy enable speedy`, `speedy enable slc`, …) are planned but not yet implemented.
 
 ---
 
-## Configurare un AI agent (MCP)
+## Configure an AI agent (MCP)
 
-Aggiungi al config del tuo client MCP (es. `claude_desktop_config.json`):
+Add to your MCP client config (e.g. `claude_desktop_config.json`):
 
 ```json
 {
@@ -183,21 +183,21 @@ Aggiungi al config del tuo client MCP (es. `claude_desktop_config.json`):
 }
 ```
 
-> Se hai aggiunto la cartella al PATH puoi usare solo `"command": "speedy-mcp"`.
+> If you added the folder to PATH you can use just `"command": "speedy-mcp"`.
 
 ---
 
-## Rimozione
+## Removal
 
 ```powershell
-# Rimuovi lo shortcut di autostart
+# Remove the autostart shortcut
 Remove-Item "$([Environment]::GetFolderPath('Startup'))\speedy-daemon.lnk" -ErrorAction SilentlyContinue
 
-# Ferma il daemon (se è in esecuzione)
+# Stop the daemon (if running)
 speedy-cli daemon stop
 
-# Elimina i binari
+# Delete the binaries
 Remove-Item -Recurse -Force 'C:\Program Files\Speedy'
 ```
 
-Il database dei workspace (`.speedy/index.sqlite`) vive dentro ogni progetto e non viene toccato da questa procedura.
+The workspace database (`.speedy/index.sqlite`) lives inside each project and is not touched by this procedure.

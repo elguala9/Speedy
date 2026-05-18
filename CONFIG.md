@@ -1,19 +1,19 @@
-# Speedy — Configurazione Provider AI
+# Speedy — AI Provider Configuration
 
-## Posizioni del file
+## File locations
 
-Speedy cerca `config.speedy.json` in quest'ordine:
+Speedy looks for `config.speedy.json` in this order:
 
-1. `<workspace>/.speedy/config.speedy.json` — configurazione del progetto
-2. `~/.speedy/config.speedy.json` — configurazione globale utente
+1. `<workspace>/.speedy/config.speedy.json` — project configuration
+2. `~/.speedy/config.speedy.json` — global user configuration
 
-Se un campo è assente nel file workspace, viene ereditato dal file utente. Se manca anche lì, si usa il default.
+If a field is absent in the workspace file, it is inherited from the user file. If missing there too, the default is used.
 
-> **Attenzione:** aggiungi `.speedy/config.speedy.json` al tuo `.gitignore` — il file può contenere API key.
+> **Warning:** add `.speedy/config.speedy.json` to your `.gitignore` — the file may contain API keys.
 
 ---
 
-## Struttura completa
+## Full structure
 
 ```json
 {
@@ -33,24 +33,24 @@ Se un campo è assente nel file workspace, viene ereditato dal file utente. Se m
 }
 ```
 
-Tutti i campi sono opzionali. Il default è Ollama su localhost.
+All fields are optional. The default is Ollama on localhost.
 
-| Campo provider | Tipo | Default | Descrizione |
+| Provider field | Type | Default | Description |
 |---|---|---|---|
-| `type` | string | `"ollama"` | Tipo di provider |
-| `base_url` | string | *(provider default)* | URL base dell'endpoint |
-| `model` | string | `"nomic-embed-text"` | Modello embedding |
-| `api_key` | string | *(empty)* | API key (non necessaria per Ollama/agent) |
-| `command` | string | *(empty)* | Comando per `type: "agent"` |
-| `dims` | number | `384` | Dimensione vettore per provider generativi (Anthropic, DeepSeek) |
+| `type` | string | `"ollama"` | Provider type |
+| `base_url` | string | *(provider default)* | Base URL of the endpoint |
+| `model` | string | `"nomic-embed-text"` | Embedding model |
+| `api_key` | string | *(empty)* | API key (not needed for Ollama/agent) |
+| `command` | string | *(empty)* | Command for `type: "agent"` |
+| `dims` | number | `384` | Vector dimension for generative providers (Anthropic, DeepSeek) |
 
 ---
 
-## Provider
+## Providers
 
 ### Ollama (default)
 
-Nessuna API key richiesta. Richiede Ollama in esecuzione localmente.
+No API key required. Requires Ollama running locally.
 
 ```json
 {
@@ -62,7 +62,7 @@ Nessuna API key richiesta. Richiede Ollama in esecuzione localmente.
 }
 ```
 
-Modelli consigliati: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embedding:0.6b`
+Recommended models: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embedding:0.6b`
 
 ---
 
@@ -78,7 +78,7 @@ Modelli consigliati: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embedding:0
 }
 ```
 
-Modelli disponibili: `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`
+Available models: `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`
 
 ---
 
@@ -96,9 +96,9 @@ Modelli disponibili: `text-embedding-3-small`, `text-embedding-3-large`, `text-e
 
 ---
 
-### Qualsiasi endpoint OpenAI-compatible
+### Any OpenAI-compatible endpoint
 
-Per provider locali (LM Studio, vLLM, Ollama con API OpenAI, ecc.) o servizi custom.
+For local providers (LM Studio, vLLM, Ollama with OpenAI API, etc.) or custom services.
 
 ```json
 {
@@ -130,7 +130,7 @@ Per provider locali (LM Studio, vLLM, Ollama con API OpenAI, ecc.) o servizi cus
 
 ### Anthropic / Claude *(proxy embedding)*
 
-Claude non ha un'API di embedding nativa. Speedy usa il modello generativo per produrre vettori tramite prompt strutturato. Funziona ma è più lento e meno preciso di un embedding nativo.
+Claude does not have a native embedding API. Speedy uses the generative model to produce vectors via a structured prompt. It works but is slower and less precise than a native embedding.
 
 ```json
 {
@@ -143,13 +143,13 @@ Claude non ha un'API di embedding nativa. Speedy usa il modello generativo per p
 }
 ```
 
-`dims` controlla la dimensione del vettore richiesto al modello (default: 384). Deve essere coerente tra index e query.
+`dims` controls the vector dimension requested from the model (default: 384). Must be consistent between index and query.
 
 ---
 
 ### DeepSeek *(proxy embedding)*
 
-Come Anthropic: usa il modello chat come proxy. Vedi nota sopra.
+Like Anthropic: uses the chat model as a proxy. See note above.
 
 ```json
 {
@@ -164,9 +164,9 @@ Come Anthropic: usa il modello chat come proxy. Vedi nota sopra.
 
 ---
 
-### Processo esterno (agent)
+### External process (agent)
 
-Speedy lancia il comando specificato e legge il vettore embedding dallo stdout (formato JSON array di float).
+Speedy launches the specified command and reads the embedding vector from stdout (JSON float array format).
 
 ```json
 {
@@ -177,29 +177,29 @@ Speedy lancia il comando specificato e legge il vettore embedding dallo stdout (
 }
 ```
 
-Il processo riceve il testo da embeddare su stdin e deve restituire su stdout un array JSON, es. `[0.12, -0.34, ...]`.
+The process receives the text to embed on stdin and must return a JSON array on stdout, e.g. `[0.12, -0.34, ...]`.
 
 ---
 
-## Variabili d'ambiente
+## Environment variables
 
-Le env var sovrascrivono qualsiasi valore nel file di configurazione.
+Environment variables override any value in the configuration file.
 
-| Variabile            | Descrizione                          |
-|----------------------|--------------------------------------|
-| `SPEEDY_PROVIDER`    | Tipo di provider (`ollama`, `openai`…) |
-| `SPEEDY_MODEL`       | Modello da usare                     |
-| `SPEEDY_BASE_URL`    | URL base dell'endpoint               |
-| `SPEEDY_API_KEY`     | API key                              |
-| `SPEEDY_AGENT_COMMAND` | Comando per provider `agent`       |
-| `SPEEDY_OLLAMA_URL`  | Alias legacy per `SPEEDY_BASE_URL`   |
-| `SPEEDY_TOP_K`       | Numero di risultati per query        |
+| Variable | Description |
+|---|---|
+| `SPEEDY_PROVIDER` | Provider type (`ollama`, `openai`…) |
+| `SPEEDY_MODEL` | Model to use |
+| `SPEEDY_BASE_URL` | Base URL of the endpoint |
+| `SPEEDY_API_KEY` | API key |
+| `SPEEDY_AGENT_COMMAND` | Command for `agent` provider |
+| `SPEEDY_OLLAMA_URL` | Legacy alias for `SPEEDY_BASE_URL` |
+| `SPEEDY_TOP_K` | Number of results per query |
 
 ---
 
-## Configurazione tipica: utente globale + override per progetto
+## Typical setup: global user config + per-project override
 
-**`~/.speedy/config.speedy.json`** — configurazione personale di default:
+**`~/.speedy/config.speedy.json`** — personal default configuration:
 ```json
 {
   "provider": {
@@ -211,7 +211,7 @@ Le env var sovrascrivono qualsiasi valore nel file di configurazione.
 }
 ```
 
-**`<workspace>/.speedy/config.speedy.json`** — override per un progetto specifico (usa Ollama locale, diverso modello):
+**`<workspace>/.speedy/config.speedy.json`** — override for a specific project (uses local Ollama, different model):
 ```json
 {
   "provider": {
@@ -221,4 +221,4 @@ Le env var sovrascrivono qualsiasi valore nel file di configurazione.
 }
 ```
 
-In questo caso `top_k: 10` viene ereditato dal file utente perché il workspace non lo specifica.
+In this case `top_k: 10` is inherited from the user file because the workspace does not specify it.

@@ -87,6 +87,12 @@ Name: "addtopath";   Description: "Aggiungi Speedy al PATH (richiesto da speedy-
 ; Task non selezionato di default
 Name: "desktopicon"; Description: "Crea collegamento sul Desktop per Speedy GUI"; GroupDescription: "Icone aggiuntive:"; Flags: unchecked
 
+; Ollama — mostrato e pre-selezionato solo se ollama.exe non è già installato
+Name: "installoollama"; Description: "Scarica e installa Ollama (richiesto per i modelli AI locali)"; GroupDescription: "Dipendenze:"; Check: OllamaNotInstalled
+
+; Modello predefinito — mostrato e pre-selezionato solo se il modello non è già presente
+Name: "pullmodel"; Description: "Scarica il modello predefinito nomic-embed-text (~270 MB, richiede connessione)"; GroupDescription: "Dipendenze:"; Check: ModelNotInstalled
+
 ; ============================================================
 [Files]
 ; ============================================================
@@ -102,6 +108,7 @@ Source: "..\dist\speedy-language-context-mcp.exe";  DestDir: "{app}"; Flags: ign
 ; Documentazione — copiata nella cartella di installazione
 Source: "..\installer\README.txt";       DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\INSTALLATION.md";  DestDir: "{app}"; Flags: ignoreversion
+Source: "..\installer\FOR-IA.md";        DestDir: "{app}"; Flags: ignoreversion
 
 
 ; ============================================================
@@ -164,6 +171,28 @@ Filename: "{app}\README.txt"; \
   Description: "Apri README (istruzioni d'uso)"; \
   Flags: nowait postinstall shellexec
 
+; 1. Scarica OllamaSetup.exe nella cartella temp dell'installer (silenzioso).
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile '{tmp}\OllamaSetup.exe' -UseBasicParsing"""; \
+  Tasks: installoollama; \
+  StatusMsg: "Download Ollama in corso..."; \
+  Flags: runhidden waituntilterminated
+
+; 2. Apre l'installer di Ollama in una finestra separata e aspetta il completamento.
+Filename: "{tmp}\OllamaSetup.exe"; \
+  Tasks: installoollama; \
+  StatusMsg: "Installazione Ollama in corso..."; \
+  Flags: waituntilterminated
+
+; Scarica il modello predefinito nomic-embed-text tramite Ollama.
+; Attende 5s dopo l'eventuale installazione di Ollama, poi esegue 'ollama pull'.
+; Se Ollama non è presente (utente ha deselezionato il task sopra), esce senza errori.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""$o=[System.Environment]::GetFolderPath('LocalApplicationData')+'\Programs\Ollama\ollama.exe';if(Test-Path $o){{Start-Sleep 5;&$o pull nomic-embed-text}"""; \
+  Tasks: pullmodel; \
+  StatusMsg: "Download modello nomic-embed-text (~270 MB)..."; \
+  Flags: runhidden waituntilterminated
+
 ; ============================================================
 [UninstallDelete]
 ; ============================================================
@@ -212,6 +241,29 @@ Filename: "{sys}\taskkill.exe"; \
 
 var
   ShouldDeleteUserData: Boolean;
+
+{ ----------------------------------------------------------------
+  OLLAMA — OllamaNotInstalled
+  Restituisce True se ollama.exe non è presente nel percorso di
+  installazione standard (%LOCALAPPDATA%\Programs\Ollama).
+  ---------------------------------------------------------------- }
+function OllamaNotInstalled(): Boolean;
+begin
+  Result := not FileExists(GetEnv('LOCALAPPDATA') + '\Programs\Ollama\ollama.exe');
+end;
+
+{ ----------------------------------------------------------------
+  OLLAMA — ModelNotInstalled
+  Restituisce True se il manifest di nomic-embed-text non è presente
+  nella directory modelli di Ollama (~\.ollama\models\manifests\...).
+  ---------------------------------------------------------------- }
+function ModelNotInstalled(): Boolean;
+begin
+  Result := not FileExists(
+    GetEnv('USERPROFILE') +
+    '\.ollama\models\manifests\registry.ollama.ai\library\nomic-embed-text\latest'
+  );
+end;
 
 { ----------------------------------------------------------------
   PATH — NeedsAddPath
