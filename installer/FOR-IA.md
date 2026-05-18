@@ -14,6 +14,23 @@ search through a CLI and two MCP servers.
 
 ---
 
+## Step 0 — Prerequisite: Ollama
+
+Speedy uses **Ollama** as the default embedding provider.
+If Ollama is not already installed and the embedding model not pulled, indexing will fail.
+
+```bash
+# Verify Ollama is running
+ollama --version
+
+# Pull the default embedding model (once only)
+ollama pull nomic-embed-text
+```
+
+Ollama runs an HTTP server on `http://localhost:11434` by default. No configuration is needed if it is running on the default port.
+
+---
+
 ## Step 1 — Verify Speedy is installed
 
 ### Windows (installer or manual)
