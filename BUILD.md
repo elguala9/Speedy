@@ -1,23 +1,23 @@
 # Build & Dev Commands
 
-## Compilazione rapida
+## Quick build
 
-### Solo exe (tutti i binari) — modo consigliato
+### All binaries only — recommended method
 
 ```powershell
-# Incrementale: ricompila solo i pacchetti modificati, copia in dist/
+# Incremental: only recompiles modified packages, copies to dist/
 cargo xtask dist
 ```
 
 ```powershell
-# Full rebuild (pulisce prima, poi ricompila tutto da zero)
+# Full rebuild (cleans first, then recompiles everything from scratch)
 cargo xtask dist --clean
 ```
 
-### Exe + installer Windows in un colpo solo
+### Binaries + Windows installer in one shot
 
 ```powershell
-# Incrementale build + installer
+# Incremental build + installer
 cargo xtask dist --installer
 
 # Full rebuild + installer
@@ -26,20 +26,20 @@ cargo xtask dist --clean --installer
 
 ---
 
-## Script PowerShell alternativi
+## Alternative PowerShell scripts
 
 ```powershell
-# Solo exe → dist/
+# Binaries only → dist/
 .\scripts\build-release.ps1
 
-# Solo installer (assume dist/*.exe già presenti)
+# Installer only (assumes dist/*.exe already present)
 .\scripts\build-installer.ps1 -SkipBuild
 
-# Exe + installer completo
+# Full binaries + installer
 .\scripts\build-installer.ps1
 ```
 
-Script Bash (Linux/macOS/Git Bash):
+Bash script (Linux/macOS/Git Bash):
 
 ```bash
 ./scripts/build-release.sh
@@ -47,7 +47,7 @@ Script Bash (Linux/macOS/Git Bash):
 
 ---
 
-## Compilare un singolo pacchetto
+## Build a single package
 
 ```powershell
 cargo build --release -p speedy-daemon
@@ -58,53 +58,53 @@ cargo build --release -p speedy-ai-context
 cargo build --release -p speedy-language-context
 ```
 
-Output in `target/release/<nome>.exe`.
+Output in `target/release/<name>.exe`.
 
 ---
 
-## Build debug (sviluppo)
+## Debug build (development)
 
 ```powershell
-# Workspace intero
+# Entire workspace
 cargo build
 
-# Singolo pacchetto
+# Single package
 cargo build -p speedy-daemon
 ```
 
-Output in `target/debug/<nome>.exe`.
+Output in `target/debug/<name>.exe`.
 
 ---
 
-## Installer manuale con iscc (Inno Setup 6)
+## Manual installer with iscc (Inno Setup 6)
 
 ```powershell
-# Installer base
+# Basic installer
 iscc /DMyAppVersion=0.1.0 installer\speedy.iss
 
-# Con icona custom
+# With custom icon
 iscc /DMyAppVersion=0.1.0 /DMySetupIcon=installer\assets\speedy.ico installer\speedy.iss
 ```
 
 Output: `dist\speedy-setup-<version>.exe`
 
-Prerequisito: `winget install JRSoftware.InnoSetup`
+Prerequisite: `winget install JRSoftware.InnoSetup`
 
 ---
 
 ## Test & Check
 
 ```powershell
-# Test workspace intero
+# Test entire workspace
 cargo test
 
-# Test singolo pacchetto
+# Test single package
 cargo test -p speedy-daemon
 
-# Check senza compilare (veloce per syntax/type check)
+# Check without compiling (fast for syntax/type check)
 cargo check
 
-# Check singolo pacchetto
+# Check single package
 cargo check -p speedy-gui
 
 # Clippy (linter)
@@ -117,71 +117,71 @@ cargo clippy --workspace
 
 ### CI (`.github/workflows/ci.yml`)
 
-Si attiva su ogni **push/PR verso `main`**. Gira in parallelo su Ubuntu, macOS e Windows.
+Triggers on every **push/PR to `main`**. Runs in parallel on Ubuntu, macOS and Windows.
 
-| Step | Comando |
+| Step | Command |
 |---|---|
 | Build | `cargo build --workspace` |
 | Test | `cargo test --workspace` |
 | Check bench | `cargo bench --workspace --no-run` |
 
-Non serve fare nulla manualmente: parte automaticamente.
+No manual action needed: starts automatically.
 
 ---
 
 ### Release (`.github/workflows/release.yml`)
 
-Si attiva **pushando un tag `v*`** (es. `v0.2.0`).
+Triggers by **pushing a `v*` tag** (e.g. `v0.2.0`).
 
 ```powershell
-# Crea il tag e pusha — avvia la pipeline di release
+# Create the tag and push — starts the release pipeline
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Produce per ogni piattaforma un archivio `.tar.gz` e lo carica come asset della GitHub Release:
+Produces a `.tar.gz` archive for each platform and uploads it as a GitHub Release asset:
 
-| Target | OS runner | Binari inclusi |
+| Target | OS runner | Included binaries |
 |---|---|---|
-| `x86_64-unknown-linux-gnu` | ubuntu-latest | tutti + GUI |
-| `x86_64-pc-windows-msvc` | windows-latest | tutti + GUI |
-| `aarch64-apple-darwin` | macos-latest | tutti **senza** GUI |
+| `x86_64-unknown-linux-gnu` | ubuntu-latest | all + GUI |
+| `x86_64-pc-windows-msvc` | windows-latest | all + GUI |
+| `aarch64-apple-darwin` | macos-latest | all **without** GUI |
 
-Gli asset hanno il formato `speedy-<target>.tar.gz` e vengono caricati automaticamente sulla Release con note generate da GitHub.
+Assets are named `speedy-<target>.tar.gz` and are uploaded automatically to the Release with GitHub-generated notes.
 
-> **L'installer Windows** (`speedy-setup-*.exe`) **non** è prodotto dalla CI — va creato localmente con `cargo xtask dist --installer` e caricato manualmente sulla Release.
+> **The Windows installer** (`speedy-setup-*.exe`) **is not** produced by CI — build it locally with `cargo xtask dist --installer` and upload it manually to the Release.
 
-#### Re-release (tag o release fallita)
+#### Re-release (failed tag or release)
 
-Se la release è fallita o il tag esiste già, eliminare e ricreare:
+If the release failed or the tag already exists, delete and recreate:
 
 ```powershell
-# 1. Elimina tag locale e remoto
+# 1. Delete local and remote tag
 git tag -d v0.2.0
 git push GitHub --delete v0.2.0
 
-# 2. Elimina la GitHub Release (se esiste)
+# 2. Delete the GitHub Release (if it exists)
 gh release delete v0.2.0 --yes
 
-# 3. Ricrea il tag e pusha — riavvia la Action
+# 3. Recreate the tag and push — restarts the Action
 git tag v0.2.0
 git push GitHub v0.2.0
 ```
 
 ---
 
-## Binari prodotti
+## Produced binaries
 
-| Eseguibile | Pacchetto Cargo | Ruolo |
+| Executable | Cargo package | Role |
 |---|---|---|
-| `speedy-daemon.exe` | `speedy-daemon` | Daemon globale — file watcher, IPC server |
+| `speedy-daemon.exe` | `speedy-daemon` | Global daemon — file watcher, IPC server |
 | `speedy-ai-context.exe` | `speedy-ai-context` | Worker — indexing, query, embedding, SQLite |
-| `speedy-cli.exe` | `speedy-cli` | Client thin — CLI per agent e scripting |
-| `speedy-mcp.exe` | `speedy-mcp` | Server MCP (Claude, Cursor, …) |
-| `speedy-gui.exe` | `speedy-gui` | GUI desktop — gestione workspaces e log |
+| `speedy-cli.exe` | `speedy-cli` | Thin client — CLI for agents and scripting |
+| `speedy-mcp.exe` | `speedy-mcp` | MCP server (Claude, Cursor, …) |
+| `speedy-gui.exe` | `speedy-gui` | Desktop GUI — workspace and log management |
 | `speedy-language-context.exe` | `speedy-language-context` | Code intelligence |
 
-Tutti i binari finiscono in `dist/` dopo `cargo xtask dist` o gli script.
+All binaries end up in `dist/` after `cargo xtask dist` or the scripts.
 
 ---
 

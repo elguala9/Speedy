@@ -1,6 +1,6 @@
 # Speedy — Manual Installation
 
-> **Already installed via `speedy-setup-<version>.exe`?**
+> **Already installed via `speedy-setup-<version>`?**
 > You're all set — the installer handles everything automatically.
 > This document is extra reference only: it explains what the installer
 > does under the hood and how to replicate it manually on any platform.
@@ -9,6 +9,37 @@
 
 This archive contains pre-built binaries for Speedy.
 Follow the steps below for your platform.
+
+---
+
+## Prerequisites — Ollama (default configuration)
+
+Speedy uses **Ollama** as the default embedding provider.
+If you keep the default configuration you must install Ollama and pull the
+embedding model **before** indexing any workspace.
+
+### 1. Install Ollama
+
+Download and run the installer from <https://ollama.com/download>, then verify it is running:
+
+```bash
+ollama --version
+```
+
+Ollama starts an HTTP server on `http://localhost:11434` by default.
+
+### 2. Pull the default embedding model
+
+```bash
+ollama pull nomic-embed-text
+```
+
+`nomic-embed-text` is the model Speedy uses out of the box.
+Other supported models: `mxbai-embed-large`, `qwen3-embedding:0.6b`.
+
+> **Not using Ollama?**
+> You can switch to OpenAI, Google, or any OpenAI-compatible provider.
+> See [CONFIG.md](../CONFIG.md) for details.
 
 ---
 
@@ -28,7 +59,7 @@ On Windows every file has an `.exe` extension.
 
 ---
 
-## Linux / macOS
+## Linux 
 
 ### 1. Extract the archive
 

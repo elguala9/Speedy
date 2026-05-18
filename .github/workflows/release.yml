@@ -53,6 +53,7 @@ jobs:
         run: |
           cp installer/README.txt target/${{ matrix.target }}/release/README.txt
           cp installer/INSTALLATION.md target/${{ matrix.target }}/release/INSTALLATION.md
+          cp installer/FOR-IA.md target/${{ matrix.target }}/release/FOR-IA.md
           cd target/${{ matrix.target }}/release
           tar czf speedy-${{ matrix.target }}.tar.gz \
             speedy-ai-context${{ matrix.suffix }} \
@@ -61,8 +62,10 @@ jobs:
             speedy-ai-context-mcp${{ matrix.suffix }} \
             speedy-gui${{ matrix.suffix }} \
             speedy-language-context${{ matrix.suffix }} \
+            speedy-language-context-mcp${{ matrix.suffix }} \
             README.txt \
-            INSTALLATION.md
+            INSTALLATION.md \
+            FOR-IA.md
           mv speedy-${{ matrix.target }}.tar.gz ../../../
 
       - name: Upload artifact

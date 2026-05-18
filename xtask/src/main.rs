@@ -94,6 +94,18 @@ fn dist(clean: bool, installer: bool) {
         }
     }
 
+    // Copy installer docs alongside the binaries
+    for doc in &["README.txt", "INSTALLATION.md", "FOR-IA.md"] {
+        let src = root.join("installer").join(doc);
+        let dst = dist.join(doc);
+        if src.exists() {
+            std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("copy {doc}: {e}"));
+            println!("  dist/{doc}");
+        } else {
+            eprintln!("  WARNING: installer/{doc} not found");
+        }
+    }
+
     println!("\nBinaries ready in {}", dist.display());
 
     if installer {

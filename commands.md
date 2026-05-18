@@ -1,119 +1,117 @@
-# Comandi
+# Commands
 
 ## `speedy-ai-context.exe`
 
-### Subcomandi
+### Subcommands
 
-| Comando                       | Cosa fa                                       |
-|-------------------------------|-----------------------------------------------|
-| `index [<SUBDIR>]`            | Indicizza una directory (default `.`)         |
-| `query <QUERY> [-k <N>]`      | Ricerca semantica (default top-K 5)           |
-| `context`                     | Riepilogo del workspace                       |
-| `sync`                        | Sync incrementale FS → indice                 |
-| `reembed`                     | Droppa tutti gli embedding e re-indicizza con il modello corrente |
-| `daemon`                      | Spawna il daemon centrale                     |
-| `workspace list`              | Lista workspace registrati                    |
+| Command | What it does |
+|---|---|
+| `index [<SUBDIR>]` | Index a directory (default `.`) |
+| `query <QUERY> [-k <N>]` | Semantic search (default top-K 5) |
+| `context` | Workspace summary |
+| `sync` | Incremental FS → index sync |
+| `reembed` | Drop all embeddings and re-index with the current model |
+| `daemon` | Spawn the central daemon |
+| `workspace list` | List registered workspaces |
 
-### Flag
+### Flags
 
-| Flag                          | Cosa fa                                       |
-|-------------------------------|-----------------------------------------------|
-| `-p, --path <PATH>`           | Project root (default cwd)                    |
-| `--json`                      | Output JSON                                   |
-| `--daemon-socket <NAME>`      | Nome socket (default `speedy-daemon`)         |
-| `-r, --read <PROMPT>`         | Shortcut per `query`                          |
-| `-m, --modify <CONTENT> --file <PATH>` | Scrive file e re-indicizza           |
-| `-d, --daemons`               | Lista workspace tracciati dal daemon          |
-| `-w, --workspaces`            | Lista workspace registrati                    |
-| `-h, --help`                  | Help (anche per ogni subcomando)              |
-| `-V, --version`               | Versione                                      |
+| Flag | What it does |
+|---|---|
+| `-p, --path <PATH>` | Project root (default cwd) |
+| `--json` | JSON output |
+| `--daemon-socket <NAME>` | Socket name (default `speedy-daemon`) |
+| `-r, --read <PROMPT>` | Shortcut for `query` |
+| `-m, --modify <CONTENT> --file <PATH>` | Write file and re-index |
+| `-d, --daemons` | List workspaces tracked by the daemon |
+| `-w, --workspaces` | List registered workspaces |
+| `-h, --help` | Help (also for each subcommand) |
+| `-V, --version` | Version |
 
 ---
 
 ## `speedy-cli.exe`
 
-### Subcomandi
+### Subcommands
 
-| Comando                       | Cosa fa                                       |
-|-------------------------------|-----------------------------------------------|
-| `index [<SUBDIR>]`            | Indicizza via daemon                          |
-| `query <QUERY> [-k <N>] [--all]` | Ricerca semantica via daemon. `--all`: fan-out su tutti i workspace, aggrega top-K |
-| `context`                     | Riepilogo workspace via daemon                |
-| `sync`                        | Sync incrementale via daemon                  |
-| `reembed`                     | Droppa embedding e re-indicizza con il modello corrente (via daemon) |
-| `force [-p <PATH>]`           | Daemon-driven sync di un workspace            |
-| `daemon status`               | Stato daemon (PID, uptime, ws/watchers)       |
-| `daemon list`                 | Workspace attivi sul daemon                   |
-| `daemon stop`                 | Ferma il daemon                               |
-| `daemon ping`                 | Ping → pong                                   |
-| `workspace list`              | Lista workspace registrati                    |
-| `workspace add <PATH>`        | Aggiunge workspace al daemon                  |
-| `workspace remove <PATH>`     | Rimuove workspace dal daemon                  |
+| Command | What it does |
+|---|---|
+| `index [<SUBDIR>]` | Index via daemon |
+| `query <QUERY> [-k <N>] [--all]` | Semantic search via daemon. `--all`: fan-out across all workspaces, aggregate top-K |
+| `context` | Workspace summary via daemon |
+| `sync` | Incremental sync via daemon |
+| `reembed` | Drop embeddings and re-index with the current model (via daemon) |
+| `force [-p <PATH>]` | Daemon-driven sync of a workspace |
+| `daemon status` | Daemon status (PID, uptime, ws/watchers) |
+| `daemon list` | Active workspaces on the daemon |
+| `daemon stop` | Stop the daemon |
+| `daemon ping` | Ping → pong |
+| `workspace list` | List registered workspaces |
+| `workspace add <PATH>` | Add workspace to the daemon |
+| `workspace remove <PATH>` | Remove workspace from the daemon |
 
-### Flag
+### Flags
 
-| Flag                          | Cosa fa                                       |
-|-------------------------------|-----------------------------------------------|
-| `-p, --path <PATH>`           | Project root (default cwd)                    |
-| `--json`                      | Output JSON                                   |
-| `--daemon-socket <NAME>`      | Nome socket (default `speedy-daemon`)         |
-| `-h, --help`                  | Help (anche per ogni subcomando)              |
-| `-V, --version`               | Versione                                      |
+| Flag | What it does |
+|---|---|
+| `-p, --path <PATH>` | Project root (default cwd) |
+| `--json` | JSON output |
+| `--daemon-socket <NAME>` | Socket name (default `speedy-daemon`) |
+| `-h, --help` | Help (also for each subcommand) |
+| `-V, --version` | Version |
 
 ---
 
 ## `speedy-daemon.exe`
 
-### Flag
+### Flags
 
-| Flag                          | Cosa fa                                       |
-|-------------------------------|-----------------------------------------------|
-| `--daemon-socket <NAME>`      | Socket su cui ascoltare (default `speedy-daemon`) |
-| `--daemon-dir <DIR>`          | Override directory `daemon.pid`/`workspaces.json` |
-| `-h, --help`                  | Help                                          |
-| `-V, --version`               | Versione                                      |
+| Flag | What it does |
+|---|---|
+| `--daemon-socket <NAME>` | Socket to listen on (default `speedy-daemon`) |
+| `--daemon-dir <DIR>` | Override directory for `daemon.pid`/`workspaces.json` |
+| `-h, --help` | Help |
+| `-V, --version` | Version |
 
 ---
 
 ## `speedy-gui.exe`
 
-Nessun flag CLI. Lanciato senza argomenti, apre la finestra egui.
+No CLI flags. Launched without arguments, opens the egui window.
 
-### Tab
+### Tabs
 
-| Tab          | Cosa fa                                                                |
-|--------------|------------------------------------------------------------------------|
-| Dashboard    | Stato daemon (pid/uptime/version), metrics cumulativi, restart/reload/stop, toggle notifiche di sistema su `error` |
-| Workspaces   | Lista + add via file picker nativo + Index/Sync/Open folder/Rimuovi per workspace + pulsante "Pulisci orfani" (IPC `prune-missing`) |
-| Scan         | Walk di un root path alla ricerca di `.speedy/index.sqlite` esistenti, registra in batch quelli selezionati |
-| Logs         | Tail live (`subscribe-log` IPC) o vista storica di un file `daemon.log.*`, filtri per livello/substring/target/workspace, export JSON/JSONL |
+| Tab | What it does |
+|---|---|
+| Dashboard | Daemon status (pid/uptime/version), cumulative metrics, restart/reload/stop, system notification toggle on `error` |
+| Workspaces | List + add via native file picker + Index/Sync/Open folder/Remove per workspace + "Prune orphans" button (IPC `prune-missing`) |
+| Scan | Walk a root path looking for existing `.speedy/index.sqlite`, bulk-register selected ones |
+| Logs | Live tail (`subscribe-log` IPC) or historical view of a `daemon.log.*` file, filters by level/substring/target/workspace, JSON/JSONL export |
 
-La Dashboard espone anche un campo "Eseguibile daemon" (con `Sfoglia…` /
-`Applica` / `Ripristina automatico`) per forzare il path di
-`speedy-daemon` quando l'auto-detect accanto al binario GUI non basta —
-utile in dev / install custom.
+The Dashboard also exposes a "Daemon executable" field (with `Browse…` /
+`Apply` / `Reset to auto`) to force the path of `speedy-daemon` when
+auto-detect next to the GUI binary is not enough — useful in dev / custom installs.
 
-Tray icon di sistema (verde = daemon alive, rosso = down) con menu
+System tray icon (green = daemon alive, red = down) with menu
 **Open Speedy / Restart daemon / Quit**.
 
-L'autostart al login non è gestito dalla GUI: posizionare manualmente
-`speedy-daemon.exe` (o un suo shortcut) nella cartella Startup di Windows
-(o equivalenti su macOS/Linux). Vedi README.
+Login autostart is not managed by the GUI: manually place `speedy-daemon.exe`
+(or a shortcut to it) in the Windows Startup folder (or equivalent on
+macOS/Linux). See README.
 
-Settings persistenti via `eframe::Storage`: tab selezionato, tema
-chiaro/scuro, socket name, toggle notifiche di sistema su `error`,
-path override del daemon.
+Persistent settings via `eframe::Storage`: selected tab, light/dark theme,
+socket name, system notification toggle on `error`, daemon path override.
 
 ---
 
 ## `speedy-mcp.exe`
 
-Nessun flag CLI. Avviato dal client MCP, comunica su stdio JSON-RPC.
+No CLI flags. Launched by the MCP client, communicates over stdio JSON-RPC.
 
-### Tool esposti
+### Exposed tools
 
-| Tool             | Argomenti                              |
-|------------------|----------------------------------------|
-| `speedy_query`   | `{ query: string, top_k?: number }`    |
-| `speedy_index`   | `{ path?: string }`                    |
-| `speedy_context` | `{}`                                   |
+| Tool | Arguments |
+|---|---|
+| `speedy_query` | `{ query: string, top_k?: number }` |
+| `speedy_index` | `{ path?: string }` |
+| `speedy_context` | `{}` |

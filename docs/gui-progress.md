@@ -1,354 +1,347 @@
-# GUI Project — Log di avanzamento
+# GUI Project — Progress Log
 
-Working log per `todo-gui.md`. Una sezione per macro-attività completata.
+Working log for `todo-gui.md`. One section per completed macro-task.
 
 ---
 
-## 2026-05-15 — §1 daemon prerequisites + §4 tipi serde
+## 2026-05-15 — §1 daemon prerequisites + §4 serde types
 
-Tutti i prerequisiti del daemon descritti in `todo-gui.md` §1.1–§1.3 e §4 sono
-implementati e compilano. I 57 test del daemon e i 57 del core restano verdi.
+All daemon prerequisites described in `todo-gui.md` §1.1–§1.3 and §4 are
+implemented and compile. The 57 daemon tests and 57 core tests remain green.
 
-### Logging strutturato (§1.1)
+### Structured logging (§1.1)
 
-- File rotanti giornalieri in `<daemon_dir>/logs/daemon.log.YYYY-MM-DD` via
-  `tracing-appender::rolling::daily` con writer non-blocking. Il guard è
-  intenzionalmente leakato (`Box::leak`) così il thread di scrittura resta
-  attivo per tutta la durata del processo, niente perdite a shutdown.
-- Layer JSON sul file (`tracing_subscriber::fmt::layer().json()`), layer
-  testuale su stderr per debug interattivo.
-- `BroadcastLayer` custom (`tokio::sync::broadcast<LogLine>`, capacità 1024)
-  che alimenta tutti i `subscribe-log` attivi. Un `FieldVisitor` impl
-  `tracing::field::Visit` estrae il `message` separato dai field extra.
-- Aggiunte tracce `target: "watcher"`, `target: "sync"`, `target: "index"`,
-  `target: "ipc"` con campi strutturati (`workspace`, `ms`, ecc.). I `error!`
-  esistenti già contenevano il path.
+- Daily rotating log files in `<daemon_dir>/logs/daemon.log.YYYY-MM-DD` via
+  `tracing-appender::rolling::daily` with a non-blocking writer. The guard is
+  intentionally leaked (`Box::leak`) so the write thread stays active for the
+  entire process lifetime, no losses at shutdown.
+- JSON layer on file (`tracing_subscriber::fmt::layer().json()`), text layer
+  on stderr for interactive debug.
+- Custom `BroadcastLayer` (`tokio::sync::broadcast<LogLine>`, capacity 1024)
+  that feeds all active `subscribe-log` connections. A `FieldVisitor` impl of
+  `tracing::field::Visit` extracts the `message` separately from extra fields.
+- Added traces `target: "watcher"`, `target: "sync"`, `target: "index"`,
+  `target: "ipc"` with structured fields (`workspace`, `ms`, etc.). Existing
+  `error!` calls already contained the path.
 
-### Nuovi comandi IPC (§1.2)
+### New IPC commands (§1.2)
 
-- `tail-log [n]` → JSON array di `LogLine` (default 200). Trova il file di
-  log più recente in `<daemon_dir>/logs/` e parsa le ultime N righe.
-- `subscribe-log` → long-lived. Il daemon risponde `ok\n` e poi una riga
-  JSON per evento finché il client non chiude. `handle_connection` ora
-  riconosce esplicitamente questo comando come l'unico non-one-shot.
-- `scan\t<root>[\t<max_depth>]` → `walkdir` con skip su `target`, `.git`,
-  `node_modules`, `dist`, ecc. Per ogni dir che contiene
-  `.speedy/index.sqlite` ritorna `ScanResult`.
-- `reindex <path>` → spawna `speedy index .` con `cwd=<path>` e
-  `SPEEDY_NO_DAEMON=1`. Incrementa `metrics.indexes`.
-- `workspace-status <path>` → `WorkspaceStatus` con `watcher_alive`,
-  `last_event_at`, `last_sync_at`, `index_size_bytes`. `chunk_count` è
-  `None` per ora (richiederebbe aprire il DB da qui — rimandato).
+- `tail-log [n]` → JSON array of `LogLine` (default 200). Finds the most
+  recent log file in `<daemon_dir>/logs/` and parses the last N lines.
+- `subscribe-log` → long-lived. The daemon responds `ok\n` then one JSON line
+  per event until the client closes. `handle_connection` now explicitly
+  recognizes this command as the only non-one-shot one.
+- `scan\t<root>[\t<max_depth>]` → `walkdir` with skip on `target`, `.git`,
+  `node_modules`, `dist`, etc. For each directory containing
+  `.speedy/index.sqlite` returns a `ScanResult`.
+- `reindex <path>` → spawns `speedy index .` with `cwd=<path>` and
+  `SPEEDY_NO_DAEMON=1`. Increments `metrics.indexes`.
+- `workspace-status <path>` → `WorkspaceStatus` with `watcher_alive`,
+  `last_event_at`, `last_sync_at`, `index_size_bytes`. `chunk_count` is
+  `None` for now (would require opening the DB from here — deferred).
 
-### Tipi serde condivisi (§4)
+### Shared serde types (§4)
 
-Nuovo modulo `speedy-core/src/types.rs` con `DaemonStatus`, `Metrics`,
+New module `speedy-core/src/types.rs` with `DaemonStatus`, `Metrics`,
 `WorkspaceStatus`, `ScanResult`, `LogLine`. `daemon_client::DaemonStatus`
-è ora `pub use` dei tipi in `types`, niente duplicazione di shape.
+is now `pub use` of the types in `types`, no shape duplication.
 
 ### Protocol version (§1.3)
 
-Era già a 2 (bumpato per `query-all` il 2026-05-14). Nessun ulteriore lavoro.
+Was already at 2 (bumped for `query-all` on 2026-05-14). No further work.
 
 ### DaemonClient
 
-Nuovi metodi: `reload`, `scan`, `reindex`, `workspace_status`, `tail_log`,
-`subscribe_log`. Quest'ultimo ritorna `(UnboundedReceiver<LogLine>, JoinHandle<()>)`
-— droppare il receiver chiude il task background.
+New methods: `reload`, `scan`, `reindex`, `workspace_status`, `tail_log`,
+`subscribe_log`. The latter returns `(UnboundedReceiver<LogLine>, JoinHandle<()>)`
+— dropping the receiver closes the background task.
 
-### File toccati
+### Files touched
 
-- `packages/speedy-core/Cargo.toml` — aggiunto `walkdir`.
-- `packages/speedy-core/src/lib.rs` — espone `types`.
-- `packages/speedy-core/src/types.rs` — **nuovo**.
-- `packages/speedy-core/src/daemon_client.rs` — usa types, +6 metodi.
+- `packages/speedy-core/Cargo.toml` — added `walkdir`.
+- `packages/speedy-core/src/lib.rs` — exposes `types`.
+- `packages/speedy-core/src/types.rs` — **new**.
+- `packages/speedy-core/src/daemon_client.rs` — uses types, +6 methods.
 - `packages/speedy-daemon/Cargo.toml` — `tracing-subscriber[json]`,
   `tracing-appender`, `walkdir`, `chrono`.
 - `packages/speedy-daemon/src/main.rs` — `BroadcastLayer`, `FieldVisitor`,
-  `WatcherHandle` arricchito con `last_event_at`/`last_sync_at`, nuovi
-  comandi in `dispatch_command`, `handle_connection` con branch
-  `subscribe-log`, `main()` reinizializza tracing.
-- `docs/ipc-protocol.md` — documentati i 6 comandi nuovi.
+  `WatcherHandle` enriched with `last_event_at`/`last_sync_at`, new
+  commands in `dispatch_command`, `handle_connection` with `subscribe-log`
+  branch, `main()` reinitializes tracing.
+- `docs/ipc-protocol.md` — documented the 6 new commands.
 
-### Cosa NON è stato fatto in questa tornata
+### What was NOT done in this round
 
-- Comando `restart`: il TODO suggerisce di lasciarlo alla GUI (stop + spawn).
-  Concordo, non lo aggiungo lato daemon.
-- `chunk_count` in `WorkspaceStatus` resta `None`.
-- Test integrazione per i nuovi comandi (§5) — passano cargo check, ma non
-  ci sono asserzioni dedicate ancora.
+- `restart` command: the TODO suggests leaving it to the GUI (stop + spawn).
+  Agreed, not adding it on the daemon side.
+- `chunk_count` in `WorkspaceStatus` remains `None`.
+- Integration tests for the new commands (§5) — pass cargo check, but no
+  dedicated assertions yet.
 
-### Prossimo step
+### Next step
 
-§2 scaffolding crate `speedy-gui` con `egui` + `eframe`, e poi Fase A MVP.
+§2 scaffolding `speedy-gui` crate with `egui` + `eframe`, then Phase A MVP.
 
 ---
 
-## 2026-05-15 (parte 2) — §2 GUI + Fase A/B/C/D minima + §5 test
+## 2026-05-15 (part 2) — §2 GUI + Phase A/B/C/D minimal + §5 tests
 
-Crate `speedy-gui` creato e builda in debug e release. La GUI copre tutte e
-quattro le fasi del TODO con un set di feature funzionali; lo "showtime"
-visivo (animazioni, layout raffinato) è da rifinire ma il funzionale c'è.
+Crate `speedy-gui` created and builds in debug and release. The GUI covers all
+four phases from the TODO with a set of working features; the visual polish
+(animations, refined layout) is yet to be refined but the functional part is there.
 
 ### Scaffolding (§2)
 
-Nuovo crate `packages/speedy-gui/` aggiunto al workspace. Dipendenze:
+New crate `packages/speedy-gui/` added to the workspace. Dependencies:
 `eframe` + `egui` 0.28, `tokio` (multi-thread runtime in background),
-`rfd` per il file picker nativo, `tracing`, `dirs`, `chrono`, `serde`.
+`rfd` for the native file picker, `tracing`, `dirs`, `chrono`, `serde`.
 
-Layout finale:
+Final layout:
 
 ```
 packages/speedy-gui/
 ├── Cargo.toml
 └── src/
     ├── main.rs           # bootstrap eframe, windows_subsystem=windows in release
-    ├── app.rs            # SpeedyApp impl eframe::App, persistenza via Storage
+    ├── app.rs            # SpeedyApp impl eframe::App, persistence via Storage
     ├── daemon.rs         # DaemonBridge: tokio rt + Arc<Mutex<DaemonState>>
-    ├── log_stream.rs     # LogStreamHandle con ring buffer (5000 righe)
+    ├── log_stream.rs     # LogStreamHandle with ring buffer (5000 lines)
     └── views/
         ├── mod.rs        # Tab enum
         ├── dashboard.rs  # status + metrics + restart/reload/stop
-        ├── workspaces.rs # list + add (file picker) + sync/index + conferma rimozione
-        ├── scan.rs       # form + tabella + register-batch
-        └── logs.rs       # live tail con filtri (livello, substring, target, workspace)
+        ├── workspaces.rs # list + add (file picker) + sync/index + remove confirmation
+        ├── scan.rs       # form + table + register-batch
+        └── logs.rs       # live tail with filters (level, substring, target, workspace)
 ```
 
-### Architettura sync ⇄ async
+### Sync ⇄ async architecture
 
-egui è immediate-mode quindi il main loop non può bloccarsi su IPC. Soluzione:
+egui is immediate-mode so the main loop cannot block on IPC. Solution:
 
-- `DaemonBridge` possiede un `tokio::runtime::Runtime` multi-thread (2 worker)
-  e un `Arc<Mutex<DaemonState>>` condiviso.
-- Ogni metodo pubblico (`refresh_all`, `add_workspace`, `sync_workspace`,
-  `scan`, …) è sync, fa `inc_busy()`, spawna una task sul runtime, e
-  scrive il risultato nello state quando la task completa.
-- `App::update()` clona lo state ad ogni frame (è un `Clone` cheap di
-  Vec/HashMap moderati), poi le view leggono dalla snapshot — niente
-  Mutex held mentre si disegna.
-- `ctx.request_repaint_after(500ms)` garantisce che la UI rifletta gli
-  aggiornamenti background anche quando il mouse non si muove.
+- `DaemonBridge` owns a `tokio::runtime::Runtime` multi-thread (2 workers)
+  and a shared `Arc<Mutex<DaemonState>>`.
+- Each public method (`refresh_all`, `add_workspace`, `sync_workspace`,
+  `scan`, …) is sync, calls `inc_busy()`, spawns a task on the runtime, and
+  writes the result into state when the task completes.
+- `App::update()` clones the state each frame (it's a cheap `Clone` of
+  moderate Vec/HashMap), then views read from the snapshot — no Mutex held
+  while drawing.
+- `ctx.request_repaint_after(500ms)` ensures the UI reflects background
+  updates even when the mouse is not moving.
 
-### Fase A (MVP)
+### Phase A (MVP)
 
-- **Topbar** con nome app + tabs + indicatore daemon (verde/rosso/probing) +
-  spinner quando ci sono IPC in volo + toggle tema chiaro/scuro.
-- **Banner "Avvia daemon"** quando il ping fallisce (richiama
-  `spawn_daemon_process`).
+- **Topbar** with app name + tabs + daemon indicator (green/red/probing) +
+  spinner when IPC calls are in flight + light/dark theme toggle.
+- **"Start daemon" banner** when ping fails (calls `spawn_daemon_process`).
 - **Dashboard**: PID, uptime, version, protocol_version, workspace_count,
-  watcher_count, metrics cumulativi, link cliccabile alla config dir
-  (apre Explorer su Windows, `open` su macOS, `xdg-open` su Linux).
-- **Workspaces**: tabella scroll, badge stato watcher, DB size, "event N
-  ago" e "sync N ago" da `workspace-status`, bottoni Index/Sync/Open
-  folder/Rimuovi (con conferma e nota che il DB on-disk non viene toccato).
-- **File picker** nativo via `rfd::FileDialog` per "Aggiungi workspace".
+  watcher_count, cumulative metrics, clickable link to config dir
+  (opens Explorer on Windows, `open` on macOS, `xdg-open` on Linux).
+- **Workspaces**: scrollable table, watcher status badge, DB size, "event N
+  ago" and "sync N ago" from `workspace-status`, Index/Sync/Open
+  folder/Remove buttons (with confirmation and note that on-disk DB is not touched).
+- **Native file picker** via `rfd::FileDialog` for "Add workspace".
 
-### Fase B (Operazioni)
+### Phase B (Operations)
 
-- Index/Sync per workspace — con toast verde/rosso al termine.
-- **Scan**: form con root path + max depth (`DragValue` 1..=20), bottone
-  Scansiona → tabella risultati con colonna "Registrato" colorata, checkbox
-  selezione (disabilitata per quelli già registrati), "Registra selezionati"
-  in batch. NESSUNA opzione di cancellare `.speedy/` sul disco — solo
-  unregister, come deciso.
-- **Restart**: stop IPC → polling `is_alive` con backoff 200ms (max 10s)
-  → spawn detached del binario daemon. Tutto in background, UI responsiva.
-- **Reload** e **Stop daemon** con conferma colorata.
+- Index/Sync per workspace — with green/red toast on completion.
+- **Scan**: form with root path + max depth (`DragValue` 1..=20), Scan button
+  → results table with "Registered" column colored, selection checkboxes
+  (disabled for already-registered ones), "Register selected" in batch.
+  NO option to delete `.speedy/` on disk — unregister only, as decided.
+- **Restart**: stop IPC → polling `is_alive` with 200ms backoff (max 10s)
+  → detached spawn of the daemon binary. All in background, responsive UI.
+- **Reload** and **Stop daemon** with colored confirmation.
 
-### Fase C (Log viewer)
+### Phase C (Log viewer)
 
-- `LogStreamHandle` connesso a `subscribe-log` IPC. Ring buffer cap 5000
-  per non far esplodere la RAM. Riconnessione automatica ogni 2s se la
-  pipe muore (es. daemon riavviato).
-- Filtri: livelli (5 checkbox), substring case-insensitive, target
-  (anche substring), workspace (legge il field `workspace` del LogLine).
+- `LogStreamHandle` connected to `subscribe-log` IPC. Ring buffer cap 5000
+  to avoid RAM explosion. Automatic reconnection every 2s if the pipe dies
+  (e.g. daemon restarted).
+- Filters: levels (5 checkboxes), case-insensitive substring, target
+  (also substring), workspace (reads `workspace` field from LogLine).
 - Follow tail toggle (egui ScrollArea::stick_to_bottom).
-- Colorazione per livello (error rosso, warn arancio, info azzurro,
-  debug/trace grigi).
-- Bottoni "Pulisci buffer" e "Restart stream".
+- Color coding by level (error red, warn orange, info blue, debug/trace grey).
+- "Clear buffer" and "Restart stream" buttons.
 
-### Fase D (Polish minima)
+### Phase D (Minimal polish)
 
-- Toggle tema chiaro/scuro in topbar.
-- Settings persistenti via `eframe::Storage`: tab selezionato, dark mode,
+- Light/dark theme toggle in topbar.
+- Persistent settings via `eframe::Storage`: selected tab, dark mode,
   socket name.
-- Statusbar in basso con toast (6s di vita) e socket name corrente.
+- Status bar at the bottom with toasts (6s lifetime) and current socket name.
 
-**Rinviati:** tray icon (richiede integrazione con `tray-icon` crate + un
-event loop separato; non banale con winit/eframe — vale un round dedicato),
-autostart sistema (HKCU\Run su Windows), notifiche di sistema su error.
+**Deferred:** system tray icon (requires integration with `tray-icon` crate +
+a separate event loop; non-trivial with winit/eframe — worth a dedicated round),
+system autostart (HKCU\Run on Windows), system notifications on error.
 
-### Test (§5)
+### Tests (§5)
 
-8 nuovi test in `speedy-daemon/src/main.rs` (modulo `tests`):
+8 new tests in `speedy-daemon/src/main.rs` (`tests` module):
 
 - `test_workspace_status_unknown_path_errors` — canonicalize fail → `error:`
-- `test_workspace_status_known_path_reports_no_watcher` — JSON con
-  `watcher_alive=false` e `index_size_bytes=0`
-- `test_scan_finds_directory_with_index_sqlite` — crea
-  `<root>/proj-a/.speedy/index.sqlite`, verifica che `scan` lo trovi
-- `test_scan_missing_root_returns_empty_array` — `walkdir` su path
-  inesistente → `[]`
-- `test_reindex_missing_path_errors` — canonicalize fail su path mancante
-- `test_tail_log_returns_empty_when_no_logs` — directory `logs/` vuota
-- `test_tail_log_parses_json_lines` — mix di righe JSON e junk; le junk
-  sono saltate, le JSON parsate correttamente
-- `test_stream_log_handshake_and_forward` — usa `tokio::io::duplex` come
-  fake socket, verifica `ok\n` handshake + serializzazione JSON LogLine
+- `test_workspace_status_known_path_reports_no_watcher` — JSON with
+  `watcher_alive=false` and `index_size_bytes=0`
+- `test_scan_finds_directory_with_index_sqlite` — creates
+  `<root>/proj-a/.speedy/index.sqlite`, verifies `scan` finds it
+- `test_scan_missing_root_returns_empty_array` — `walkdir` on
+  nonexistent path → `[]`
+- `test_reindex_missing_path_errors` — canonicalize fail on missing path
+- `test_tail_log_returns_empty_when_no_logs` — empty `logs/` directory
+- `test_tail_log_parses_json_lines` — mix of JSON and junk lines; junk
+  is skipped, JSON lines are parsed correctly
+- `test_stream_log_handshake_and_forward` — uses `tokio::io::duplex` as
+  a fake socket, verifies `ok\n` handshake + JSON LogLine serialization
 
-Tutti 65 test del daemon passano (57 esistenti + 8 nuovi). I 57 test
-di `speedy-core` restano verdi. Workspace `cargo check --all-targets`
-verde, build release verde.
+All 65 daemon tests pass (57 existing + 8 new). The 57 `speedy-core` tests
+remain green. Workspace `cargo check --all-targets` green, release build green.
 
-### File toccati in questa tornata
+### Files touched in this round
 
-- `Cargo.toml` (root) — aggiunto `packages/speedy-gui` ai membri.
-- `packages/speedy-gui/Cargo.toml` — **nuovo**.
+- `Cargo.toml` (root) — added `packages/speedy-gui` to members.
+- `packages/speedy-gui/Cargo.toml` — **new**.
 - `packages/speedy-gui/src/{main.rs, app.rs, daemon.rs, log_stream.rs,
-  views/{mod.rs, dashboard.rs, workspaces.rs, scan.rs, logs.rs}}` — **nuovi**.
-- `packages/speedy-daemon/src/main.rs` — 8 nuovi `#[tokio::test]` in `tests`.
+  views/{mod.rs, dashboard.rs, workspaces.rs, scan.rs, logs.rs}}` — **new**.
+- `packages/speedy-daemon/src/main.rs` — 8 new `#[tokio::test]` in `tests`.
 
-### Cosa NON è stato fatto
+### What was NOT done
 
-- Tray icon di sistema (`tray-icon` crate).
-- Auto-start del daemon al login utente (HKCU\Run su Windows, plist su
-  macOS, `.desktop` autostart su Linux).
-- Notifiche di sistema su evento `error` (configurabile, off default).
-- Export selezione log a file `.log`/`.json` (basta avere il buffer; il
-  bottone è da aggiungere — 5 righe di `rfd::FileDialog::save_file` +
+- System tray icon (`tray-icon` crate).
+- Daemon auto-start at user login (HKCU\Run on Windows, plist on
+  macOS, `.desktop` autostart on Linux).
+- System notifications on `error` event (configurable, off by default).
+- Log selection export to `.log`/`.json` file (just needs the buffer; the
+  button is to be added — 5 lines of `rfd::FileDialog::save_file` +
   `serde_json::to_writer`).
-- Storico log: drop-down con i file `daemon.log.*` in `<daemon_dir>/logs/`
-  e una view read-only sul file selezionato.
-- Test backend GUI con mock `DaemonClient` (la struct `DaemonBridge` non
-  ha unit test dedicati; copertura è indiretta via test daemon).
-- Smoke E2E manuale: il binario builda ma non è stato lanciato (sessione
-  non-interattiva).
+- Log history: dropdown with `daemon.log.*` files in `<daemon_dir>/logs/`
+  and a read-only view of the selected file.
+- GUI backend tests with mock `DaemonClient` (the `DaemonBridge` struct has no
+  dedicated unit tests; coverage is indirect via daemon tests).
+- Manual E2E smoke test: the binary builds but was not launched (non-interactive session).
 
-### Come provarla
+### How to try it
 
 ```powershell
 cargo run --release -p speedy-gui
 ```
 
-Se il daemon non sta girando vedrai il banner con "Avvia daemon".
+If the daemon is not running you will see the "Start daemon" banner.
 
-### Stato finale task TODO
+### Final TODO task status
 
-- [x] §1.1 logging strutturato + streaming IPC
-- [x] §1.2 nuovi comandi (scan, reindex, workspace-status, tail-log, subscribe-log)
-- [x] §1.3 protocol_version=2 (era già OK)
-- [x] §2 scaffolding crate speedy-gui (egui)
-- [x] §4 tipi serde condivisi in speedy-core
-- [x] Fase A MVP (connessione/dashboard/workspace)
-- [x] Fase B operazioni (index/sync/scan/restart)
-- [x] Fase C log viewer
-- [~] Fase D polish — tema + persistenza fatti; tray/autostart/notifiche rinviati
-- [~] §5 test — 8 integrazione daemon OK; mock GUI rinviato
+- [x] §1.1 structured logging + IPC streaming
+- [x] §1.2 new commands (scan, reindex, workspace-status, tail-log, subscribe-log)
+- [x] §1.3 protocol_version=2 (was already OK)
+- [x] §2 speedy-gui crate scaffolding (egui)
+- [x] §4 shared serde types in speedy-core
+- [x] Phase A MVP (connection/dashboard/workspace)
+- [x] Phase B operations (index/sync/scan/restart)
+- [x] Phase C log viewer
+- [~] Phase D polish — theme + persistence done; tray/autostart/notifications deferred
+- [~] §5 tests — 8 daemon integration OK; GUI mock deferred
 
 ---
 
-## 2026-05-15 (parte 3) — chiusura rinvii + cargo build-all
+## 2026-05-15 (part 3) — closing deferred items + cargo build-all
 
-L'utente ha chiesto di completare tutti i rinvii ancora aperti e di aggiungere
-un comando unificato per buildare tutti i binari. Tutto fatto in una sessione.
+The user asked to complete all still-open deferred items and to add a unified
+command for building all binaries. All done in one session.
 
 ### Cargo alias `build-all`
 
-Nuovo file `.cargo/config.toml`:
+New file `.cargo/config.toml`:
 ```
 [alias]
 build-all = "build --release -p speedy -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui"
 ```
 
-Verifica: `cargo build-all` → finisce in ~45s e produce i 5 .exe in
-`target/release/`. Gli script `scripts/build-release.{ps1,sh}` restano la
-soluzione "tutto compreso" (build + copy in `dist/`).
+Verification: `cargo build-all` → completes in ~45s and produces the 5 .exe in
+`target/release/`. The `scripts/build-release.{ps1,sh}` scripts remain the
+"all-in-one" solution (build + copy to `dist/`).
 
-### Tray icon (`tray.rs`, nuovo)
+### Tray icon (`tray.rs`, new)
 
-`tray-icon = "0.19"` con icona 16x16 RGBA generata in codice (disco verde
-quando il daemon è alive, rosso quando è down — niente file binari embedded).
-Menu: voce di status read-only ("Daemon: ● alive/down"), separator, "Open
+`tray-icon = "0.19"` with a 16x16 RGBA icon generated in code (green disk
+when the daemon is alive, red when down — no embedded binary files).
+Menu: read-only status entry ("Daemon: ● alive/down"), separator, "Open
 Speedy", "Restart daemon", separator, "Quit".
 
-Le azioni vengono drenate ad ogni frame da `App::update` via
-`MenuEvent::receiver().try_recv()` (non bloccante). `TrayHandle::set_alive`
-aggiorna icona + label solo quando lo stato cambia (atomico).
+Actions are drained each frame from `App::update` via
+`MenuEvent::receiver().try_recv()` (non-blocking). `TrayHandle::set_alive`
+updates icon + label only when state changes (atomic).
 
-`TrayHandle::try_new` torna `None` se la piattaforma non supporta il tray
-(tipicamente Linux senza AppIndicator). L'app continua a funzionare senza.
-La handle vive in `Arc<TrayHandle>` ed è creata sul main thread *prima* di
-`eframe::run_native`, requisito Windows/macOS.
+`TrayHandle::try_new` returns `None` if the platform doesn't support the tray
+(typically Linux without AppIndicator). The app continues to work without it.
+The handle lives in `Arc<TrayHandle>` and is created on the main thread *before*
+`eframe::run_native`, a Windows/macOS requirement.
 
-### Notifiche di sistema su error (`notify-rust = "4.11"`)
+### System notifications on error (`notify-rust = "4.11"`)
 
-Toggle "Notifiche di sistema su errore" nella Dashboard, persistito via
-`eframe::Storage`. Quando attivo, `App::notify_new_errors` scorre solo le
-righe nuove dello stream live (delta vs `last_notified_log_count`,
-clampato all'effettivo ring buffer) e per ogni livello `error` chiama
+"System notifications on error" toggle in Dashboard, persisted via
+`eframe::Storage`. When active, `App::notify_new_errors` scans only new lines
+from the live stream (delta vs `last_notified_log_count`,
+clamped to the actual ring buffer) and for each `error` level calls
 `notify_rust::Notification::new().summary(...).body(...).show()`.
 
-### Auto-start daemon al login (`autostart.rs`, nuovo)
+### Daemon auto-start at login (`autostart.rs`, new)
 
-Modulo cross-platform con tre cfg-branch:
+Cross-platform module with three cfg-branches:
 - **Windows**: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` via
-  `winreg = "0.52"`. Valore = path al `speedy-daemon.exe` *quoted*
-  (so spaces in Program Files non rompono).
-- **macOS**: `~/Library/LaunchAgents/com.speedy.daemon.plist` con
+  `winreg = "0.52"`. Value = *quoted* path to `speedy-daemon.exe`
+  (so spaces in Program Files don't break it).
+- **macOS**: `~/Library/LaunchAgents/com.speedy.daemon.plist` with
   `RunAtLoad=true, KeepAlive=false`.
-- **Linux**: `~/.config/autostart/speedy-daemon.desktop` con
+- **Linux**: `~/.config/autostart/speedy-daemon.desktop` with
   `X-GNOME-Autostart-enabled=true`.
 
-API: `is_enabled() -> Result<bool>`, `enable()`, `disable()`. Trovata
-dell'eseguibile cerca `speedy-daemon{EXE_SUFFIX}` accanto al binario GUI.
+API: `is_enabled() -> Result<bool>`, `enable()`, `disable()`. Executable
+lookup searches for `speedy-daemon{EXE_SUFFIX}` next to the GUI binary.
 
-UI: checkbox in Dashboard ("Avvia daemon al login utente"). Toggle del
-checkbox chiama enable/disable e mostra toast (verde su success, rosso
-su error).
+UI: checkbox in Dashboard ("Start daemon at user login"). Toggling the
+checkbox calls enable/disable and shows a toast (green on success, red on error).
 
-### Export log + storico log (`views/logs.rs`, rewritten)
+### Log export + log history (`views/logs.rs`, rewritten)
 
-Aggiunta una selezione di **sorgente** in cima alla view:
-- "Live (stream)" — comportamento precedente, `subscribe-log` IPC.
-- ComboBox con i file `daemon.log.*` trovati in `<daemon_dir>/logs/`
-  (ordinati per nome decrescente, più recente primo).
+Added a **source** selector at the top of the view:
+- "Live (stream)" — previous behavior, `subscribe-log` IPC.
+- ComboBox with `daemon.log.*` files found in `<daemon_dir>/logs/`
+  (sorted by name descending, most recent first).
 
-Quando l'utente seleziona un file diverso, viene caricato e parsato
-una volta sola (cache `history_loaded_path`). Il parser è tollerante:
-prova prima lo shape `LogLine` (IPC) e poi proietta lo shape del
-`tracing_subscriber::fmt::layer().json()` (top-level `timestamp`, `level`,
-`target`, `fields.message`, altri `fields.*`).
+When the user selects a different file, it is loaded and parsed once
+(cache `history_loaded_path`). The parser is tolerant: first tries the
+`LogLine` shape (IPC) then projects the `tracing_subscriber::fmt::layer().json()`
+shape (top-level `timestamp`, `level`, `target`, `fields.message`, other `fields.*`).
 
-Bottone "Esporta selezione (N)" sempre disponibile: usa
-`rfd::FileDialog::save_file()` con filtri JSON/JSONL. Estensione `.jsonl`
-→ una riga per record (newline-delimited); altrimenti array JSON
-pretty-printed. Mostra toast con il path su success.
+"Export selection (N)" button always available: uses
+`rfd::FileDialog::save_file()` with JSON/JSONL filters. Extension `.jsonl`
+→ one record per line (newline-delimited); otherwise pretty-printed JSON array.
+Shows a toast with the path on success.
 
-### Test backend GUI (§5, completato)
+### GUI backend tests (§5, completed)
 
-5 nuovi `#[test]` in `speedy-gui/src/daemon.rs#tests`:
+5 new `#[test]` in `speedy-gui/src/daemon.rs#tests`:
 
-- `daemon_state_toast_helper_round_trips` — `set_toast` mette message/ok
-  correttamente in `state.toast`.
-- `bridge_against_dead_socket_marks_probed_not_alive` — refresh contro
-  socket inesistente, polling fino a `busy==0`; verifica
+- `daemon_state_toast_helper_round_trips` — `set_toast` correctly sets message/ok
+  in `state.toast`.
+- `bridge_against_dead_socket_marks_probed_not_alive` — refresh against
+  nonexistent socket, polling until `busy==0`; verifies
   `alive=false, probed=true, status=None`.
 - `bridge_against_mock_marks_alive_and_loads_status_and_metrics` —
-  fake listener su runtime separato risponde a ping/status/metrics/list;
-  bridge dopo `refresh_all` ha `alive=true, status.pid==42,
+  fake listener on a separate runtime responds to ping/status/metrics/list;
+  bridge after `refresh_all` has `alive=true, status.pid==42,
   status.protocol_version==2, metrics=Some(...)`.
-- `busy_counter_settles_after_multiple_overlapping_calls` — 5 refresh
-  consecutivi contro socket dead, busy deve tornare a 0 (no underflow).
+- `busy_counter_settles_after_multiple_overlapping_calls` — 5 consecutive
+  refreshes against dead socket, busy must return to 0 (no underflow).
 - `workspace_status_error_on_dead_socket_surfaces_in_last_error` —
-  `refresh_workspace_status` contro socket dead → `state.last_error`
-  contiene "workspace-status".
+  `refresh_workspace_status` against dead socket → `state.last_error`
+  contains "workspace-status".
 
-Pattern del mock: come in `daemon_client::tests`, ma DaemonBridge ha già
-il suo runtime tokio, quindi il mock vive in un *runtime separato* (
-`tokio::runtime::Runtime::new()` locale al test). Dopo l'asserzione, drop
-del runtime libera il socket OS.
+Mock pattern: as in `daemon_client::tests`, but DaemonBridge already has its
+own tokio runtime, so the mock lives in a *separate runtime*
+(`tokio::runtime::Runtime::new()` local to the test). After the assertion,
+dropping the runtime frees the OS socket.
 
-### Dipendenze nuove (speedy-gui)
+### New dependencies (speedy-gui)
 
 ```toml
 tray-icon = "0.19"
@@ -358,86 +351,82 @@ notify-rust = "4.11"
 winreg = "0.52"
 ```
 
-### File toccati / nuovi
+### Files touched / new
 
-- `.cargo/config.toml` — **nuovo** (alias build-all).
+- `.cargo/config.toml` — **new** (build-all alias).
 - `packages/speedy-gui/Cargo.toml` — +3 deps (tray, notify, winreg).
-- `packages/speedy-gui/src/main.rs` — crea `TrayHandle::try_new()` prima
-  di `eframe::run_native`, passa `Option<Arc<TrayHandle>>` a `SpeedyApp::new`.
-- `packages/speedy-gui/src/app.rs` — `notify_on_error` persistito,
-  `handle_tray_actions`, `notify_new_errors`, signature di
-  `views::dashboard::render` arricchita.
-- `packages/speedy-gui/src/tray.rs` — **nuovo**.
-- `packages/speedy-gui/src/autostart.rs` — **nuovo**.
-- `packages/speedy-gui/src/views/logs.rs` — riscritto: source switch
+- `packages/speedy-gui/src/main.rs` — creates `TrayHandle::try_new()` before
+  `eframe::run_native`, passes `Option<Arc<TrayHandle>>` to `SpeedyApp::new`.
+- `packages/speedy-gui/src/app.rs` — `notify_on_error` persisted,
+  `handle_tray_actions`, `notify_new_errors`, enriched signature of
+  `views::dashboard::render`.
+- `packages/speedy-gui/src/tray.rs` — **new**.
+- `packages/speedy-gui/src/autostart.rs` — **new**.
+- `packages/speedy-gui/src/views/logs.rs` — rewritten: source switch
   (Live / File), export button, history viewer.
-- `packages/speedy-gui/src/views/dashboard.rs` — checkbox notifiche +
-  checkbox autostart (con feedback toast).
-- `packages/speedy-gui/src/daemon.rs` — +5 test.
-- `todo-gui.md` — tutti i task chiusi.
+- `packages/speedy-gui/src/views/dashboard.rs` — notifications checkbox +
+  autostart checkbox (with toast feedback).
+- `packages/speedy-gui/src/daemon.rs` — +5 tests.
+- `todo-gui.md` — all tasks closed.
 
-### Risultato
+### Result
 
-`cargo check --workspace --all-targets` → verde.
-`cargo build-all` → 5 binari release in 45s.
+`cargo check --workspace --all-targets` → green.
+`cargo build-all` → 5 release binaries in 45s.
 `cargo test -p speedy-core --lib` → 57/57.
 `cargo test -p speedy-daemon --bin speedy-daemon` → 65/65.
 `cargo test -p speedy-gui` → 5/5.
 
-Resta solo lo smoke E2E manuale (`cargo run --release -p speedy-gui` e
-verifica visiva di tray icon + notifiche + autostart), non eseguibile in
-sessione non-interattiva.
+Only the manual E2E smoke test remains (`cargo run --release -p speedy-gui` and
+visual verification of tray icon + notifications + autostart), not runnable in a
+non-interactive session.
 
 ---
 
-## 2026-05-15 (parte 4) — autostart rimosso, daemon-exe override, prune-missing
+## 2026-05-15 (part 4) — autostart removed, daemon-exe override, prune-missing
 
-Le decisioni in parte 3 sono state in parte riviste. Stato corrente nel
-codice (verifica `master` HEAD `c642282`):
+Decisions from part 3 were partially revised. Current state in the code
+(verify `master` HEAD `c642282`):
 
-### Autostart rimosso dalla GUI
+### Autostart removed from the GUI
 
-`packages/speedy-gui/src/autostart.rs` **non esiste più**. Il dependency
-`winreg` resta in `Cargo.toml` solo per uso futuro (può essere rimosso).
-La Dashboard **non** ha più il checkbox "Avvia daemon al login utente".
+`packages/speedy-gui/src/autostart.rs` **no longer exists**. The `winreg`
+dependency remains in `Cargo.toml` only for future use (can be removed).
+The Dashboard **no longer** has the "Start daemon at user login" checkbox.
 
-Motivazione: scrivere in `HKCU\…\Run` / `LaunchAgents` /
-`~/.config/autostart` è invadente per un'app distribuita come tarball di
-binari. L'utente posiziona manualmente uno shortcut a `speedy-daemon`
-nella Startup folder (Windows) o equivalente — vedi README §"Recommended
-layout".
+Rationale: writing to `HKCU\…\Run` / `LaunchAgents` /
+`~/.config/autostart` is invasive for an app distributed as a tarball of
+binaries. The user manually places a shortcut to `speedy-daemon` in the
+Startup folder (Windows) or equivalent — see README §"Recommended layout".
 
-Riferimenti in queste note (parte 3 §"Auto-start daemon al login",
-file `autostart.rs`, checkbox in Dashboard) vanno letti come "fatto
-poi rollbackato".
+References in these notes (part 3 §"Daemon auto-start at login",
+file `autostart.rs`, checkbox in Dashboard) should be read as "done then rolled back".
 
 ### Daemon-exe override
 
-Aggiunto un campo "Eseguibile daemon" nella Dashboard con `Sfoglia…` /
-`Applica` / `Ripristina automatico`. Persistito come
-`PersistedSettings.daemon_exe_path` in `eframe::Storage`. Il bridge usa
-`spawn_daemon_process_with(exe, socket)` quando l'override è settato.
+Added a "Daemon executable" field in the Dashboard with `Browse…` /
+`Apply` / `Reset to auto`. Persisted as
+`PersistedSettings.daemon_exe_path` in `eframe::Storage`. The bridge uses
+`spawn_daemon_process_with(exe, socket)` when the override is set.
 
-API nuova in `speedy-core/src/daemon_util.rs`:
+New API in `speedy-core/src/daemon_util.rs`:
 `pub fn resolve_daemon_exe() -> Result<PathBuf>`
 `pub fn spawn_daemon_process_with(exe: &Path, socket_name: &str) -> Result<()>`
 
 ### Prune-missing (IPC + GUI)
 
-Nuovo comando IPC one-shot `prune-missing`:
-- Daemon: `handle_prune_missing` ferma i watcher per path inesistenti,
-  rimuove le entry da `workspaces.json`, risponde con
+New one-shot IPC command `prune-missing`:
+- Daemon: `handle_prune_missing` stops watchers for nonexistent paths,
+  removes entries from `workspaces.json`, responds with
   `{"removed": N, "paths": [...]}`.
 - Client: `DaemonClient::prune_missing()` in speedy-core.
-- GUI: pulsante "🧹 Pulisci orfani" nella tab Workspaces (più una
-  riga con badge "⚠ mancante" sui workspace il cui path non esiste).
+- GUI: "🧹 Prune orphans" button in the Workspaces tab (plus a
+  row with "⚠ missing" badge on workspaces whose path doesn't exist).
 
-### Stato test (HEAD attuale)
+### Test status (current HEAD)
 
-`cargo check --workspace --all-targets` → verde (1 warning: unused
-import `StreamTrait` in `speedy-cli/src/main.rs:147` — fix banale).
+`cargo check --workspace --all-targets` → green (1 warning: unused
+import `StreamTrait` in `speedy-cli/src/main.rs:147` — trivial fix).
 
-`cargo test --workspace -- --test-threads=1` → in corso al momento
-della redazione di questa nota; controllare l'esito prima di credere
-allo storico in parte 3.
-
+`cargo test --workspace -- --test-threads=1` → in progress at the time
+these notes were written; verify the result before trusting the history in part 3.
