@@ -66,3 +66,27 @@ jobs:
         with:
           files: speedy-*.tar.gz
           generate_release_notes: true
+
+  installer:
+    name: Windows Installer
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        run: cargo xtask dist --installer
+
+      - name: Upload installer
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/speedy-setup-*.exe
