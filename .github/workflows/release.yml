@@ -65,7 +65,7 @@ jobs:
             speedy-ai-context${{ matrix.suffix }} \
             speedy-daemon${{ matrix.suffix }} \
             speedy-cli${{ matrix.suffix }} \
-            speedy-mcp${{ matrix.suffix }} \
+            speedy-ai-context-mcp${{ matrix.suffix }} \
             speedy-gui${{ matrix.suffix }} \
             speedy-language-context${{ matrix.suffix }}
           mv speedy-${{ matrix.target }}.tar.gz ../../../
@@ -79,7 +79,7 @@ jobs:
             speedy-ai-context${{ matrix.suffix }} \
             speedy-daemon${{ matrix.suffix }} \
             speedy-cli${{ matrix.suffix }} \
-            speedy-mcp${{ matrix.suffix }} \
+            speedy-ai-context-mcp${{ matrix.suffix }} \
             speedy-language-context${{ matrix.suffix }}
           mv speedy-${{ matrix.target }}.tar.gz ../../../
 
