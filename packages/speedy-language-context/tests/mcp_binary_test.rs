@@ -39,6 +39,20 @@ impl McpClient {
         Self { process, reader }
     }
 
+    fn start_with_cli(workspace: &Path) -> Self {
+        let mut cmd = quiet_command(mcp_bin());
+        cmd.arg("--workspace").arg(workspace)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(cli) = speedy_cli_bin() {
+            cmd.env("SPEEDY_BIN", cli);
+        }
+        let mut process = cmd.spawn().expect("failed to start speedy-language-context-mcp");
+        let reader = BufReader::new(process.stdout.take().unwrap());
+        Self { process, reader }
+    }
+
     fn send(&mut self, json: &str) -> String {
         let stdin = self.process.stdin.as_mut().unwrap();
         writeln!(stdin, "{json}").expect("failed to write to stdin");
@@ -73,6 +87,12 @@ impl McpClient {
 fn mcp_bin() -> &'static PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| stage_binary("speedy-language-context", "speedy-language-context-mcp"))
+}
+
+fn speedy_cli_bin() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "speedy-cli.exe" } else { "speedy-cli" };
+    let p = cargo_target_debug().join(exe);
+    if p.exists() { Some(p) } else { None }
 }
 
 fn cargo_target_debug() -> PathBuf {
@@ -197,6 +217,10 @@ fn test_tools_list() {
     assert!(names.contains(&"run_pipeline"), "missing run_pipeline: {names:?}");
     assert!(names.contains(&"save_observation"), "missing save_observation: {names:?}");
     assert!(names.contains(&"search_observations"), "missing search_observations: {names:?}");
+    assert!(names.contains(&"force_reindex"), "missing force_reindex: {names:?}");
+    assert!(names.contains(&"workspace_add"), "missing workspace_add: {names:?}");
+    assert!(names.contains(&"workspace_remove"), "missing workspace_remove: {names:?}");
+    assert!(names.contains(&"workspace_list"), "missing workspace_list: {names:?}");
 
     client.stop();
     let _ = std::fs::remove_dir_all(&ws);
@@ -346,4 +370,118 @@ fn test_save_multiple_observations_and_search() {
 
     client.stop();
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_force_reindex_indexes_workspace() {
+    let ws = temp_workspace();
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"force_reindex","arguments":{}}}"#,
+    ))
+    .unwrap();
+
+    assert!(resp["error"].is_null(), "force_reindex should not error: {resp}");
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "force_reindex returned empty text");
+
+    let status: serde_json::Value = serde_json::from_str(text).expect("force_reindex should return JSON");
+    assert_ne!(status["last_indexed"], "never", "workspace should be indexed after force_reindex");
+    assert!(
+        status["symbols"].as_u64().unwrap_or(0) > 0,
+        "should have found symbols in lib.rs: {status}"
+    );
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_workspace_tools_return_valid_response() {
+    // Tests that workspace_add, workspace_remove, workspace_list each produce
+    // a valid JSON-RPC response (either content or a structured error), never
+    // a hang or panic. speedy-cli may or may not be available in the test env.
+    let ws = temp_workspace();
+    let mut client = McpClient::start_with_cli(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    for (id, tool, args) in [
+        (2u64, "workspace_add",    r#"{"path": "/tmp/test-ws-add"}"#),
+        (3u64, "workspace_remove", r#"{"path": "/tmp/test-ws-add"}"#),
+        (4u64, "workspace_list",   r#"{}"#),
+    ] {
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{args}}}}}"#
+        );
+        let resp: serde_json::Value = serde_json::from_str(&client.send(&call))
+            .unwrap_or_else(|e| panic!("{tool}: invalid JSON in response: {e}"));
+
+        assert_eq!(resp["jsonrpc"], "2.0", "{tool}: bad jsonrpc field");
+        assert_eq!(resp["id"], id, "{tool}: id mismatch");
+        // Either a result with content array, or a structured error.
+        let has_result = resp["result"]["content"].is_array();
+        let has_error = resp["error"].is_object();
+        assert!(
+            has_result || has_error,
+            "{tool}: response must have result.content or error, got: {resp}"
+        );
+    }
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_workspace_add_and_list_roundtrip() {
+    // If speedy-cli is available, adding a workspace should make it appear in list.
+    let ws = temp_workspace();
+    let extra = temp_workspace();
+    let mut client = McpClient::start_with_cli(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+
+    let add_call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "workspace_add", "arguments": {"path": extra.to_str().unwrap()}}
+    });
+    let add_resp: serde_json::Value = serde_json::from_str(&client.send(&add_call.to_string())).unwrap();
+
+    // If add failed (no speedy-cli), skip the round-trip check.
+    if add_resp["error"].is_object() {
+        client.stop();
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&extra);
+        return;
+    }
+
+    let list_resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"workspace_list","arguments":{}}}"#,
+    ))
+    .unwrap();
+    assert!(list_resp["error"].is_null(), "workspace_list should succeed: {list_resp}");
+    let list_text = list_resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    let extra_canonical = extra.canonicalize().unwrap();
+    let list_json: serde_json::Value = serde_json::from_str(list_text).unwrap_or(serde_json::Value::Null);
+    let found = list_json.as_array().map_or(false, |paths| {
+        paths.iter().any(|p| {
+            p.as_str().and_then(|s| std::path::Path::new(s).canonicalize().ok())
+                .as_deref() == Some(extra_canonical.as_path())
+        })
+    });
+    assert!(found, "workspace_list should contain the added path; list={list_text}");
+
+    // Clean up: remove the added workspace.
+    let remove_call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "workspace_remove", "arguments": {"path": extra.to_str().unwrap()}}
+    });
+    client.send(&remove_call.to_string());
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+    let _ = std::fs::remove_dir_all(&extra);
 }
