@@ -61,7 +61,14 @@ jobs:
             speedy-language-context${{ matrix.suffix }}
           mv speedy-${{ matrix.target }}.tar.gz ../../../
 
-      - name: Upload
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        if: matrix.os == 'windows-latest'
+        with:
+          name: windows-binaries
+          path: target/${{ matrix.target }}/release/speedy-*.exe
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: speedy-*.tar.gz
@@ -74,17 +81,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: dist/
 
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
 
       - name: Build installer
-        run: cargo xtask dist --installer
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -SkipBuild
 
       - name: Upload installer
         uses: softprops/action-gh-release@v2
