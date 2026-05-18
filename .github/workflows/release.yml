@@ -14,6 +14,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -49,11 +50,11 @@ jobs:
 
       - name: Build all binaries (Linux/Windows with GUI)
         if: matrix.os != 'macos-latest'
-        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context --target ${{ matrix.target }}
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-gui -p speedy-language-context --target ${{ matrix.target }}
 
       - name: Build all binaries (macOS, no GUI)
         if: matrix.os == 'macos-latest'
-        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-language-context --target ${{ matrix.target }}
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-language-context --target ${{ matrix.target }}
 
       - name: Package (Linux/Windows with GUI)
         if: matrix.os != 'macos-latest'

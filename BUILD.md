@@ -151,6 +151,23 @@ Gli asset hanno il formato `speedy-<target>.tar.gz` e vengono caricati automatic
 
 > **L'installer Windows** (`speedy-setup-*.exe`) **non** è prodotto dalla CI — va creato localmente con `cargo xtask dist --installer` e caricato manualmente sulla Release.
 
+#### Re-release (tag o release fallita)
+
+Se la release è fallita o il tag esiste già, eliminare e ricreare:
+
+```powershell
+# 1. Elimina tag locale e remoto
+git tag -d v0.2.0
+git push GitHub --delete v0.2.0
+
+# 2. Elimina la GitHub Release (se esiste)
+gh release delete v0.2.0 --yes
+
+# 3. Ricrea il tag e pusha — riavvia la Action
+git tag v0.2.0
+git push GitHub v0.2.0
+```
+
 ---
 
 ## Binari prodotti
