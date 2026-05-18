@@ -175,3 +175,4 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 | Bassa | Ricerca semantica in language-context |
 | Bassa | Smoke E2E GUI manuale |
 | Bassa | Tag release |
+| Bassa | Installer Linux (Fedora) — `.rpm` con `cargo-generate-rpm` o AppImage |
