@@ -94,10 +94,14 @@ Name: "desktopicon"; Description: "Crea collegamento sul Desktop per Speedy GUI"
 Source: "..\dist\speedy-ai-context.exe";        DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\speedy-daemon.exe";            DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\speedy-cli.exe";               DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-ai-context-mcp.exe";               DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-ai-context-mcp.exe";    DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\speedy-gui.exe";               DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\speedy-language-context.exe";      DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-language-context-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\speedy-language-context-mcp.exe";  DestDir: "{app}"; Flags: ignoreversion
+
+; Documentazione — copiata nella cartella di installazione
+Source: "..\installer\README.txt";       DestDir: "{app}"; Flags: ignoreversion
+Source: "..\installer\INSTALLATION.md";  DestDir: "{app}"; Flags: ignoreversion
 
 
 ; ============================================================
@@ -153,6 +157,11 @@ Filename: "{app}\speedy-daemon.exe"; \
 Filename: "{app}\speedy-gui.exe"; \
   WorkingDir: "{app}"; \
   Description: "Apri Speedy GUI"; \
+  Flags: nowait postinstall shellexec
+
+; Offre di aprire il README con Notepad al termine.
+Filename: "{app}\README.txt"; \
+  Description: "Apri README (istruzioni d'uso)"; \
   Flags: nowait postinstall shellexec
 
 ; ============================================================
