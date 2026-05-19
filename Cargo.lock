@@ -4545,6 +4545,7 @@ dependencies = [
  "serde",
  "serde_json",
  "speedy-core",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

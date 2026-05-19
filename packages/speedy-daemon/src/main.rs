@@ -3228,4 +3228,160 @@ not-json-line\n\
         // to confirm the assertions above.
         server_task.abort();
     }
+
+    // ── active_pids: HashSet invariants ───────────────────────────────────────
+
+    /// Inserting the same PID twice must not produce duplicates.
+    /// Documents the deduplication invariant relied on by stop_all_watchers.
+    #[test]
+    fn test_active_pids_no_duplicates() {
+        let pids: Arc<StdMutex<HashSet<u32>>> = Arc::new(StdMutex::new(HashSet::new()));
+
+        {
+            let mut set = pids.lock().unwrap();
+            set.insert(1234);
+            set.insert(5678);
+            set.insert(1234); // duplicate
+            set.insert(5678); // duplicate
+        }
+
+        let set = pids.lock().unwrap();
+        assert_eq!(set.len(), 2, "HashSet must deduplicate PIDs");
+        assert!(set.contains(&1234));
+        assert!(set.contains(&5678));
+    }
+
+    /// Removing a PID from active_pids must leave the set empty.
+    /// Documents the cleanup contract followed when a child process exits.
+    #[test]
+    fn test_active_pids_remove_cleans_up() {
+        let pids: Arc<StdMutex<HashSet<u32>>> = Arc::new(StdMutex::new(HashSet::new()));
+
+        pids.lock().unwrap().insert(42);
+        assert_eq!(pids.lock().unwrap().len(), 1);
+
+        pids.lock().unwrap().remove(&42);
+        assert!(
+            pids.lock().unwrap().is_empty(),
+            "PID must be removed after child process finishes"
+        );
+    }
+
+    // ── prune_and_reconcile: inner helper ─────────────────────────────────────
+
+    /// prune_and_reconcile must drop the watcher entry and set its stop flag
+    /// when the workspace path no longer exists on disk.
+    #[tokio::test]
+    async fn test_prune_and_reconcile_removes_missing_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path_str = dir.path().to_string_lossy().to_string();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = WatcherHandle {
+            stop: stop.clone(),
+            last_heartbeat: Arc::new(AtomicU64::new(0)),
+            last_event_at: Arc::new(AtomicU64::new(0)),
+            last_sync_at: Arc::new(AtomicU64::new(0)),
+        };
+
+        let watchers: Arc<Mutex<HashMap<String, WatcherHandle>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        watchers.lock().await.insert(path_str.clone(), handle);
+
+        // Delete the directory so the path no longer exists.
+        drop(dir);
+
+        prune_and_reconcile(&watchers).await;
+
+        let ws = watchers.lock().await;
+        assert!(
+            !ws.contains_key(&path_str),
+            "prune_and_reconcile must remove watcher for non-existent path"
+        );
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "prune_and_reconcile must set stop flag on removed watcher"
+        );
+    }
+
+    /// prune_and_reconcile must be a no-op when the workspace path still exists.
+    #[tokio::test]
+    async fn test_prune_and_reconcile_keeps_existing_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path_str = dir.path().to_string_lossy().to_string();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = WatcherHandle {
+            stop: stop.clone(),
+            last_heartbeat: Arc::new(AtomicU64::new(0)),
+            last_event_at: Arc::new(AtomicU64::new(0)),
+            last_sync_at: Arc::new(AtomicU64::new(0)),
+        };
+
+        let watchers: Arc<Mutex<HashMap<String, WatcherHandle>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        watchers.lock().await.insert(path_str.clone(), handle);
+
+        // Directory still exists — prune must be a no-op.
+        prune_and_reconcile(&watchers).await;
+
+        let ws = watchers.lock().await;
+        assert!(
+            ws.contains_key(&path_str),
+            "prune_and_reconcile must NOT remove watcher for a path that still exists"
+        );
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "stop flag must remain false when path exists"
+        );
+    }
+
+    // ── stop_all_watchers: shutdown path ──────────────────────────────────────
+
+    /// stop_all_watchers with no in-flight PIDs must still set all stop flags
+    /// and empty the watcher map without panicking.
+    #[tokio::test]
+    async fn test_stop_all_watchers_sets_stop_flags_and_clears_map() {
+        let stop1 = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::new(AtomicBool::new(false));
+
+        let watchers: Arc<Mutex<HashMap<String, WatcherHandle>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut ws = watchers.lock().await;
+            ws.insert(
+                "/fake/workspace1".to_string(),
+                WatcherHandle {
+                    stop: stop1.clone(),
+                    last_heartbeat: Arc::new(AtomicU64::new(0)),
+                    last_event_at: Arc::new(AtomicU64::new(0)),
+                    last_sync_at: Arc::new(AtomicU64::new(0)),
+                },
+            );
+            ws.insert(
+                "/fake/workspace2".to_string(),
+                WatcherHandle {
+                    stop: stop2.clone(),
+                    last_heartbeat: Arc::new(AtomicU64::new(0)),
+                    last_event_at: Arc::new(AtomicU64::new(0)),
+                    last_sync_at: Arc::new(AtomicU64::new(0)),
+                },
+            );
+        }
+
+        // No real child processes — active_pids is empty.
+        let active_pids: StdMutex<HashSet<u32>> = StdMutex::new(HashSet::new());
+        stop_all_watchers(&watchers, &active_pids).await;
+
+        assert!(stop1.load(Ordering::SeqCst), "watcher 1 stop flag not set");
+        assert!(stop2.load(Ordering::SeqCst), "watcher 2 stop flag not set");
+        assert!(
+            watchers.lock().await.is_empty(),
+            "watchers map must be empty after stop_all_watchers"
+        );
+        assert!(
+            active_pids.lock().unwrap().is_empty(),
+            "active_pids must be empty after stop_all_watchers"
+        );
+    }
 }

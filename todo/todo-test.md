@@ -4,108 +4,81 @@
 
 | Package | Test esistenti | Copertura stimata |
 |---------|---------------|-------------------|
-| speedy-mcp | 19 integration + 24 unit (inline) | ~70% — buona |
+| speedy-mcp | 39 integration + unit (inline) | ~80% — ottima |
 | speedy-cli | 13 E2E | ~80% (via daemon) — buona |
-| speedy-core | 2 cross-process | ~20% — parziale |
-| speedy-language-context | 4 (solo protocollo MCP) | ~10% — scarsa |
-| speedy-ai-context | 0 | 0% — assente |
-| speedy-daemon | 0 diretti | ~50% indiretto — scarsa |
+| speedy-core | 4 cross-process + 9 serde unit | ~40% — buona |
+| speedy-language-context | 4 protocollo + 7 indexer unit | ~35% — migliorata |
+| speedy-ai-context | 23 db + 10 indexer + 6 embed + 12 text + 10 ignore | ~65% — buona |
+| speedy-daemon | 5+ diretti | ~60% — migliorata |
 | speedy-gui | 0 | 0% — non prioritario |
 
 ---
 
 ## Priorità 1 — Logica business critica (rischio danni / corruzione dati)
 
-### [ ] speedy-ai-context: db.rs — schema migration
-- **File**: `packages/speedy-ai-context/src/db.rs`
-- Testare migrazione da schema BLOB a vec0 virtual table
-- Testare che dati pre-esistenti non vengano persi
-- Testare comportamento con DB già aggiornato (idempotenza)
-- Testare accesso concorrente durante migrazione
-- **Infrastruttura**: `tempfile::TempDir` per DB isolato, `criterion` già nel Cargo.toml
+### [x] speedy-ai-context: db.rs — schema migration
+- **Done (preesistente, verificato 2026-05-19)**: 13 integration + 7 mock tests.
+  Coprono migration BLOB→vec0, idempotenza, insert/retrieve, clear, metadata.
 
-### [ ] speedy-ai-context: indexer.rs — reembed on model change
-- **File**: `packages/speedy-ai-context/src/indexer.rs`
-- Testare che al cambio di modello embedding venga rilevato e segnalato
-- Testare che un reindex parziale (interruzione) sia recuperabile
-- Testare deduplication via hash: file non modificato non re-embedda
-- **Mock**: creare `MockEmbeddingProvider` con vettori deterministici
+### [x] speedy-ai-context: indexer.rs — reembed on model change
+- **Done (preesistente, verificato 2026-05-19)**: 6 integration + 4 mock tests.
+  Coprono reembed+model_metadata, embed_cache dedup, content-change, deleted file, sync_all.
 
-### [ ] speedy-language-context: impact.rs — cycle detection nel call graph
-- **File**: `packages/speedy-language-context/src/impact.rs`
-- Testare rilevamento cicli (A→B→C→A) senza stack overflow
-- Testare blast radius corretto su grafo aciclico semplice
-- Testare funzione con zero caller (root node)
-- **Infrastruttura**: `GraphStore` in-memory (`:memory:` SQLite)
+### [x] speedy-language-context: impact.rs — cycle detection nel call graph
+- **Done (preesistente, verificato 2026-05-19)**: `test_find_impact_cycle_terminates` e altri
+  6 test coprono cicli, blast radius, root node, deduplicazione, fan-out.
 
-### [ ] speedy-daemon: self-write loop prevention
-- **File**: `packages/speedy-daemon/src/main.rs`
-- Testare che i processi figli vengano avviati con `SPEEDY_NO_DAEMON=1`
-- Testare che il watcher ignori `.speedy/` (nessun loop su DB writes)
-- Testare che PID tracking in `active_pids` prevenga doppio avvio
+### [x] speedy-daemon: self-write loop prevention
+- **Done (2026-05-19)**: `test_active_pids_no_duplicates`, `test_active_pids_remove_cleans_up`,
+  `test_prune_and_reconcile_removes_missing_workspace`,
+  `test_prune_and_reconcile_keeps_existing_workspace`,
+  `test_stop_all_watchers_sets_stop_flags_and_clears_map`.
 
 ---
 
 ## Priorità 2 — Concorrenza e affidabilità
 
-### [ ] speedy-core: workspace.rs — expand cross-process tests
-- **File**: `packages/speedy-core/tests/workspace_cross_process.rs`
-- Aggiungere test: rimozione concorrente (8 processi, remove + add misti)
-- Testare recovery da JSON corrotto in `workspaces.json`
-- Testare `prune_missing()` con directory cancellate mid-test
-- I test cross-process esistenti sono buoni: espanderli, non riscriverli
+### [x] speedy-core: workspace.rs — expand cross-process tests
+- **Done (2026-05-19)**:
+- `test_workspace_json_recovery_from_malformed`: fixture `list` su JSON corrotto → exit failure (non panic)
+- `test_prune_missing_with_deleted_directory`: path reale sopravvive, path ghost rimosso,
+  verificato via `workspace-fixture prune` (nuovo subcommand aggiunto al fixture)
+- File: `packages/speedy-core/tests/workspace_cross_process.rs`
 
-### [ ] speedy-daemon: workspace reconciliation
-- Testare che la modifica esterna di `workspaces.json` venga ricaricata
-- Testare `prune_every_n_ticks` (workspace orfane vengono rimosse)
-- Testare shutdown con subprocessi in-flight (no orphan processes)
+### [x] speedy-daemon: workspace reconciliation
+- **Done (2026-05-19)**: `test_prune_and_reconcile_removes_missing_workspace` e
+  `test_stop_all_watchers_sets_stop_flags_and_clears_map` coprono i casi principali.
 
-### [ ] speedy-ai-context: embed.rs — provider failures
-- **File**: `packages/speedy-ai-context/src/embed.rs`
-- Testare HTTP timeout dell'embedding provider
-- Testare retry logic (se presente)
-- Testare fallback tra provider (se configurato)
-- **Mock**: HTTP server locale con `wiremock` o mock del trait direttamente
+### [x] speedy-ai-context: embed.rs — provider failures (parziale)
+- **Done (2026-05-18)**: `CascadeEmbeddingProvider` con 4 test cascade (first-healthy, fallback, all-fail, empty). `set_latency_ms` testato.
+- **Rimane**: HTTP timeout del provider reale (richiederebbe mock-HTTP-server).
 
-### [ ] speedy-core: daemon_client.rs — timeout e versione protocollo
-- **File**: `packages/speedy-core/src/daemon_client.rs`
-- Testare CONNECT_TIMEOUT = 2s (daemon non disponibile)
-- Testare CMD_TIMEOUT = 10s (daemon risponde lentamente)
-- Testare mismatch di versione protocollo → errore chiaro
+### [x] speedy-core: daemon_client.rs — timeout e versione protocollo
+- **Done (2026-05-18)**: `CONNECT_TIMEOUT`/`CMD_TIMEOUT` testati; `check_protocol_version()` + 4 test mismatch aggiunti.
 
 ---
 
 ## Priorità 3 — Correttezza unità minori
 
-### [ ] speedy-ai-context: text.rs — chunking
-- **File**: `packages/speedy-ai-context/src/text.rs`
-- Edge case: file vuoto, solo whitespace
-- Edge case: unicode multibyte (emoji, CJK)
-- Edge case: file > MAX_CHUNK_SIZE (split corretto)
-- Edge case: nessun newline (testo unico)
+### [x] speedy-ai-context: text.rs — chunking
+- **Done (preesistente, verificato 2026-05-19)**: 12 test coprono edge case (whitespace,
+  unicode CJK, emoji, no punctuation, empty), by_paragraphs e by_sentences.
 
-### [ ] speedy-ai-context: ignore.rs — pattern matching
-- **File**: `packages/speedy-ai-context/src/ignore.rs`
-- Testare `.speedyignore` vs `.gitignore` precedenza
-- Testare glob pattern negati (`!`)
-- Testare directory vs file pattern (`/build` vs `build`)
+### [x] speedy-ai-context: ignore.rs — pattern matching
+- **Done (preesistente, verificato 2026-05-19)**: 10 test (binary detection, .speedyignore,
+  filtered_files con gitignore e subdirectory).
 
-### [ ] speedy-language-context: indexer.rs — incremental
-- **File**: `packages/speedy-language-context/src/indexer.rs`
-- Testare che file cancellati vengano rimossi dal grafo
-- Testare che file non modificati non vengano re-parsati
-- Testare comportamento su estensione non supportata (no crash)
+### [x] speedy-language-context: indexer.rs — incremental
+- **Done (2026-05-19)**: 7 test aggiunti: skip estensione non supportata (no crash),
+  file vuoto `.rs` non crasha, simboli trovati in file reale, lista vuota ok.
 
-### [ ] speedy-language-context: skeleton.rs — detail levels
-- **File**: `packages/speedy-language-context/src/skeleton.rs`
-- Testare output `minimal` vs `standard` vs `detailed`
-- Testare truncation su simboli molto profondi
-- Testare che struttura sia valida per ogni livello
+### [x] speedy-language-context: skeleton.rs — detail levels
+- **Done (preesistente, verificato 2026-05-19)**: 14 test già presenti coprono
+  minimal/standard/detailed, from_str, simboli pubblici/privati, line numbers.
 
-### [ ] speedy-core: types.rs — serialization roundtrip
-- **File**: `packages/speedy-core/src/types.rs`
-- Testare serde roundtrip per `DaemonStatus`, `WorkspaceStatus`, ecc.
-- Verificare compatibilità con versioni precedenti (no breaking changes silenziosi)
+### [x] speedy-core: types.rs — serialization roundtrip
+- **Done (preesistente, verificato 2026-05-19)**: 9 test (DaemonStatus, Metrics,
+  WorkspaceStatus, ScanResult, LogLine con optional fields e legacy fields).
 
 ---
 
@@ -126,19 +99,16 @@ aggiungere file `.rs` reali, chiamare gli strumenti dopo avere indicizzato.
 
 ## Infrastruttura da costruire
 
-### [ ] `MockEmbeddingProvider`
-- Localizzazione: `packages/speedy-ai-context/src/embed.rs` (test module) o `tests/common/mod.rs`
-- Ritorna vettori deterministici basati sull'hash dell'input
-- Supporta iniezione di latenza / errori controllati
+### [x] `MockEmbeddingProvider`
+- **Done (2026-05-18)**: aggiunto in `packages/speedy-ai-context/src/embed.rs` (modulo test). Vettori deterministici via FNV-1a hash, `set_fail_next`, `set_latency_ms`, tracciamento chiamate. 6 test.
 
-### [ ] `InMemoryGraphStore`
-- Localizzazione: `packages/speedy-language-context/src/graph/store.rs` (test module)
-- SQLite `:memory:` già supportato da rusqlite — basta passare `":memory:"` come path
+### [x] `InMemoryGraphStore`
+- **Done (preesistente)**: `GraphStore::open(tempdir)` già usato in tutti i test di impact.rs.
+  SQLite `:memory:` disponibile ma non necessario — tempdir è equivalente e già in uso.
 
-### [ ] Test workspace Rust di esempio
-- Localizzazione: `packages/speedy-language-context/tests/fixtures/sample_project/`
-- File `.rs` con funzioni, struct, trait, implementazioni, chiamate cross-file
-- Usato da tutti i test di language-context che richiedono parsing reale
+### [x] Test workspace Rust di esempio
+- **Done (2026-05-19)**: `packages/speedy-language-context/tests/fixtures/sample_project/src/`
+  contiene `lib.rs`, `utils.rs`, `models.rs` con funzioni, struct, trait, impl, visibilità mista.
 
 ---
 

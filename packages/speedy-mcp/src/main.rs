@@ -21,6 +21,7 @@ fn main() {
     let stdin = io::stdin();
     let reader = stdin.lock();
     let runner = |args: &[&str]| run_speedy(args);
+    let lc_runner = |args: &[&str]| run_lc(args);
 
     for line in reader.lines() {
         let line = match line {
@@ -31,7 +32,7 @@ fn main() {
             continue;
         }
 
-        let response = process_line(&line, &runner);
+        let response = process_line(&line, &runner, &lc_runner);
         if let Some(json) = response {
             let mut stdout = io::stdout().lock();
             let _ = writeln!(stdout, "{json}");
@@ -44,7 +45,11 @@ fn main() {
     }
 }
 
-fn process_line(line: &str, run_cmd: &dyn Fn(&[&str]) -> Result<String, String>) -> Option<String> {
+fn process_line(
+    line: &str,
+    run_cmd: &dyn Fn(&[&str]) -> Result<String, String>,
+    run_lc_cmd: &dyn Fn(&[&str]) -> Result<String, String>,
+) -> Option<String> {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => {
@@ -53,11 +58,15 @@ fn process_line(line: &str, run_cmd: &dyn Fn(&[&str]) -> Result<String, String>)
         }
     };
 
-    let response = handle_request(&request, run_cmd);
+    let response = handle_request(&request, run_cmd, run_lc_cmd);
     response.map(|r| serde_json::to_string(&r).expect("serialize"))
 }
 
-fn handle_request(req: &JsonRpcRequest, run_cmd: &dyn Fn(&[&str]) -> Result<String, String>) -> Option<JsonRpcResponse> {
+fn handle_request(
+    req: &JsonRpcRequest,
+    run_cmd: &dyn Fn(&[&str]) -> Result<String, String>,
+    run_lc_cmd: &dyn Fn(&[&str]) -> Result<String, String>,
+) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
         "initialize" => {
             let capabilities = serde_json::json!({"tools": {}});
@@ -112,6 +121,20 @@ fn handle_request(req: &JsonRpcRequest, run_cmd: &dyn Fn(&[&str]) -> Result<Stri
                         "path": {"type": "string", "description": "Workspace path to reindex (default: .)", "default": "."}
                     }),
                     &[]),
+                tool_json("speedy_lc_status",
+                    "Show language-context index status: file/symbol/edge counts and last-indexed timestamp.",
+                    serde_json::json!({
+                        "path": {"type": "string", "description": "Workspace path (default: .)", "default": "."}
+                    }),
+                    &[]),
+                tool_json("speedy_lc_skeleton",
+                    "Return file skeletons from the language-context graph at a configurable detail level.",
+                    serde_json::json!({
+                        "files": {"type": "array", "items": {"type": "string"}, "description": "File paths relative to workspace root"},
+                        "detail": {"type": "string", "enum": ["minimal", "standard", "detailed"], "description": "Detail level (default: standard)", "default": "standard"},
+                        "path": {"type": "string", "description": "Workspace path (default: .)", "default": "."}
+                    }),
+                    &["files"]),
             ];
             Some(JsonRpcResponse::success(req.id, serde_json::json!({"tools": tools})))
         }
@@ -179,6 +202,32 @@ fn handle_request(req: &JsonRpcRequest, run_cmd: &dyn Fn(&[&str]) -> Result<Stri
                         Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy force reindex failed: {e}"))),
                     }
                 }
+                "speedy_lc_status" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    let cmd_args = ["-p", path, "status", "--json"];
+                    match run_lc_cmd(&cmd_args) {
+                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy lc status failed: {e}"))),
+                    }
+                }
+                "speedy_lc_skeleton" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    let detail = args.get("detail").and_then(|v| v.as_str()).unwrap_or("standard");
+                    let files: Vec<&str> = args
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                        .unwrap_or_default();
+                    if files.is_empty() {
+                        return Some(JsonRpcResponse::error(req.id, -32602, "speedy_lc_skeleton: files[] is required"));
+                    }
+                    let mut cmd_args = vec!["-p", path, "skeleton", "--detail", detail];
+                    cmd_args.extend(files.iter().copied());
+                    match run_lc_cmd(&cmd_args) {
+                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy lc skeleton failed: {e}"))),
+                    }
+                }
                 _ => Some(JsonRpcResponse::error(req.id, -32601, format!("Unknown tool: {name}"))),
             }
         }
@@ -212,6 +261,25 @@ fn run_speedy(args: &[&str]) -> Result<String, String> {
     // via PATH to the daemon-backed flow, matching the README's documented
     // contract. Tests and power users can override with SPEEDY_BIN.
     let bin = std::env::var("SPEEDY_BIN").unwrap_or_else(|_| "speedy-cli".to_string());
+    let output = Command::new(&bin)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to execute {bin}: {e}"))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+        Ok(stdout.trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(format!("{bin} exited with {}: {stdout}{stderr}", output.status))
+    }
+}
+
+fn run_lc(args: &[&str]) -> Result<String, String> {
+    // Invoke the speedy-language-context binary. Override with SPEEDY_LC_BIN.
+    let bin = std::env::var("SPEEDY_LC_BIN")
+        .unwrap_or_else(|_| "speedy-language-context".to_string());
     let output = Command::new(&bin)
         .args(args)
         .output()
@@ -319,7 +387,7 @@ mod tests {
             "method": method,
             "params": params
         });
-        let json = process_line(&line.to_string(), &mock_runner("ok"));
+        let json = process_line(&line.to_string(), &mock_runner("ok"), &mock_runner("ok"));
         parse_response(&json.unwrap_or_else(|| panic!("no response for {method}")))
     }
 
@@ -338,7 +406,7 @@ mod tests {
     #[test]
     fn test_initialize_includes_id() {
         let line = r#"{"jsonrpc":"2.0","id":42,"method":"initialize","params":{}}"#;
-        let json = process_line(line, &mock_runner("")).unwrap();
+        let json = process_line(line, &mock_runner(""), &mock_runner("")).unwrap();
         let resp: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(resp["id"], 42);
     }
@@ -348,18 +416,18 @@ mod tests {
     #[test]
     fn test_notification_returns_none() {
         let line = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
-        let result = process_line(line, &mock_runner(""));
+        let result = process_line(line, &mock_runner(""), &mock_runner(""));
         assert!(result.is_none(), "notifications should not produce a response");
     }
 
     // ── tools/list ──────────────────────────────────────
 
     #[test]
-    fn test_tools_list_has_seven_tools() {
+    fn test_tools_list_has_nine_tools() {
         let resp = send("tools/list", serde_json::json!({}));
         let tools = &resp["result"]["tools"];
         assert!(tools.is_array());
-        assert_eq!(tools.as_array().unwrap().len(), 7);
+        assert_eq!(tools.as_array().unwrap().len(), 9);
     }
 
     #[test]
@@ -378,6 +446,8 @@ mod tests {
             "speedy_workspace_remove",
             "speedy_workspace_list",
             "speedy_force_reindex",
+            "speedy_lc_status",
+            "speedy_lc_skeleton",
         ]);
     }
 
@@ -504,7 +574,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "speedy_workspace_add", "arguments": {"path": "/tmp/x"}}
         });
-        let json = process_line(&line.to_string(), &fail_runner);
+        let json = process_line(&line.to_string(), &fail_runner, &mock_runner("ok"));
         let resp = parse_response(&json.unwrap());
         assert_error(&resp, -32000, "speedy workspace add failed");
     }
@@ -516,7 +586,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "speedy_workspace_remove", "arguments": {"path": "/tmp/x"}}
         });
-        let json = process_line(&line.to_string(), &fail_runner);
+        let json = process_line(&line.to_string(), &fail_runner, &mock_runner("ok"));
         let resp = parse_response(&json.unwrap());
         assert_error(&resp, -32000, "speedy workspace remove failed");
     }
@@ -528,7 +598,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "speedy_workspace_list", "arguments": {}}
         });
-        let json = process_line(&line.to_string(), &fail_runner);
+        let json = process_line(&line.to_string(), &fail_runner, &mock_runner("ok"));
         let resp = parse_response(&json.unwrap());
         assert_error(&resp, -32000, "speedy workspace list failed");
     }
@@ -540,9 +610,75 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "speedy_force_reindex", "arguments": {"path": "/tmp/x"}}
         });
-        let json = process_line(&line.to_string(), &fail_runner);
+        let json = process_line(&line.to_string(), &fail_runner, &mock_runner("ok"));
         let resp = parse_response(&json.unwrap());
         assert_error(&resp, -32000, "speedy force reindex failed");
+    }
+
+    // ── tools/call: speedy_lc_status ─────────────────────
+
+    #[test]
+    fn test_call_lc_status_success() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_lc_status",
+            "arguments": {}
+        }));
+        // mock_runner returns "ok" for any non-"fail" first arg;
+        // the real run_lc call is bypassed by the mock in send().
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn test_call_lc_status_binary_failure() {
+        let fail_runner = |_: &[&str]| Err("binary not found".to_string());
+        let line = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "speedy_lc_status", "arguments": {"path": "/tmp/x"}}
+        });
+        let json = process_line(&line.to_string(), &mock_runner("ok"), &fail_runner);
+        let resp = parse_response(&json.unwrap());
+        assert_error(&resp, -32000, "speedy lc status failed");
+    }
+
+    // ── tools/call: speedy_lc_skeleton ───────────────────
+
+    #[test]
+    fn test_call_lc_skeleton_success() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_lc_skeleton",
+            "arguments": {"files": ["src/main.rs"], "detail": "standard"}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn test_call_lc_skeleton_empty_files_returns_error() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_lc_skeleton",
+            "arguments": {"files": []}
+        }));
+        assert_error(&resp, -32602, "files[] is required");
+    }
+
+    #[test]
+    fn test_call_lc_skeleton_missing_files_returns_error() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_lc_skeleton",
+            "arguments": {}
+        }));
+        assert_error(&resp, -32602, "files[] is required");
+    }
+
+    #[test]
+    fn test_call_lc_skeleton_binary_failure() {
+        let fail_runner = |_: &[&str]| Err("binary not found".to_string());
+        let line = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "speedy_lc_skeleton", "arguments": {"files": ["src/lib.rs"]}}
+        });
+        let json = process_line(&line.to_string(), &mock_runner("ok"), &fail_runner);
+        let resp = parse_response(&json.unwrap());
+        assert_error(&resp, -32000, "speedy lc skeleton failed");
     }
 
     // ── tools/call: errors ───────────────────────────────
@@ -563,7 +699,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "speedy_query", "arguments": {"query": "x"}}
         });
-        let json = process_line(&line.to_string(), &fail_runner);
+        let json = process_line(&line.to_string(), &fail_runner, &mock_runner("ok"));
         let resp = parse_response(&json.unwrap());
         assert_error(&resp, -32000, "speedy query failed");
     }
@@ -604,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_malformed_json() {
-        let json = process_line("not json at all", &mock_runner(""));
+        let json = process_line("not json at all", &mock_runner(""), &mock_runner(""));
         let resp = parse_response(&json.unwrap());
         assert_eq!(resp["jsonrpc"], "2.0");
         assert!(resp["result"].is_null(), "unexpected result: {resp}");
@@ -616,7 +752,7 @@ mod tests {
     #[test]
     fn test_missing_id() {
         let line = r#"{"jsonrpc":"2.0","method":"shutdown","params":{}}"#;
-        let json = process_line(line, &mock_runner(""));
+        let json = process_line(line, &mock_runner(""), &mock_runner(""));
         let resp: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
         assert!(resp["id"].is_null());
     }
@@ -712,7 +848,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "speedy_query", "arguments": {"query": "hello world", "top_k": 2}}
         });
-        process_line(&line.to_string(), &runner);
+        process_line(&line.to_string(), &runner, &mock_runner("ok"));
 
         let args = captured.lock().unwrap();
         assert!(args.contains(&"query".to_string()));

@@ -23,6 +23,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             suffix: ".exe"
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            suffix: ""
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -45,8 +48,13 @@ jobs:
             libxcursor-dev libxinerama-dev libgtk-3-dev libglib2.0-dev \
             libxdo-dev
 
-      - name: Build all binaries
-        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-gui -p speedy-language-context --target ${{ matrix.target }}
+      - name: Build all binaries (Linux/Windows — includes GUI)
+        if: matrix.os != 'macos-latest'
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-gui -p speedy-language-context -p speedy-language-context-mcp --target ${{ matrix.target }}
+
+      - name: Build all binaries (macOS — GUI excluded pending eframe/winit CI validation)
+        if: matrix.os == 'macos-latest'
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-language-context -p speedy-language-context-mcp --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -55,17 +63,23 @@ jobs:
           cp installer/INSTALLATION.md target/${{ matrix.target }}/release/INSTALLATION.md
           cp installer/FOR-IA.md target/${{ matrix.target }}/release/FOR-IA.md
           cd target/${{ matrix.target }}/release
-          tar czf speedy-${{ matrix.target }}.tar.gz \
-            speedy-ai-context${{ matrix.suffix }} \
-            speedy-daemon${{ matrix.suffix }} \
-            speedy-cli${{ matrix.suffix }} \
-            speedy-ai-context-mcp${{ matrix.suffix }} \
-            speedy-gui${{ matrix.suffix }} \
-            speedy-language-context${{ matrix.suffix }} \
-            speedy-language-context-mcp${{ matrix.suffix }} \
-            README.txt \
-            INSTALLATION.md \
+          # Build the file list; speedy-gui is excluded from the macOS build
+          # until eframe/winit CI validation passes.
+          FILES=(
+            speedy-ai-context${{ matrix.suffix }}
+            speedy-daemon${{ matrix.suffix }}
+            speedy-cli${{ matrix.suffix }}
+            speedy-ai-context-mcp${{ matrix.suffix }}
+            speedy-language-context${{ matrix.suffix }}
+            speedy-language-context-mcp${{ matrix.suffix }}
+            README.txt
+            INSTALLATION.md
             FOR-IA.md
+          )
+          if [ -f "speedy-gui${{ matrix.suffix }}" ]; then
+            FILES+=(speedy-gui${{ matrix.suffix }})
+          fi
+          tar czf speedy-${{ matrix.target }}.tar.gz "${FILES[@]}"
           mv speedy-${{ matrix.target }}.tar.gz ../../../
 
       - name: Upload artifact

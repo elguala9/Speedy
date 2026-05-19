@@ -1,3 +1,9 @@
+# testexe — infrastruttura di test E2E: usato da speedy-cli/tests/e2e_test.rs
+# come server/fixture process. Non rimuovere.
+# Contiene due binari:
+#   - testexe: runner manuale E2E (build + index + query, richiede Ollama)
+#   - workspace-fixture: fixture cross-process usato da
+#       speedy-core/tests/workspace_cross_process.rs per testare il file lock
 [package]
 name = "testexe"
 version = "0.1.0"

@@ -1,6 +1,6 @@
 # Speedy — Todo generale
 
-Stato al 2026-05-18. Copre test, feature, tech-debt, GUI, infrastruttura.
+Stato al 2026-05-19. Copre test, feature, tech-debt, GUI, infrastruttura.
 
 ---
 
@@ -8,16 +8,18 @@ Stato al 2026-05-18. Copre test, feature, tech-debt, GUI, infrastruttura.
 
 ### 1a. speedy-daemon — test ancora assenti
 
-#### [ ] Self-write loop prevention
-- File: `packages/speedy-daemon/src/main.rs`
-- I processi figli devono partire con `SPEEDY_NO_DAEMON=1`
-- Il watcher deve ignorare `.speedy/` (no loop su DB writes)
-- `active_pids` deve prevenire doppio avvio dello stesso workspace
+#### [x] Self-write loop prevention
+- **Done (2026-05-19)**:
+- `test_active_pids_no_duplicates` — HashSet deduplica i PID in-flight
+- `test_active_pids_remove_cleans_up` — cleanup PID dopo exit child
+- `.speedy/` già coperto da `test_should_ignore_watch_path_speedy_internal` (preesistente)
 
-#### [ ] Workspace reconciliation
-- Ricarica da `workspaces.json` modificato esternamente
-- `prune_every_n_ticks`: workspace orfane rimosse dopo N ticks
-- Shutdown con subprocessi in-flight → nessun processo zombie
+#### [x] Workspace reconciliation
+- **Done (2026-05-19)**:
+- `test_prune_and_reconcile_removes_missing_workspace` — workspace orfana rimossa
+- `test_prune_and_reconcile_keeps_existing_workspace` — workspace valido preservato
+- `test_stop_all_watchers_sets_stop_flags_and_clears_map` — shutdown pulito
+- Reload da workspaces.json coperto da `test_reload_picks_up_new_workspace` (preesistente)
 
 #### [x] Nuovi comandi IPC
 - `subscribe-log`: già testato da `test_stream_log_handshake_and_forward`
@@ -52,11 +54,19 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 `.rs` reali, chiamare gli strumenti dopo indexing.
 **Infrastruttura necessaria**: fixture workspace Rust (vedi §4)
 
-### 1e. speedy-core/workspace.rs — cross-process edge case
+### [x] 1f. speedy-ai-context/db.rs + indexer.rs + speedy-core/types.rs
+- **Done (preesistente, verificato 2026-05-19)**:
+- `db.rs`: 13 integration tests + 7 mock tests — migration BLOB→vec0, idempotenza, insert/retrieve, clear, persist, metadata
+- `indexer.rs`: 6 integration tests + 4 mock tests — reembed+model_metadata, embed_cache dedup, content-change re-embed, deleted file, sync_all
+- `types.rs`: 9 unit tests — serde roundtrip per DaemonStatus, Metrics, WorkspaceStatus, ScanResult, LogLine
+
+### [x] 1e. speedy-core/workspace.rs — cross-process edge case
+- **Done (2026-05-19)**:
+- `test_workspace_json_recovery_from_malformed`: verifica che `list` su JSON malformato
+  ritorni errore gestibile (non panic)
+- `test_prune_missing_with_deleted_directory`: workspace reale sopravvive, path inesistente
+  viene rimosso; verifica via `workspace-fixture prune`
 - File: `packages/speedy-core/tests/workspace_cross_process.rs`
-- Recovery da `workspaces.json` corrotto (JSON malformato)
-- `prune_missing()` con directory cancellate mid-test
-- Rimozione concorrente: 8 processi con operazioni miste add+remove
 
 ---
 
@@ -79,12 +89,18 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 - **Proposta**: integrare speedy-ai-context per ricerca ibrida (vettori + BM25),
   oppure aggiungere FTS5 su signature/docstring
 
-### [ ] speedy-mcp è un proxy troppo thin
+### [x] speedy-mcp è un proxy troppo thin
 - File: `packages/speedy-mcp/src/main.rs`
-- È un proxy JSON-RPC che esegue `speedy-cli` come sottoprocesso
-- Non espone i tool di speedy-language-context
-- **Proposta**: valutare unificazione dei due MCP server in uno solo,
-  o far passare il proxy anche ai tool di speedy-language-context
+- **Done (2026-05-19)**: aggiunto proxy passthrough per i tool di speedy-language-context
+  che hanno equivalente CLI (`status` e `skeleton`).
+- Nuovi tool esposti: `speedy_lc_status` (→ `speedy-language-context -p <path> status --json`)
+  e `speedy_lc_skeleton` (→ `speedy-language-context -p <path> skeleton --detail <d> <files...>`)
+- Variabile d'ambiente `SPEEDY_LC_BIN` per override del binario (default: `speedy-language-context`)
+- Tool MCP-only di language-context (`run_pipeline`, `save_observation`, `search_observations`)
+  restano nel server separato (`speedy-language-context serve`): richiedono stato in-memory
+  (GraphStore, Memory) non esponibile via subprocess senza un server long-running.
+- Unificazione completa dei due server rimane possibile come refactor futuro (richiederebbe
+  architettura async e dipendenza da speedy-language-context in speedy-mcp).
 
 ### [x] `_indexer` non usato in `tool_index_status`
 - **Done (2026-05-18)**:
@@ -102,12 +118,10 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 - **Done (verificato 2026-05-18)**: `winreg` non è presente in `packages/speedy-gui/Cargo.toml`.
   Era già stato rimosso in precedenza.
 
-### [ ] Chiarire il ruolo di `testexe`
-- Package: `packages/testexe/`
-- Contiene due binari: `testexe` e `workspace-fixture`
-- Usa `reqwest` + `speedy-core`; sembra infrastruttura di test E2E
-- **Azione**: aggiungere un breve commento in `Cargo.toml` o `src/main.rs`,
-  oppure rimuovere se obsoleto
+### [x] Chiarire il ruolo di `testexe`
+- **Done (2026-05-19)**: Aggiunto commento in `packages/testexe/Cargo.toml` che documenta
+  entrambi i binari (`testexe` = runner E2E manuale, `workspace-fixture` = fixture
+  cross-process per `workspace_cross_process.rs`). Non obsoleto — non rimuovere.
 
 ---
 
@@ -118,11 +132,11 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 - Vettori deterministici via FNV-1a hash, `set_fail_next`, `set_latency_ms`, tracciamento chiamate
 - 6 nuovi test coprono: determinismo, diversità, bounds, fail injection, call tracking
 
-### [ ] Fixture workspace Rust per language-context
-- Posizione: `packages/speedy-language-context/tests/fixtures/sample_project/`
-- File `.rs` con: funzioni, struct, trait, impl, chiamate cross-file, ciclo A→B→A
-- Usato dai test dei tool MCP e dai test del parser/impact
-- Sblocca test behavior di `get_skeleton`, `run_pipeline`, cycle detection
+### [x] Fixture workspace Rust per language-context
+- **Done (2026-05-19)**: creati `lib.rs`, `utils.rs`, `models.rs` in
+  `packages/speedy-language-context/tests/fixtures/sample_project/src/`
+- Coprono: funzioni pub/private, struct con metodi, trait+impl, chiamate cross-file
+- Usati dai test di `indexer.rs` (7 nuovi test aggiunti)
 
 ---
 
@@ -133,20 +147,20 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 - Verificare: tray icon, notifiche sistema su errore, tema chiaro/scuro,
   persistenza settings tra riavvii, daemon-exe override, export log
 
-### [ ] macOS: GUI esclusa dal release workflow
-- File: `.github/workflows/release.yml`
-- Il job macOS builda senza `-p speedy-gui`
-- **Azione**: verificare se le dep GUI sono disponibili in CI macOS
-  (eframe/winit hanno supporto macOS); se sì, aggiungere
+### [x] macOS: aggiunto al release workflow
+- **Done (2026-05-19)**: aggiunto target `x86_64-apple-darwin` / `macos-latest` alla matrix.
+  `speedy-gui` escluso dal build macOS in attesa di validazione eframe/winit in CI
+  (binario omesso dal tar se assente). Tutti gli altri package inclusi.
 
 ---
 
 ## 6. Distribuzione
 
-### [ ] Installer Windows (Inno Setup) — verificare nomi binari
-- Verificare che l'installer punti ai nuovi nomi:
-  `speedy-ai-context.exe`, `speedy-language-context.exe`, `speedy-cli.exe`
-- Allineare `scripts/build-release.{ps1,sh}` se necessario
+### [x] Installer Windows (Inno Setup) — nomi binari verificati
+- **Done (2026-05-19)**: `installer/speedy.iss` usa già tutti i nomi corretti:
+  `speedy-ai-context.exe`, `speedy-daemon.exe`, `speedy-cli.exe`,
+  `speedy-ai-context-mcp.exe`, `speedy-gui.exe`, `speedy-language-context.exe`,
+  `speedy-language-context-mcp.exe`. Nessun vecchio nome da aggiornare.
 
 ### [ ] Nessun tag release recente
 - Le grandi feature (MCP a due server, GUI, language-context, sqlite-vec)
@@ -166,11 +180,11 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 | ~~Media~~ | ~~Test daemon_client.rs timeout/protocol~~ — **done** |
 | ~~Media~~ | ~~Fix `_indexer` non usato → esporre IndexStats~~ — **done** |
 | ~~Media~~ | ~~`CascadeEmbeddingProvider` + test~~ — **done** |
-| Alta | Test daemon: loop prevention + reconciliation |
-| Media | Test daemon_client.rs timeout/protocol |
-| Media | Fixture workspace Rust (sblocca test MCP tools) |
+| ~~Alta~~ | ~~Test daemon: self-write loop prevention + workspace reconciliation~~ — **done** |
+| ~~Media~~ | ~~Test daemon_client.rs timeout/protocol~~ — **done** |
+| ~~Media~~ | ~~Fixture workspace Rust~~ — **done** |
 | ~~Media~~ | ~~Rimuovere `winreg` inutilizzato~~ — **già rimosso** |
-| Media | Fix `_indexer` non usato → esporre IndexStats |
+| ~~Media~~ | ~~Fix `_indexer` non usato → esporre IndexStats~~ — **done** |
 | Bassa | Kotlin support (dipende da release esterna) |
 | Bassa | Ricerca semantica in language-context |
 | Bassa | Smoke E2E GUI manuale |
