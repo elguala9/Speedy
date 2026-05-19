@@ -1,6 +1,7 @@
 [alias]
 build-all = "build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context"
 xtask = "run -p xtask --"
+publish-winget = "run -p xtask -- publish-winget"
 
 [profile.dev]
 # Disabilita incremental: risparmia ~40% spazio in debug (rebuild leggermente piu' lenti)
