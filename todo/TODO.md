@@ -78,16 +78,17 @@ Aggiungere test che verifichino l'output reale degli strumenti:
   il DB in read-only e popola `chunk_count` con `SELECT COUNT(*) FROM chunks`.
 
 ### [ ] Kotlin non supportato nel parser language-context
-- File: `packages/speedy-language-context/src/parser/tree_sitter_parser.rs`
-- Commento inline: `"kt" | "kts" — tree-sitter-kotlin not yet compatible with tree-sitter 0.23`
-- **Azione**: monitorare release di `tree-sitter-kotlin` compatibile con 0.23+
+- **File**: `packages/speedy-language-context/src/parser/tree_sitter_parser.rs`
+- **Problema**: `tree-sitter-kotlin` 0.3.x usa la ABI di tree-sitter 0.20; Speedy è aggiornato
+  a tree-sitter 0.25 (ABI 15). Le due versioni non sono linkabili insieme — il crate attuale
+  di Kotlin produce errori di compilazione o runtime al caricamento della grammar.
+- **Workaround attuale**: le estensioni `.kt` / `.kts` sono silenziosamente skippate dal parser
+  (nessun crash, nessun simbolo indicizzato).
+- **Sblocco**: aggiungere il supporto quando esce un release di `tree-sitter-kotlin` compatibile
+  con tree-sitter ≥ 0.23 (ABI 14+). Monitorare: https://crates.io/crates/tree-sitter-kotlin
+- **Implementazione**: aggiungere `tree-sitter-kotlin` a `Cargo.toml`, rimuovere il commento
+  di skip in `tree_sitter_parser.rs` e aggiungere il caso `"kt" | "kts"` alla match.
 
-### [ ] Language context: nessuna ricerca semantica (solo BM25)
-- File: `packages/speedy-language-context/src/search.rs`
-- La ricerca è keyword-only (BM25 approssimato sui nomi simbolo)
-- `run_pipeline` in `mcp.rs` non usa embeddings
-- **Proposta**: integrare speedy-ai-context per ricerca ibrida (vettori + BM25),
-  oppure aggiungere FTS5 su signature/docstring
 
 ### [x] speedy-mcp è un proxy troppo thin
 - File: `packages/speedy-mcp/src/main.rs`
@@ -142,11 +143,6 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 
 ## 5. GUI — cose rinviate
 
-### [ ] Smoke E2E manuale (richiede macchina fisica)
-- Checklist dettagliata in `todo/os/TODO-platform.md`
-- Verificare: tray icon, notifiche sistema su errore, tema chiaro/scuro,
-  persistenza settings tra riavvii, daemon-exe override, export log
-
 ### [x] macOS: aggiunto al release workflow
 - **Done (2026-05-19)**: aggiunto target `x86_64-apple-darwin` / `macos-latest` alla matrix.
   `speedy-gui` escluso dal build macOS in attesa di validazione eframe/winit in CI
@@ -162,12 +158,6 @@ Aggiungere test che verifichino l'output reale degli strumenti:
   `speedy-ai-context-mcp.exe`, `speedy-gui.exe`, `speedy-language-context.exe`,
   `speedy-language-context-mcp.exe`. Nessun vecchio nome da aggiornare.
 
-### [ ] Nessun tag release recente
-- Le grandi feature (MCP a due server, GUI, language-context, sqlite-vec)
-  non hanno un tag semantico associato
-- **Azione**: creare tag `v0.x.0` con changelog (il workflow release si
-  attiva su `push: tags: ["v*"]`)
-
 ---
 
 ## Priorità suggerita
@@ -176,17 +166,13 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 |----------|------|
 | ~~Alta~~ | ~~`chunk_count` in WorkspaceStatus~~ — **done** |
 | ~~Alta~~ | ~~`MockEmbeddingProvider`~~ — **done** |
-| ~~Alta~~ | ~~Test daemon: loop prevention + reconciliation~~ — **done** (prune-missing) |
+| ~~Alta~~ | ~~Test daemon: loop prevention + reconciliation~~ — **done** |
 | ~~Media~~ | ~~Test daemon_client.rs timeout/protocol~~ — **done** |
 | ~~Media~~ | ~~Fix `_indexer` non usato → esporre IndexStats~~ — **done** |
 | ~~Media~~ | ~~`CascadeEmbeddingProvider` + test~~ — **done** |
 | ~~Alta~~ | ~~Test daemon: self-write loop prevention + workspace reconciliation~~ — **done** |
-| ~~Media~~ | ~~Test daemon_client.rs timeout/protocol~~ — **done** |
 | ~~Media~~ | ~~Fixture workspace Rust~~ — **done** |
 | ~~Media~~ | ~~Rimuovere `winreg` inutilizzato~~ — **già rimosso** |
 | ~~Media~~ | ~~Fix `_indexer` non usato → esporre IndexStats~~ — **done** |
-| Bassa | Kotlin support (dipende da release esterna) |
-| Bassa | Ricerca semantica in language-context |
-| Bassa | Smoke E2E GUI manuale |
-| Bassa | Tag release |
+| Bassa | Kotlin support (attesa release `tree-sitter-kotlin` ≥ ABI 14) |
 | Bassa | Installer Linux (Fedora) — `.rpm` con `cargo-generate-rpm` o AppImage |
