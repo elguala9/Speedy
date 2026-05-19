@@ -15,7 +15,7 @@
 #endif
 
 #define MyAppName      "Speedy"
-#define MyAppPublisher "Omnia Group"
+#define MyAppPublisher "Parresia"
 #define MyAppURL       "https://github.com/elguala9/Speedy"
 ; GUID fisso — non cambiare: identifica l'app per gli aggiornamenti automatici
 ; (le {{ }} sono escape per le parentesi graffe in Inno Setup)
@@ -385,9 +385,9 @@ begin
 
       { Chiavi di registro specifiche di Speedy (no-op se non esistono) }
       RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Speedy');
-      RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Omnia Group\Speedy');
-      { Rimuove il parent solo se rimasto vuoto (altri prodotti Omnia potrebbero esserci) }
-      RegDeleteKeyIfEmpty(HKCU, 'Software\Omnia Group');
+      RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Parresia\Speedy');
+      { Rimuove il parent solo se rimasto vuoto }
+      RegDeleteKeyIfEmpty(HKCU, 'Software\Parresia');
     end;
 
     usPostUninstall:

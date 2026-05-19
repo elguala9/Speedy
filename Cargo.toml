@@ -20,7 +20,7 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/elguala9/Speedy"
 homepage = "https://github.com/elguala9/Speedy"
-authors = ["Luca Gualandi <lgualandi@omniagroup.it>"]
+authors = ["Luca Gualandi"]
 
 [profile.release]
 strip = true

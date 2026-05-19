@@ -34,7 +34,7 @@ $ErrorActionPreference = 'Stop'
 
 $Version      = $Version.TrimStart('v')
 $vTag         = "v$Version"
-$pkgId        = 'OmniaGroup.Speedy'
+$pkgId        = 'Parresia.Speedy'
 $installerUrl = "https://github.com/elguala9/Speedy/releases/download/$vTag/speedy-setup-$Version.exe"
 
 Write-Host ""
@@ -101,7 +101,7 @@ if ($Update) {
     Write-Host "    Si aprira' il browser per autenticarsi con GitHub." -ForegroundColor DarkGray
     Write-Host "    wingetcreate chiedera' di riempire alcuni campi interattivamente." -ForegroundColor DarkGray
     Write-Host ""
-    wingetcreate new $installerUrl --submit
+    wingetcreate new $installerUrl
 }
 
 if ($LASTEXITCODE -ne 0) {
