@@ -1,0 +1,25 @@
+PackageIdentifier: OmniaGroup.Speedy
+PackageVersion: 0.2.0
+PackageLocale: en-US
+Publisher: Omnia Group
+PublisherUrl: https://github.com/elguala9/Speedy
+PublisherSupportUrl: https://github.com/elguala9/Speedy/issues
+PackageName: Speedy
+PackageUrl: https://github.com/elguala9/Speedy
+License: MIT
+LicenseUrl: https://github.com/elguala9/Speedy/blob/main/LICENSE
+ShortDescription: Local semantic file search powered by vector embeddings
+Description: |-
+  Speedy is a local semantic search tool for files and code.
+  It runs a background daemon that indexes your workspaces using
+  vector embeddings, enabling fast natural-language search from
+  the CLI, GUI, or MCP server integrations.
+Moniker: speedy
+Tags:
+- semantic-search
+- code-search
+- vector
+- ai
+- cli
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

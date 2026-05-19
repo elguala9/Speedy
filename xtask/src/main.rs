@@ -28,16 +28,22 @@ fn main() {
     let task = args.first().map(String::as_str);
     let clean = args.contains(&"--clean".to_string());
     let installer = args.contains(&"--installer".to_string());
+    let update = args.contains(&"--update".to_string());
+    let version = flag_value(&args, "--version");
 
     match task {
         Some("dist") => dist(clean, installer),
+        Some("publish-winget") => publish_winget(version, update),
         _ => {
             eprintln!("Usage: cargo xtask <task> [flags]");
             eprintln!("Tasks:");
-            eprintln!("  dist                      Incremental build + copy to dist/");
-            eprintln!("  dist --clean              Force full rebuild of all binaries");
-            eprintln!("  dist --installer          Also build the Windows installer (.exe)");
-            eprintln!("  dist --clean --installer  Full rebuild + installer");
+            eprintln!("  dist                          Incremental build + copy to dist/");
+            eprintln!("  dist --clean                  Force full rebuild of all binaries");
+            eprintln!("  dist --installer              Also build the Windows installer (.exe)");
+            eprintln!("  dist --clean --installer      Full rebuild + installer");
+            eprintln!("  publish-winget                Submit to winget (uses workspace version)");
+            eprintln!("  publish-winget --update       Update existing winget package");
+            eprintln!("  publish-winget --version X.Y.Z  Override version");
             std::process::exit(1);
         }
     }
@@ -138,9 +144,44 @@ fn exe_name(bin: &str) -> String {
 }
 
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR points to xtask/, go one level up
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask has no parent")
         .to_path_buf()
+}
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|w| w[0] == flag)
+        .map(|w| w[1].clone())
+}
+
+fn publish_winget(version: Option<String>, update: bool) {
+    let root = workspace_root();
+    let ver = version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let script = root.join("scripts").join("submit-winget.ps1");
+
+    println!("==> cargo publish-winget v{ver}{}",
+        if update { " (--update)" } else { " (prima submission)" });
+
+    if !script.exists() {
+        eprintln!("Script non trovato: {}", script.display());
+        std::process::exit(1);
+    }
+
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .arg("-Version")
+        .arg(&ver)
+        .current_dir(&root);
+
+    if update {
+        cmd.arg("-Update");
+    }
+
+    let status = cmd.status().expect("failed to launch submit-winget.ps1");
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }

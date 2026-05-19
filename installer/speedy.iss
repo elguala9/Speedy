@@ -87,11 +87,11 @@ Name: "addtopath";   Description: "Aggiungi Speedy al PATH (richiesto da speedy-
 ; Task non selezionato di default
 Name: "desktopicon"; Description: "Crea collegamento sul Desktop per Speedy GUI"; GroupDescription: "Icone aggiuntive:"; Flags: unchecked
 
-; Ollama — mostrato e pre-selezionato solo se ollama.exe non è già installato
-Name: "installoollama"; Description: "Scarica e installa Ollama (richiesto per i modelli AI locali)"; GroupDescription: "Dipendenze:"; Check: OllamaNotInstalled
+; Ollama — opt-in: deselezionato di default, Check nasconde il task se già installato
+Name: "installoollama"; Description: "Scarica e installa Ollama (richiesto per i modelli AI locali)"; GroupDescription: "Dipendenze:"; Check: OllamaNotInstalled; Flags: unchecked
 
-; Modello predefinito — mostrato e pre-selezionato solo se il modello non è già presente
-Name: "pullmodel"; Description: "Scarica il modello predefinito nomic-embed-text (~270 MB, richiede connessione)"; GroupDescription: "Dipendenze:"; Check: ModelNotInstalled
+; Modello predefinito — opt-in: deselezionato di default, Check nasconde il task se già presente
+Name: "pullmodel"; Description: "Scarica il modello predefinito nomic-embed-text (~270 MB, richiede connessione)"; GroupDescription: "Dipendenze:"; Check: ModelNotInstalled; Flags: unchecked
 
 ; ============================================================
 [Files]
