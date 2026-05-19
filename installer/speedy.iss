@@ -15,7 +15,7 @@
 #endif
 
 #define MyAppName      "Speedy"
-#define MyAppPublisher "elguala9"
+#define MyAppPublisher "Parresia"
 #define MyAppURL       "https://github.com/elguala9/Speedy"
 ; GUID fisso — non cambiare: identifica l'app per gli aggiornamenti automatici
 ; (le {{ }} sono escape per le parentesi graffe in Inno Setup)
@@ -385,9 +385,9 @@ begin
 
       { Chiavi di registro specifiche di Speedy (no-op se non esistono) }
       RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Speedy');
-      RegDeleteKeyIncludingSubkeys(HKCU, 'Software\elguala9\Speedy');
-      { Rimuove il parent solo se rimasto vuoto (altri prodotti elguala9 potrebbero esserci) }
-      RegDeleteKeyIfEmpty(HKCU, 'Software\elguala9');
+      RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Parresia\Speedy');
+      { Rimuove il parent solo se rimasto vuoto }
+      RegDeleteKeyIfEmpty(HKCU, 'Software\Parresia');
     end;
 
     usPostUninstall:

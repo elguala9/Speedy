@@ -1,7 +1,7 @@
 # Speedy — Installation Flow
 
 This document describes every step performed by `speedy-setup-<version>.exe`
-(Inno Setup installer), whether launched directly or via `winget install elguala9.Speedy`.
+(Inno Setup installer), whether launched directly or via `winget install Parresia.Speedy`.
 
 ---
 
@@ -10,7 +10,7 @@ This document describes every step performed by `speedy-setup-<version>.exe`
 | Method | Notes |
 |--------|-------|
 | **Direct download** | Run `speedy-setup-<version>.exe` — interactive wizard |
-| **winget** | `winget install elguala9.Speedy` — silent by default (`/SILENT`) |
+| **winget** | `winget install Parresia.Speedy` — silent by default (`/SILENT`) |
 
 ---
 
@@ -86,7 +86,7 @@ is absent.
 ## Silent / winget Install Summary
 
 ```
-winget install elguala9.Speedy
+winget install Parresia.Speedy
    │
    ├─ Copies binaries to %LOCALAPPDATA%\Programs\Speedy\
    ├─ Adds Speedy to user PATH
@@ -103,7 +103,7 @@ winget install elguala9.Speedy
 
 ## Uninstall Flow
 
-Run via **Add/Remove Programs** or `winget uninstall elguala9.Speedy`.
+Run via **Add/Remove Programs** or `winget uninstall Parresia.Speedy`.
 
 1. Graceful daemon shutdown via `speedy-cli daemon stop`.
 2. Force-kill of remaining processes (`taskkill /F`).
