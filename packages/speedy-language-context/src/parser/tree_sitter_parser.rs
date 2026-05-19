@@ -53,7 +53,7 @@ pub fn parse_file(path: &Path, source: &[u8]) -> Vec<ParsedSymbol> {
             parse_with(tree_sitter_php::LANGUAGE_PHP.into(), source, Lang::Php)
         }
         "swift" => parse_with(tree_sitter_swift::LANGUAGE.into(), source, Lang::Swift),
-        // "kt" | "kts" — tree-sitter-kotlin not yet compatible with tree-sitter 0.23
+        "kt" | "kts" => parse_with(tree_sitter_kotlin::LANGUAGE.into(), source, Lang::Kotlin),
         "scala" | "sc" => parse_with(tree_sitter_scala::LANGUAGE.into(), source, Lang::Scala),
         _ => Vec::new(),
     }
@@ -96,7 +96,7 @@ pub fn parse_edges(path: &Path, source: &[u8], symbols: &[ParsedSymbol]) -> Vec<
             (tree_sitter_php::LANGUAGE_PHP.into(), Lang::Php)
         }
         "swift" => (tree_sitter_swift::LANGUAGE.into(), Lang::Swift),
-        // "kt" | "kts" — tree-sitter-kotlin not yet compatible with tree-sitter 0.23
+        "kt" | "kts" => (tree_sitter_kotlin::LANGUAGE.into(), Lang::Kotlin),
         "scala" | "sc" => (tree_sitter_scala::LANGUAGE.into(), Lang::Scala),
         _ => return Vec::new(),
     };
@@ -143,6 +143,7 @@ fn collect_call_edges<'a>(
         Lang::CSharp => "invocation_expression",
         Lang::Ruby => "method_call",
         Lang::Php => "function_call_expression",
+        Lang::Kotlin => "call_expression",
         _ => "call_expression",
     };
     if node.kind() == call_kind {
@@ -223,6 +224,7 @@ enum Lang {
     Ruby,
     Php,
     Swift,
+    Kotlin,
     Scala,
 }
 
@@ -287,6 +289,7 @@ fn extract_symbol(node: Node<'_>, source: &[u8], lang: Lang) -> Option<ParsedSym
         Lang::Ruby => extract_ruby(node, source),
         Lang::Php => extract_php(node, source),
         Lang::Swift => extract_swift(node, source),
+        Lang::Kotlin => extract_kotlin(node, source),
         Lang::Scala => extract_scala(node, source),
     }
 }
@@ -693,6 +696,47 @@ fn extract_swift(node: Node<'_>, source: &[u8]) -> Option<ParsedSymbol> {
     Some(make_symbol(kind, name, node, source, is_public))
 }
 
+// ─── Kotlin ───────────────────────────────────────────────────────────
+
+fn extract_kotlin(node: Node<'_>, source: &[u8]) -> Option<ParsedSymbol> {
+    let kind = match node.kind() {
+        "function_declaration" => SymbolKind::Function,
+        "class_declaration" => {
+            // Kotlin grammar uses class_declaration for both `class` and `interface`.
+            if first_line_has_token(node, source, "interface") {
+                SymbolKind::Interface
+            } else {
+                SymbolKind::Class
+            }
+        }
+        "object_declaration" => SymbolKind::Struct,
+        "secondary_constructor" => SymbolKind::Function,
+        _ => return None,
+    };
+
+    let name = if node.kind() == "secondary_constructor" {
+        "constructor".to_string()
+    } else {
+        node.child_by_field_name("name")
+            .map(|n| node_text(n, source).to_string())
+            .or_else(|| {
+                child_text_with_kind(node, source, &["simple_identifier", "type_identifier"])
+            })
+            .unwrap_or_default()
+    };
+
+    if name.is_empty() {
+        return None;
+    }
+
+    // Kotlin members are public by default; private/internal/protected make them non-public.
+    let is_public = !first_line_has_token(node, source, "private")
+        && !first_line_has_token(node, source, "internal")
+        && !first_line_has_token(node, source, "protected");
+
+    Some(make_symbol(kind, name, node, source, is_public))
+}
+
 // ─── Scala ────────────────────────────────────────────────────────────
 
 fn extract_scala(node: Node<'_>, source: &[u8]) -> Option<ParsedSymbol> {
@@ -943,6 +987,44 @@ mod tests {
             syms.iter().any(|s| s.name == "Greeter"
                 && matches!(s.kind, crate::graph::SymbolKind::Class)),
             "Greeter class missing"
+        );
+    }
+
+    #[test]
+    fn parse_kotlin_fun_and_class() {
+        let src = b"class Greeter(val name: String) {\n    fun greet(): String = \"Hello, $name\"\n    private fun secret() {}\n}\nfun topLevel(): Int = 42\n";
+        let syms = parse_file(&PathBuf::from("t.kt"), src);
+        assert!(
+            syms.iter()
+                .any(|s| s.name == "Greeter" && matches!(s.kind, crate::graph::SymbolKind::Class)),
+            "Greeter class missing; got: {:?}",
+            syms.iter().map(|s| (&s.name, &s.kind)).collect::<Vec<_>>()
+        );
+        assert!(
+            syms.iter()
+                .any(|s| s.name == "topLevel" && matches!(s.kind, crate::graph::SymbolKind::Function)),
+            "topLevel function missing"
+        );
+        let secret = syms.iter().find(|s| s.name == "secret");
+        if let Some(s) = secret {
+            assert!(!s.is_public, "secret should not be public");
+        }
+    }
+
+    #[test]
+    fn parse_kotlin_object_and_interface() {
+        let src = b"interface Describable {\n    fun describe(): String\n}\nobject Singleton {\n    fun instance(): Singleton = Singleton\n}\n";
+        let syms = parse_file(&PathBuf::from("t.kt"), src);
+        assert!(
+            syms.iter().any(|s| s.name == "Describable"
+                && matches!(s.kind, crate::graph::SymbolKind::Interface)),
+            "Describable interface missing; got: {:?}",
+            syms.iter().map(|s| (&s.name, &s.kind)).collect::<Vec<_>>()
+        );
+        assert!(
+            syms.iter()
+                .any(|s| s.name == "Singleton" && matches!(s.kind, crate::graph::SymbolKind::Struct)),
+            "Singleton object missing"
         );
     }
 

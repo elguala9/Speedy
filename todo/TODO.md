@@ -77,17 +77,16 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 - **Done (2026-05-18)**: aggiunto `rusqlite` al daemon; `handle_workspace_status` apre
   il DB in read-only e popola `chunk_count` con `SELECT COUNT(*) FROM chunks`.
 
-### [ ] Kotlin non supportato nel parser language-context
-- **File**: `packages/speedy-language-context/src/parser/tree_sitter_parser.rs`
-- **Problema**: `tree-sitter-kotlin` 0.3.x usa la ABI di tree-sitter 0.20; Speedy è aggiornato
-  a tree-sitter 0.25 (ABI 15). Le due versioni non sono linkabili insieme — il crate attuale
-  di Kotlin produce errori di compilazione o runtime al caricamento della grammar.
-- **Workaround attuale**: le estensioni `.kt` / `.kts` sono silenziosamente skippate dal parser
-  (nessun crash, nessun simbolo indicizzato).
-- **Sblocco**: aggiungere il supporto quando esce un release di `tree-sitter-kotlin` compatibile
-  con tree-sitter ≥ 0.23 (ABI 14+). Monitorare: https://crates.io/crates/tree-sitter-kotlin
-- **Implementazione**: aggiungere `tree-sitter-kotlin` a `Cargo.toml`, rimuovere il commento
-  di skip in `tree_sitter_parser.rs` e aggiungere il caso `"kt" | "kts"` alla match.
+### [x] Kotlin supportato nel parser language-context
+- **Done (2026-05-19)**:
+- Usato `fwcd/tree-sitter-kotlin` main (v0.4.0, non ancora su crates.io) — usa
+  `tree-sitter-language = "0.1"` (ABI-agnostico, compatibile con tree-sitter 0.25).
+  Pinnato a rev `f66d2908` per riproducibilità.
+- `extract_kotlin()`: `function_declaration` → Function, `class_declaration` →
+  Class o Interface (distinto via token `interface`), `object_declaration` → Struct.
+- 2 test: `parse_kotlin_fun_and_class`, `parse_kotlin_object_and_interface` — OK.
+- **Nota**: quando `tree-sitter-kotlin` pubblica su crates.io (≥ ABI 14), sostituire
+  il git dep con la versione crates.io per evitare dep da git in produzione.
 
 
 ### [x] speedy-mcp è un proxy troppo thin
@@ -174,5 +173,5 @@ Aggiungere test che verifichino l'output reale degli strumenti:
 | ~~Media~~ | ~~Fixture workspace Rust~~ — **done** |
 | ~~Media~~ | ~~Rimuovere `winreg` inutilizzato~~ — **già rimosso** |
 | ~~Media~~ | ~~Fix `_indexer` non usato → esporre IndexStats~~ — **done** |
-| Bassa | Kotlin support (attesa release `tree-sitter-kotlin` ≥ ABI 14) |
+| ~~Bassa~~ | ~~Kotlin support~~ — **done** (git dep v0.4.0, rev f66d2908) |
 | Bassa | Installer Linux (Fedora) — `.rpm` con `cargo-generate-rpm` o AppImage |
