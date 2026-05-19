@@ -25,8 +25,10 @@ fn main() -> ExitCode {
             paths.sort();
             paths.join("\n")
         }),
+        [op] if op == "prune" => speedy_core::workspace::prune_missing()
+            .map(|n| format!("pruned:{n}")),
         _ => {
-            eprintln!("usage: workspace-fixture <add|remove> <path> | list");
+            eprintln!("usage: workspace-fixture <add|remove> <path> | list | prune");
             return ExitCode::from(2);
         }
     };

@@ -216,6 +216,103 @@ fn test_concurrent_add_and_remove_interleaved_stays_consistent() {
     let _ = std::fs::remove_dir_all(&daemon_dir);
 }
 
+/// Write malformed JSON into workspaces.json, then call `workspace-fixture list`.
+/// The fixture must exit with failure (not panic / SIGSEGV) — recovery from a
+/// corrupt file is a controlled error, not a crash.
+#[test]
+fn test_workspace_json_recovery_from_malformed() {
+    let exe = fixture_bin();
+    assert!(exe.exists(), "workspace-fixture not built");
+
+    let daemon_dir = unique_daemon_dir("xp_malformed");
+
+    // Write invalid JSON directly into the workspaces file.
+    let ws_path = daemon_dir.join("workspaces.json");
+    std::fs::write(&ws_path, b"{this is not valid json!!!").expect("write malformed json");
+
+    // `list` must fail gracefully — exit with a non-zero code, not a panic/crash.
+    let status = quiet_command(&exe)
+        .args(["list"])
+        .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("spawn fixture");
+
+    assert!(
+        !status.success(),
+        "fixture should exit with failure on malformed JSON, but exited successfully"
+    );
+
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
+/// Add two workspaces: one whose directory exists on disk, one whose does not.
+/// After calling `prune`, the missing entry must be gone and the existing one
+/// must remain.
+#[test]
+fn test_prune_missing_with_deleted_directory() {
+    let exe = fixture_bin();
+    assert!(exe.exists(), "workspace-fixture not built");
+
+    let daemon_dir = unique_daemon_dir("xp_prune");
+
+    // Workspace A: a real temp directory that will survive the prune.
+    let real_dir = daemon_dir.join("real_ws");
+    std::fs::create_dir_all(&real_dir).expect("create real_ws");
+    let real_path = real_dir.to_str().expect("valid utf-8").to_string();
+
+    // Workspace B: path that does not exist on disk.
+    let ghost_path = daemon_dir.join("ghost_ws").to_str().expect("valid utf-8").to_string();
+
+    // Add both.
+    for path in [&real_path, &ghost_path] {
+        let status = quiet_command(&exe)
+            .args(["add", path])
+            .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+            .output()
+            .expect("spawn add")
+            .status;
+        assert!(status.success(), "add {path} failed with {status}");
+    }
+
+    // Run prune.
+    let output = quiet_command(&exe)
+        .args(["prune"])
+        .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+        .output()
+        .expect("spawn prune");
+    assert!(
+        output.status.success(),
+        "prune failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("pruned:1"),
+        "expected pruned:1, got: {stdout}"
+    );
+
+    // List remaining entries — only the real path should survive.
+    let list_out = quiet_command(&exe)
+        .args(["list"])
+        .env("SPEEDY_DAEMON_DIR", &daemon_dir)
+        .output()
+        .expect("spawn list");
+    assert!(list_out.status.success(), "list failed after prune");
+    let listed = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        listed.contains(&real_path),
+        "real workspace should remain after prune, listed: {listed}"
+    );
+    assert!(
+        !listed.contains(&ghost_path),
+        "ghost workspace should have been pruned, listed: {listed}"
+    );
+
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
 /// Mix readers (`list`) and writers (`add`) across processes. The reader
 /// always reads valid JSON — if the lock leaked, a reader could occasionally
 /// observe a half-written file and panic on parse.

@@ -212,3 +212,111 @@ fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize>
 
     Ok(parsed.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // ── should_skip ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_should_skip_unsupported_extension() {
+        assert!(Indexer::should_skip(Path::new("file.xyz")));
+        assert!(Indexer::should_skip(Path::new("file.txt")));
+        assert!(Indexer::should_skip(Path::new("file.md")));
+        assert!(Indexer::should_skip(Path::new("file.toml")));
+        assert!(Indexer::should_skip(Path::new("file.json")));
+        assert!(Indexer::should_skip(Path::new("binary")));
+    }
+
+    #[test]
+    fn test_should_skip_supported_extensions() {
+        assert!(!Indexer::should_skip(Path::new("main.rs")));
+        assert!(!Indexer::should_skip(Path::new("app.js")));
+        assert!(!Indexer::should_skip(Path::new("component.tsx")));
+        assert!(!Indexer::should_skip(Path::new("script.py")));
+        assert!(!Indexer::should_skip(Path::new("server.go")));
+        assert!(!Indexer::should_skip(Path::new("module.ts")));
+    }
+
+    #[test]
+    fn test_should_skip_is_case_insensitive() {
+        // Extension matching is case-insensitive (lowercased before matching).
+        assert!(!Indexer::should_skip(Path::new("main.RS")));
+        assert!(!Indexer::should_skip(Path::new("App.JS")));
+        assert!(Indexer::should_skip(Path::new("README.MD")));
+    }
+
+    // ── index_one_file (unsupported / empty) ──────────────────────────────────
+
+    /// A file with an unsupported extension is handled by `should_skip` before
+    /// `index_one_file` is called, but even if `index_one_file` is called
+    /// directly it must not crash; it will parse nothing meaningful.
+    #[test]
+    fn test_index_one_file_unsupported_extension_does_not_crash() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+
+        let xyz = dir.path().join("data.xyz");
+        std::fs::write(&xyz, b"this is not code").unwrap();
+
+        // index_one_file is private, so we test via the blocking helper
+        // by constructing a minimal files list and calling index_files_blocking.
+        let result = index_files_blocking(dir.path(), &store, &[xyz]);
+        assert!(result.is_ok(), "indexing unsupported extension must not error");
+        // The file is in files_skipped because should_skip returns true.
+        let stats = result.unwrap();
+        assert_eq!(stats.files_indexed, 0, "unsupported file must not be counted as indexed");
+        assert_eq!(stats.files_skipped, 1, "unsupported file must be counted as skipped");
+    }
+
+    /// An empty `.rs` file must be indexed without crashing and produces zero symbols.
+    #[test]
+    fn test_index_one_file_empty_rs_does_not_crash() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+
+        let empty = dir.path().join("empty.rs");
+        std::fs::write(&empty, b"").unwrap();
+
+        let result = index_files_blocking(dir.path(), &store, &[empty]);
+        assert!(result.is_ok(), "indexing an empty .rs file must not error");
+        let stats = result.unwrap();
+        // File is parseable (valid Rust — just empty) and produces 0 symbols.
+        assert_eq!(stats.files_indexed, 1, "empty .rs file must be counted as indexed");
+        assert_eq!(stats.symbols_found, 0, "empty .rs file must produce no symbols");
+    }
+
+    /// A `.rs` file with actual Rust code must be indexed and produce at least
+    /// one symbol (sanity-check that the happy path works).
+    #[test]
+    fn test_index_one_file_rust_source_finds_symbols() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+
+        let src = dir.path().join("lib.rs");
+        std::fs::write(&src, b"pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+
+        let result = index_files_blocking(dir.path(), &store, &[src]);
+        assert!(result.is_ok(), "indexing a Rust source file must not error");
+        let stats = result.unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert!(stats.symbols_found > 0, "must have found at least one symbol in lib.rs");
+    }
+
+    /// Calling index_files_blocking with an empty file list must succeed and
+    /// return zero-counts without touching the store.
+    #[test]
+    fn test_index_files_blocking_empty_list_succeeds() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+
+        let result = index_files_blocking(dir.path(), &store, &[]);
+        assert!(result.is_ok());
+        let stats = result.unwrap();
+        assert_eq!(stats.files_indexed, 0);
+        assert_eq!(stats.files_skipped, 0);
+        assert_eq!(stats.symbols_found, 0);
+    }
+}

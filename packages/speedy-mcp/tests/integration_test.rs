@@ -302,7 +302,7 @@ fn test_tools_list_three_tools() {
 
     assert_rpc_success(&resp);
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 9);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec![
@@ -313,6 +313,8 @@ fn test_tools_list_three_tools() {
         "speedy_workspace_remove",
         "speedy_workspace_list",
         "speedy_force_reindex",
+        "speedy_lc_status",
+        "speedy_lc_skeleton",
     ]);
 
     client.stop();
@@ -371,7 +373,7 @@ fn test_full_lifecycle() {
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
     ))
     .unwrap();
-    assert!(list["result"]["tools"].as_array().unwrap().len() == 7);
+    assert!(list["result"]["tools"].as_array().unwrap().len() == 9);
 
     let shutdown: serde_json::Value = serde_json::from_str(&client.send(
         r#"{"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}"#,
@@ -899,7 +901,7 @@ fn test_notification_read_write_ordering() {
     ))
     .unwrap();
     assert_rpc_success(&list);
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 9);
 
     client.stop();
     let _ = std::fs::remove_dir_all(&workdir);
