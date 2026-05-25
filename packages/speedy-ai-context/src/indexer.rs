@@ -1,4 +1,5 @@
 use speedy_core::config::Config;
+use crate::constants::{EMBED_CACHE_MAX_ENTRIES, MMAP_THRESHOLD, PROGRESS_LOG_INTERVAL};
 use crate::db::{ChunkRecord, ProjectSummary, SearchResult, SqliteVectorStore, VectorStore};
 use crate::embed::{self, EmbeddingProvider};
 use crate::hash;
@@ -41,6 +42,19 @@ struct PreparedFile {
 
 const METADATA_MODEL_KEY: &str = "embedding_model";
 
+fn write_index_progress(root: &str, processed: usize, total: usize) {
+    let _ = std::fs::write(
+        Path::new(root).join(".speedy").join("index-progress.json"),
+        format!("{{\"processed\":{processed},\"total\":{total}}}"),
+    );
+}
+
+fn clear_index_progress(root: &str) {
+    let _ = std::fs::remove_file(
+        Path::new(root).join(".speedy").join("index-progress.json"),
+    );
+}
+
 fn log_progress(
     root: &str,
     start: &Instant,
@@ -65,18 +79,9 @@ fn log_progress(
         eta_s,
         "index_directory progress"
     );
-    let _ = std::fs::write(
-        std::path::Path::new(root).join(".speedy").join("index-progress.json"),
-        format!("{{\"processed\":{done},\"total\":{total}}}"),
-    );
+    write_index_progress(root, done, total);
     *last_log = Instant::now();
 }
-
-/// Hard cap on the per-process embed cache. With ~6 KB embedding vectors,
-/// this bounds the cache at roughly 60 MB of RAM — enough to avoid
-/// re-embedding duplicate chunks across an indexing pass while preventing
-/// unbounded growth on workspaces with tens of thousands of unique chunks.
-const EMBED_CACHE_MAX_ENTRIES: usize = 10_000;
 
 impl Indexer {
     pub async fn new(config: &Config) -> Result<Self> {
@@ -201,7 +206,6 @@ impl Indexer {
         let stored_meta = file_meta_cache.get(file_path).cloned();
         let file_path_owned = file_path.to_string();
         let size = metadata.len();
-        const MMAP_THRESHOLD: u64 = 64 * 1024;
 
         let blocking_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(String, Vec<crate::document::Chunk>, Vec<String>)>> {
             let (file_hash, chunks) = if size >= MMAP_THRESHOLD {
@@ -292,13 +296,8 @@ impl Indexer {
         let mut failures = 0usize;
         let mut done = 0usize;
         let mut last_progress_log = Instant::now();
-        const PROGRESS_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
-        // Write initial progress so the GUI can show 0/N immediately.
-        let _ = std::fs::write(
-            std::path::Path::new(path).join(".speedy").join("index-progress.json"),
-            format!("{{\"processed\":0,\"total\":{total}}}"),
-        );
+        write_index_progress(path, 0, total);
 
         let pb = indicatif::ProgressBar::new(total as u64);
         pb.set_style(indicatif::ProgressStyle::default_bar()
@@ -334,7 +333,7 @@ impl Indexer {
             }
 
             if prepared.is_empty() {
-                if last_progress_log.elapsed() >= PROGRESS_LOG_EVERY {
+                if last_progress_log.elapsed() >= PROGRESS_LOG_INTERVAL {
                     log_progress(path, &start, done, total, total_chunks, failures, &mut last_progress_log);
                 }
                 continue;
@@ -373,7 +372,7 @@ impl Indexer {
                         error!("embed_batch failed for batch ({} files): {e:#}", prepared.len());
                         failures += prepared.len();
                         done += 0;
-                        if last_progress_log.elapsed() >= PROGRESS_LOG_EVERY {
+                        if last_progress_log.elapsed() >= PROGRESS_LOG_INTERVAL {
                             log_progress(path, &start, done, total, total_chunks, failures, &mut last_progress_log);
                         }
                         continue;
@@ -445,15 +444,13 @@ impl Indexer {
                 }
             }
 
-            if last_progress_log.elapsed() >= PROGRESS_LOG_EVERY {
+            if last_progress_log.elapsed() >= PROGRESS_LOG_INTERVAL {
                 log_progress(path, &start, done, total, total_chunks, failures, &mut last_progress_log);
             }
         }
 
         pb.finish_and_clear();
-        let _ = std::fs::remove_file(
-            std::path::Path::new(path).join(".speedy").join("index-progress.json"),
-        );
+        clear_index_progress(path);
 
         let duration_ms = start.elapsed().as_millis() as u64;
         tracing::info!(
