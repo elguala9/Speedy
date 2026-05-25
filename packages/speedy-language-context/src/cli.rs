@@ -52,4 +52,8 @@ pub enum Commands {
         #[arg(short = 'k', long, default_value = "10")]
         top_k: usize,
     },
+    #[command(about = "Clear all indexed symbols from the graph store")]
+    ClearIndex,
+    #[command(about = "Incrementally update the index (skips unchanged files)")]
+    Sync,
 }

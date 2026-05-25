@@ -35,6 +35,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 ignore = "0.4"
 blake3 = "1"
 toml = "0.8"
@@ -55,6 +56,9 @@ tree-sitter-scala = "0.26"
 # tree-sitter-kotlin 0.3.8 (crates.io) targets tree-sitter ABI 13 (<0.23), incompatible with
 # our tree-sitter 0.25 (ABI 15). This git rev uses tree-sitter-language = "0.1" (ABI-agnostic).
 tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin", rev = "f66d2908542e93c0204c6c241f794afe4e9cd5d1" }
+# tree-sitter-dart 0.2.0 also uses tree-sitter-language 0.1 (ABI-agnostic) so it links cleanly
+# against our tree-sitter 0.25.
+tree-sitter-dart = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

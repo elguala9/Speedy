@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Once};
 use tokio::sync::Mutex;
@@ -23,6 +24,12 @@ pub struct SearchResult {
     pub line: usize,
     pub text: String,
     pub score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileMeta {
+    pub hash: String,
+    pub last_modified: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +79,8 @@ pub trait VectorStore: Send + Sync {
     async fn get_all_file_paths(&self) -> Result<Vec<String>>;
     async fn count_chunks(&self) -> Result<usize>;
     async fn get_last_hash(&self, file_path: &str) -> Result<Option<String>>;
+    /// Returns hash and last_modified for a file in one query — used for mtime pre-filter.
+    async fn get_file_meta(&self, file_path: &str) -> Result<Option<FileMeta>>;
     async fn ensure_tables(&self) -> Result<()>;
     /// Read a key from the `metadata` table.
     async fn get_metadata(&self, key: &str) -> Result<Option<String>>;
@@ -79,6 +88,16 @@ pub trait VectorStore: Send + Sync {
     async fn set_metadata(&self, key: &str, value: &str) -> Result<()>;
     /// Drop every chunk in the store. Used by `reembed` after a model change.
     async fn clear_all_chunks(&self) -> Result<()>;
+    /// Load the most recent hash+mtime for every file in one query.
+    /// Used by `index_directory` to avoid per-file DB round-trips.
+    async fn get_all_file_meta(&self) -> Result<HashMap<String, FileMeta>>;
+    /// Remove old chunks for each file and insert the new ones, all in a
+    /// single SQLite transaction. More efficient than N separate calls when
+    /// indexing a batch of files.
+    async fn replace_file_chunks_batch(
+        &self,
+        replacements: &[(String, Vec<ChunkRecord>)],
+    ) -> Result<()>;
 }
 
 pub struct SqliteVectorStore {
@@ -97,6 +116,15 @@ impl SqliteVectorStore {
         let db_path = db_dir.join("sac.sqlite");
         let conn = Connection::open(&db_path)
             .context(format!("failed to open database at {}", db_path.display()))?;
+
+        // WAL mode: reduces per-commit fsync overhead significantly for bulk
+        // writes; synchronous=NORMAL is safe for an index (not financial data).
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-32000;
+             PRAGMA temp_store=MEMORY;"
+        ).context("failed to set SQLite WAL pragmas")?;
 
         let store = Arc::new(Self {
             conn: Mutex::new(conn),
@@ -312,6 +340,93 @@ impl VectorStore for SqliteVectorStore {
             conn.prepare("SELECT hash FROM chunks WHERE file_path = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![file_path])?;
         Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+    }
+
+    async fn get_file_meta(&self, file_path: &str) -> Result<Option<FileMeta>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT hash, last_modified FROM chunks WHERE file_path = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![file_path])?;
+        Ok(rows.next()?.map(|r| -> rusqlite::Result<FileMeta> {
+            Ok(FileMeta {
+                hash: r.get::<_, String>(0)?,
+                last_modified: r.get::<_, String>(1)?,
+            })
+        }).transpose()?)
+    }
+
+    async fn get_all_file_meta(&self) -> Result<HashMap<String, FileMeta>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT file_path, hash, last_modified FROM chunks GROUP BY file_path",
+        )?;
+        let map = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    FileMeta {
+                        hash: row.get::<_, String>(1)?,
+                        last_modified: row.get::<_, String>(2)?,
+                    },
+                ))
+            })?
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+        Ok(map)
+    }
+
+    async fn replace_file_chunks_batch(
+        &self,
+        replacements: &[(String, Vec<ChunkRecord>)],
+    ) -> Result<()> {
+        if replacements.is_empty() {
+            return Ok(());
+        }
+        let first = replacements.iter()
+            .flat_map(|(_, chunks)| chunks.iter())
+            .next();
+        let Some(first) = first else { return Ok(()); };
+
+        let dim = first.embedding.len();
+        let conn = self.conn.lock().await;
+        create_vec_table(&conn, dim)?;
+
+        let tx = conn.unchecked_transaction()?;
+        for (file_path, chunks) in replacements {
+            let _ = tx.execute(
+                "DELETE FROM vec_chunks WHERE rowid IN \
+                 (SELECT rowid FROM chunks WHERE file_path = ?1)",
+                params![file_path],
+            );
+            tx.execute("DELETE FROM chunks WHERE file_path = ?1", params![file_path])?;
+            for chunk in chunks {
+                tx.execute(
+                    "INSERT INTO chunks(id, file_path, line, text, hash, last_modified)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET
+                         file_path=excluded.file_path, line=excluded.line,
+                         text=excluded.text, hash=excluded.hash,
+                         last_modified=excluded.last_modified",
+                    params![
+                        chunk.id, chunk.file_path, chunk.line as i64,
+                        chunk.text, chunk.hash, chunk.last_modified,
+                    ],
+                )?;
+                let rowid: i64 = tx.query_row(
+                    "SELECT rowid FROM chunks WHERE id = ?1",
+                    params![chunk.id],
+                    |row| row.get(0),
+                )?;
+                let blob = vec_to_blob(&chunk.embedding);
+                tx.execute("DELETE FROM vec_chunks WHERE rowid = ?1", params![rowid])?;
+                tx.execute(
+                    "INSERT INTO vec_chunks(rowid, embedding) VALUES (?1, ?2)",
+                    params![rowid, blob],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -785,6 +900,16 @@ mod tests {
                 Ok(self.hashes.lock().unwrap().get(file_path).cloned())
             }
 
+            async fn get_file_meta(&self, file_path: &str) -> Result<Option<FileMeta>> {
+                Ok(self.chunks.lock().unwrap()
+                    .iter()
+                    .find(|c| c.file_path == file_path)
+                    .map(|c| FileMeta {
+                        hash: c.hash.clone(),
+                        last_modified: c.last_modified.clone(),
+                    }))
+            }
+
             async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
                 Ok(self.metadata.lock().unwrap().get(key).cloned())
             }
@@ -797,6 +922,35 @@ mod tests {
             async fn clear_all_chunks(&self) -> Result<()> {
                 self.chunks.lock().unwrap().clear();
                 self.hashes.lock().unwrap().clear();
+                Ok(())
+            }
+
+            async fn get_all_file_meta(&self) -> Result<HashMap<String, FileMeta>> {
+                let chunks = self.chunks.lock().unwrap();
+                let mut map = HashMap::new();
+                for c in chunks.iter() {
+                    map.entry(c.file_path.clone()).or_insert(FileMeta {
+                        hash: c.hash.clone(),
+                        last_modified: c.last_modified.clone(),
+                    });
+                }
+                Ok(map)
+            }
+
+            async fn replace_file_chunks_batch(
+                &self,
+                replacements: &[(String, Vec<ChunkRecord>)],
+            ) -> Result<()> {
+                let mut chunks = self.chunks.lock().unwrap();
+                let mut hashes = self.hashes.lock().unwrap();
+                for (file_path, new_chunks) in replacements {
+                    chunks.retain(|c| &c.file_path != file_path);
+                    hashes.remove(file_path.as_str());
+                    for c in new_chunks {
+                        chunks.push(c.clone());
+                        hashes.insert(c.file_path.clone(), c.hash.clone());
+                    }
+                }
                 Ok(())
             }
         }

@@ -27,6 +27,12 @@ pub struct DaemonState {
     pub busy: u32,
     /// Free-form transient message ("Workspace added", "Sync done", ...).
     pub toast: Option<(String, Instant, bool)>,
+    /// Paths currently being reindexed.
+    pub indexing: std::collections::HashSet<String>,
+    /// Paths currently being synced.
+    pub syncing: std::collections::HashSet<String>,
+    /// Per-workspace indexing progress: (processed_files, total_files).
+    pub index_progress: std::collections::HashMap<String, (u64, u64)>,
 }
 
 impl DaemonState {
@@ -123,11 +129,17 @@ impl DaemonBridge {
                 let preserved_toast = s.toast.take();
                 let preserved_ws_status = std::mem::take(&mut s.workspace_status);
                 let preserved_scan = std::mem::take(&mut s.scan_results);
+                let preserved_indexing = std::mem::take(&mut s.indexing);
+                let preserved_syncing = std::mem::take(&mut s.syncing);
+                let preserved_index_progress = std::mem::take(&mut s.index_progress);
                 let prev_busy = s.busy;
                 *s = snapshot;
                 s.toast = preserved_toast;
                 s.workspace_status = preserved_ws_status;
                 s.scan_results = preserved_scan;
+                s.indexing = preserved_indexing;
+                s.syncing = preserved_syncing;
+                s.index_progress = preserved_index_progress;
                 s.busy = prev_busy.saturating_sub(1);
             }
         });
@@ -197,10 +209,14 @@ impl DaemonBridge {
         let client = self.client.clone();
         let state = self.state.clone();
         self.inc_busy();
+        if let Ok(mut s) = self.state.lock() {
+            s.syncing.insert(path.clone());
+        }
         self.rt.spawn(async move {
             let r = client.sync(&path).await;
             if let Ok(mut s) = state.lock() {
                 s.busy = s.busy.saturating_sub(1);
+                s.syncing.remove(&path);
                 match r {
                     Ok(()) => s.set_toast(format!("Synced: {path}"), true),
                     Err(e) => {
@@ -216,10 +232,16 @@ impl DaemonBridge {
         let client = self.client.clone();
         let state = self.state.clone();
         self.inc_busy();
+        if let Ok(mut s) = self.state.lock() {
+            s.indexing.insert(path.clone());
+        }
+        let path_for_poll = path.clone();
         self.rt.spawn(async move {
             let r = client.reindex(&path).await;
             if let Ok(mut s) = state.lock() {
                 s.busy = s.busy.saturating_sub(1);
+                s.indexing.remove(&path);
+                s.index_progress.remove(&path);
                 match r {
                     Ok(_) => s.set_toast(format!("Reindex done: {path}"), true),
                     Err(e) => {
@@ -227,6 +249,37 @@ impl DaemonBridge {
                         s.set_toast(format!("Reindex failed: {e}"), false);
                     }
                 }
+            }
+        });
+
+        // Poll the progress file written by speedy-ai-context while indexing runs.
+        let poll_state = self.state.clone();
+        let poll_path = path_for_poll;
+        self.rt.spawn(async move {
+            let file = std::path::Path::new(&poll_path)
+                .join(".speedy")
+                .join("index-progress.json");
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let still_running = poll_state
+                    .lock()
+                    .map(|s| s.indexing.contains(&poll_path))
+                    .unwrap_or(false);
+                if !still_running {
+                    break;
+                }
+                if let Ok(content) = std::fs::read_to_string(&file) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let processed = v.get("processed").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
+                        if let Ok(mut s) = poll_state.lock() {
+                            s.index_progress.insert(poll_path.clone(), (processed, total));
+                        }
+                    }
+                }
+            }
+            if let Ok(mut s) = poll_state.lock() {
+                s.index_progress.remove(&poll_path);
             }
         });
     }

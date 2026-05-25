@@ -11,6 +11,32 @@ obj/
 .gradle/
 .mvn/
 
+# === Dart / Flutter ===
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+*.g.dart
+*.freezed.dart
+*.gr.dart
+*.config.dart
+*.mocks.dart
+*.chopper.dart
+ios/Pods/
+android/.gradle/
+android/app/build/
+ios/Flutter/Flutter.framework/
+ios/Flutter/Flutter.podspec
+ios/Flutter/flutter_export_environment.sh
+ios/Flutter/Generated.xcconfig
+macos/Flutter/Flutter-Debug.xcconfig
+macos/Flutter/Flutter-Release.xcconfig
+macos/Flutter/ephemeral/
+windows/flutter/ephemeral/
+linux/flutter/ephemeral/
+
 # === CMake / C / C++ ===
 CMakeFiles/
 cmake-build-*/
@@ -62,6 +88,8 @@ Gemfile.lock
 poetry.lock
 composer.lock
 go.sum
+pubspec.lock
+Cargo.lock
 
 # === Log e file temporanei ===
 *.log
@@ -128,3 +156,23 @@ Desktop.ini
 *.pyc
 *.pyo
 *.class
+*.jar
+*.dill
+*.apk
+*.aab
+*.ipa
+*.dex
+*.aar
+*.snap
+*.deb
+*.rpm
+*.dmg
+*.iso
+*.bin
+*.dat
+*.db
+*.sqlite
+*.sqlite3
+*.wasm
+*.pack
+*.idx

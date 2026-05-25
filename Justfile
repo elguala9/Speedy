@@ -78,3 +78,18 @@ fix:
 # Esempio: just release 0.2.0
 release version:
     powershell -NoProfile -File scripts/publish.ps1 {{version}}
+
+# build-dist: compila tutti i binari release e li copia in dist\ (senza installer).
+build-dist:
+    powershell -NoProfile -File scripts/build-release.ps1
+
+# dist: build release di tutti i binari + installer/uninstaller Inno Setup.
+# Output: dist\speedy-setup-<version>.exe e dist\speedy-uninstall-<version>.exe.
+dist:
+    powershell -NoProfile -File scripts/build-installer.ps1
+
+# release-all: dist + ammazza i processi Speedy in esecuzione + installa
+# silenziosamente l'.exe appena prodotto in %LOCALAPPDATA%\Programs\Speedy.
+# Pensato per ciclo dev locale: ricompila, reimpacchetta, reinstalla in un colpo.
+release-all: dist
+    powershell -NoProfile -File scripts/install-local.ps1

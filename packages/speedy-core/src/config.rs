@@ -20,6 +20,11 @@ pub struct Config {
     pub watch_delay_ms: u64,
     #[serde(default = "default_ignore_patterns")]
     pub ignore_patterns: Vec<String>,
+    /// Number of files processed concurrently during `index_directory`.
+    /// Higher values help remote providers (OpenAI, Gemini) where network
+    /// latency dominates; keep at 4 for local Ollama to avoid GPU saturation.
+    #[serde(default = "default_index_concurrency")]
+    pub index_concurrency: usize,
     /// Structured provider config (populated from JSON config cascade + env vars).
     /// This is skipped during TOML deserialization; fields in the TOML are mapped
     /// via the flat fields above for backward compatibility.
@@ -39,18 +44,20 @@ impl Default for Config {
             agent_command: String::new(),
             watch_delay_ms: default_watch_delay_ms(),
             ignore_patterns: default_ignore_patterns(),
+            index_concurrency: default_index_concurrency(),
             provider: ProviderConfig::default(),
         }
     }
 }
 
-fn default_model() -> String { "nomic-embed-text".to_string() }
-fn default_max_chunk_size() -> usize { 1000 }
-fn default_chunk_overlap() -> usize { 200 }
+fn default_model() -> String { "all-minilm".to_string() }
+fn default_max_chunk_size() -> usize { 200 }
+fn default_chunk_overlap() -> usize { 40 }
 fn default_top_k() -> usize { 5 }
 fn default_ollama_url() -> String { "http://localhost:11434".to_string() }
 fn default_provider_type() -> String { "ollama".to_string() }
 fn default_watch_delay_ms() -> u64 { 500 }
+fn default_index_concurrency() -> usize { 4 }
 fn default_ignore_patterns() -> Vec<String> {
     crate::default_ignores::patterns()
         .into_iter()
@@ -86,6 +93,7 @@ impl Config {
             if let Some(v) = ujson.top_k { config.top_k = v; }
             if let Some(v) = ujson.watch_delay_ms { config.watch_delay_ms = v; }
             if let Some(ref v) = ujson.ignore_patterns { config.ignore_patterns = v.clone(); }
+            if let Some(v) = ujson.index_concurrency { config.index_concurrency = v; }
         }
 
         // Apply workspace JSON scalars (higher priority — overwrites user JSON)
@@ -95,6 +103,7 @@ impl Config {
             if let Some(v) = wjson.top_k { config.top_k = v; }
             if let Some(v) = wjson.watch_delay_ms { config.watch_delay_ms = v; }
             if let Some(ref v) = wjson.ignore_patterns { config.ignore_patterns = v.clone(); }
+            if let Some(v) = wjson.index_concurrency { config.index_concurrency = v; }
         }
 
         // --- 4. Build provider config from cascade ---
@@ -165,6 +174,12 @@ impl Config {
             self.provider.api_key = Some(val);
         }
 
+        if let Ok(val) = std::env::var("SPEEDY_INDEX_CONCURRENCY") {
+            if let Ok(v) = val.parse() {
+                self.index_concurrency = v;
+            }
+        }
+
         // Legacy alias: SPEEDY_OLLAMA_URL → base_url (lower priority than SPEEDY_BASE_URL)
         if let Ok(val) = std::env::var("SPEEDY_OLLAMA_URL") {
             self.ollama_url = val.clone();
@@ -226,9 +241,9 @@ mod tests {
     #[test]
     fn test_default_values() {
         let config = Config::default();
-        assert_eq!(config.model, "nomic-embed-text");
-        assert_eq!(config.max_chunk_size, 1000);
-        assert_eq!(config.chunk_overlap, 200);
+        assert_eq!(config.model, "all-minilm");
+        assert_eq!(config.max_chunk_size, 200);
+        assert_eq!(config.chunk_overlap, 40);
         assert_eq!(config.top_k, 5);
         assert_eq!(config.ollama_url, "http://localhost:11434");
         assert_eq!(config.provider_type, "ollama");
@@ -344,7 +359,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all_env();
         let config = Config::from_env();
-        assert_eq!(config.model, "nomic-embed-text");
+        assert_eq!(config.model, "all-minilm");
         assert_eq!(config.ollama_url, "http://localhost:11434");
     }
 }

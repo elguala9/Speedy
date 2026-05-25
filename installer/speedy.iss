@@ -58,9 +58,10 @@ WizardStyle=modern
 ; Notifica Windows del cambio PATH così i nuovi terminali lo vedono subito
 ChangesEnvironment=yes
 
-; Durante un aggiornamento, chiedi di chiudere i processi Speedy in esecuzione
-CloseApplications=yes
-CloseApplicationsFilter=speedy-daemon.exe,speedy-gui.exe,speedy-ai-context.exe,speedy-language-context.exe
+; Disabilitiamo Restart Manager: su Windows 11 può bloccarsi durante l'uninstall
+; mostrando dialog invisibili o aspettando processi che non rispondono.
+; Killiamo noi i processi via taskkill nelle sezioni [Run] e [UninstallRun].
+CloseApplications=no
 
 ; Uninstaller
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
@@ -96,19 +97,27 @@ Name: "pullmodel"; Description: "Scarica il modello predefinito nomic-embed-text
 ; ============================================================
 [Files]
 ; ============================================================
-; Binari principali (ignoreversion = sovrascrive sempre, utile per aggiornamenti)
-Source: "..\dist\speedy-ai-context.exe";        DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-daemon.exe";            DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-cli.exe";               DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-ai-context-mcp.exe";    DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-gui.exe";               DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-language-context.exe";      DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\speedy-language-context-mcp.exe";  DestDir: "{app}"; Flags: ignoreversion
+; Binari principali
+;   ignoreversion       — sovrascrive sempre (utile per aggiornamenti)
+;   restartreplace      — durante install, se il file è in uso, schedula a reboot
+;   uninsrestartdelete  — durante uninstall, se il file è in uso, schedula a reboot
+;                         (così l'uninstaller non si blocca su lock di antivirus/RM)
+Source: "..\dist\speedy-ai-context.exe";        DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-daemon.exe";            DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-cli.exe";               DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-ai-context-mcp.exe";    DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-gui.exe";               DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-language-context.exe";      DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-language-context-mcp.exe";  DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
 ; Documentazione — copiata nella cartella di installazione
 Source: "..\installer\README.txt";       DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\INSTALLATION.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\FOR-IA.md";        DestDir: "{app}"; Flags: ignoreversion
+
+; Script di disinstallazione di emergenza — se l'uninstaller di Inno Setup
+; si blocca per qualsiasi motivo, l'utente può lanciare questo script.
+Source: "..\installer\uninstall-emergency.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 
 ; ============================================================
@@ -204,22 +213,20 @@ Type: filesandordirs; Name: "{app}\logs"
 [UninstallRun]
 ; ============================================================
 
-; 1. Stop graceful del daemon via IPC.
-; skipifdoesntexist: tollera installazioni parziali.
-; waituntilterminated: aspetta che speedy-cli.exe finisca prima di procedere.
-Filename: "{app}\speedy-cli.exe"; \
-  Parameters: "daemon stop"; \
-  Flags: runhidden skipifdoesntexist waituntilterminated; \
-  RunOnceId: "StopDaemon"; \
-  StatusMsg: "Arresto Speedy Daemon in corso..."
-
-; 2. Force-kill dei processi rimasti (in caso il daemon non risponda all'IPC).
-; taskkill esce con errore se il processo non e' in esecuzione — ignorato da Inno Setup.
+; Force-kill di tutti i processi Speedy.
+; NIENTE speedy-cli daemon stop qui: può bloccarsi 10s su IPC timeout e non
+; aggiunge nulla a taskkill /F. taskkill esce con errore se il processo non
+; è in esecuzione — ignorato da Inno Setup.
 Filename: "{sys}\taskkill.exe"; \
   Parameters: "/F /IM speedy-daemon.exe /T"; \
   Flags: runhidden; \
   RunOnceId: "KillDaemon"; \
-  StatusMsg: "Chiusura forzata processi Speedy..."
+  StatusMsg: "Chiusura processi Speedy..."
+
+Filename: "{sys}\taskkill.exe"; \
+  Parameters: "/F /IM speedy-cli.exe /T"; \
+  Flags: runhidden; \
+  RunOnceId: "KillCli"
 
 Filename: "{sys}\taskkill.exe"; \
   Parameters: "/F /IM speedy-gui.exe /T"; \

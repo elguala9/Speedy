@@ -59,9 +59,26 @@ impl Indexer {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
+        // Must stay aligned with parser::tree_sitter_parser::parse_file —
+        // any extension parsed there must NOT be skipped here, otherwise
+        // the parser is never reached and the language appears unsupported.
         !matches!(
             ext.as_str(),
-            "rs" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "py" | "pyi" | "go"
+            "rs"
+                | "js" | "jsx" | "mjs" | "cjs"
+                | "ts" | "tsx"
+                | "py" | "pyi"
+                | "go"
+                | "c" | "h"
+                | "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "h++"
+                | "java"
+                | "cs"
+                | "rb" | "rake"
+                | "php" | "php5" | "php7" | "php8"
+                | "swift"
+                | "kt" | "kts"
+                | "scala" | "sc"
+                | "dart"
         )
     }
 }
@@ -71,7 +88,10 @@ fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
     let mut files_indexed = 0usize;
     let mut files_skipped = 0usize;
     let mut symbols_found = 0usize;
+    let mut last_progress_log = Instant::now();
+    const PROGRESS_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
+    let t_walk = Instant::now();
     let walker = WalkBuilder::new(root)
         .git_ignore(true)
         .git_global(true)
@@ -79,6 +99,13 @@ fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
         .add_custom_ignore_filename(".speedyignore")
         .follow_links(false)
         .build();
+
+    tracing::info!(
+        target: "language-context",
+        root = %root.display(),
+        walk_setup_ms = t_walk.elapsed().as_millis() as u64,
+        "full_index starting"
+    );
 
     for entry in walker.flatten() {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -103,6 +130,20 @@ fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
                 files_skipped += 1;
             }
         }
+
+        if last_progress_log.elapsed() >= PROGRESS_LOG_EVERY {
+            let elapsed = started.elapsed();
+            tracing::info!(
+                target: "language-context",
+                files_indexed,
+                files_skipped,
+                symbols = symbols_found,
+                elapsed_s = elapsed.as_secs(),
+                files_per_sec = format!("{:.2}", files_indexed as f64 / elapsed.as_secs_f64().max(0.001)),
+                "full_index progress"
+            );
+            last_progress_log = Instant::now();
+        }
     }
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -111,6 +152,17 @@ fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
     let _ = store.set_meta("last_files_indexed", &files_indexed.to_string());
     let _ = store.set_meta("last_symbols_found", &symbols_found.to_string());
     let _ = store.set_meta("last_index_duration_ms", &duration_ms.to_string());
+
+    tracing::info!(
+        target: "language-context",
+        root = %root.display(),
+        files_indexed,
+        files_skipped,
+        symbols = symbols_found,
+        duration_ms,
+        files_per_sec = format!("{:.2}", files_indexed as f64 / started.elapsed().as_secs_f64().max(0.001)),
+        "full_index complete"
+    );
 
     Ok(IndexStats {
         files_indexed,
@@ -163,10 +215,14 @@ fn index_files_blocking(root: &Path, store: &GraphStore, files: &[PathBuf]) -> R
 /// Returns the number of symbols indexed, or `usize::MAX` if the file was
 /// unchanged and therefore skipped.
 fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize> {
+    let t_total = Instant::now();
+    let t_read = Instant::now();
     let content = match std::fs::read(path) {
         Ok(c) => c,
         Err(_) => return Ok(usize::MAX),
     };
+    let read_ms = t_read.elapsed().as_millis() as u64;
+    let bytes_len = content.len();
     let hash = blake3::hash(&content).to_hex().to_string();
     let rel = path
         .strip_prefix(root)
@@ -187,7 +243,11 @@ fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize>
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    let t_parse = Instant::now();
     let parsed = parse_file(path, &content);
+    let parse_ms = t_parse.elapsed().as_millis() as u64;
+
+    let t_db = Instant::now();
     let file_id = store.upsert_file(&rel, mtime, &hash)?;
     // Cascade-deletes both symbols and their edges.
     store.delete_file_symbols(file_id)?;
@@ -198,16 +258,59 @@ fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize>
         let id = store.insert_symbol(file_id, sym)?;
         name_to_id.insert(sym.name.clone(), id);
     }
+    let db_symbols_ms = t_db.elapsed().as_millis() as u64;
 
     // Second pass: extract and insert call-site edges (same-file only).
+    let t_edges = Instant::now();
     let edge_refs = parse_edges(path, &content, &parsed);
+    let edges_parse_ms = t_edges.elapsed().as_millis() as u64;
+    let t_edges_db = Instant::now();
+    let mut edges_inserted = 0usize;
     for edge_ref in &edge_refs {
         if let (Some(&src_id), Some(&dst_id)) = (
             name_to_id.get(&edge_ref.src_name),
             name_to_id.get(&edge_ref.dst_name),
         ) {
-            let _ = store.insert_edge(src_id, dst_id, edge_ref.kind.clone());
+            if store.insert_edge(src_id, dst_id, edge_ref.kind.clone()).is_ok() {
+                edges_inserted += 1;
+            }
         }
+    }
+    let edges_db_ms = t_edges_db.elapsed().as_millis() as u64;
+
+    let total_ms = t_total.elapsed().as_millis() as u64;
+    tracing::debug!(
+        target: "language-context",
+        file = %rel,
+        bytes = bytes_len,
+        symbols = parsed.len(),
+        edges_seen = edge_refs.len(),
+        edges_inserted,
+        read_ms,
+        parse_ms,
+        db_symbols_ms,
+        edges_parse_ms,
+        edges_db_ms,
+        total_ms,
+        "file indexed"
+    );
+    // Surface only the genuinely slow files as info, otherwise the per-file
+    // line stays at debug and the aggregate progress / final summary are
+    // what the user normally reads in the log.
+    if total_ms >= 250 {
+        tracing::info!(
+            target: "language-context",
+            file = %rel,
+            bytes = bytes_len,
+            symbols = parsed.len(),
+            read_ms,
+            parse_ms,
+            db_symbols_ms,
+            edges_parse_ms,
+            edges_db_ms,
+            total_ms,
+            "slow file (>250ms)"
+        );
     }
 
     Ok(parsed.len())

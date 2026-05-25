@@ -37,6 +37,8 @@ pub enum Commands {
     Index {
         #[arg(default_value = ".")]
         subdir: String,
+        #[arg(long, help = "Clear the existing index before re-indexing")]
+        clear: bool,
     },
     #[command(about = "Query the index with semantic search")]
     Query {
@@ -81,6 +83,8 @@ pub enum Commands {
     },
     #[command(about = "Show the status of all toggleable features")]
     Features,
+    #[command(about = "Clear all indexed chunks from the vector database")]
+    ClearIndex,
 }
 
 #[derive(Subcommand)]

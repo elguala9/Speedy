@@ -1,3 +1,15 @@
+/// Snaps `idx` down to the nearest valid UTF-8 char boundary in `s`.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 pub struct Chunk {
     pub text: String,
     pub line: usize,
@@ -29,9 +41,16 @@ impl Document {
         let separators = ["\n\n", "\n", ". ", " ", ""];
         let mut chunks = Vec::new();
         let mut start = 0;
+        // O(n) line counter: track how far we've scanned for newlines so each
+        // chunk's line number is derived by scanning only the gap since the last
+        // chunk, never rescanning from the beginning (old code was O(n²)).
+        let mut current_line = 1usize;
+        let mut line_counter_pos = 0usize;
 
         while start < content.len() {
-            let end_target = (start + chunk_size).min(content.len());
+            // chunk_size is a byte count; snap to char boundary so we never
+            // slice mid-codepoint (e.g. emoji like U+FE0F span 3 bytes).
+            let end_target = floor_char_boundary(content, (start + chunk_size).min(content.len()));
 
             let split_pos = if end_target >= content.len() {
                 content.len()
@@ -51,7 +70,11 @@ impl Document {
             };
 
             let chunk_text = &content[start..split_pos];
-            let line_num = content[..start].matches('\n').count() + 1;
+            for b in content[line_counter_pos..start].bytes() {
+                if b == b'\n' { current_line += 1; }
+            }
+            line_counter_pos = start;
+            let line_num = current_line;
 
             chunks.push(Chunk {
                 text: chunk_text.to_string(),
@@ -62,11 +85,19 @@ impl Document {
                 break;
             }
 
-            start = if split_pos > overlap {
-                split_pos - overlap
-            } else {
-                split_pos
-            };
+            // Forward-progress invariant: the next window MUST start strictly
+            // past the previous one. The original code only checked
+            // `split_pos > overlap` (absolute), which is wrong: when the
+            // separator hit lands inside the overlap region, `split_pos -
+            // overlap` can land *before* the current `start` and we loop
+            // forever (or scan billions of overlapping windows and OOM).
+            // Compare relative to `start` instead, and fall back to
+            // `split_pos` (no overlap on this transition) when the overlap
+            // would otherwise erase our progress.
+            // Also snap the overlap offset to a char boundary for the same
+            // reason as end_target above.
+            let with_overlap = floor_char_boundary(content, split_pos.saturating_sub(overlap));
+            start = if with_overlap > start { with_overlap } else { split_pos };
         }
 
         chunks
@@ -176,5 +207,16 @@ mod tests {
         let text = "paragraph one\n\nparagraph two. sentence b\n\nparagraph three";
         let chunks = Document::chunk_file(text, 30, 0);
         assert!(chunks.len() >= 3);
+    }
+
+    #[test]
+    fn test_chunk_emoji_no_panic() {
+        // U+FE0F (variation selector-16) is 3 bytes; chunk_size intentionally
+        // lands mid-codepoint to reproduce the production panic.
+        let text = "# Code Coverage\r\n\r\nUse **coverage** ️ to track tests.\r\n\r\nMore text here to force chunking past the emoji boundary.";
+        let chunks = Document::chunk_file(text, 40, 10);
+        assert!(!chunks.is_empty());
+        let rejoined: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert!(rejoined.contains("coverage"));
     }
 }

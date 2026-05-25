@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
@@ -439,26 +441,29 @@ fn start_workspace_watcher(
                                 continue;
                             }
 
-                            let mut spawn_cmd = std::process::Command::new(&exe);
-                            spawn_cmd
-                                .args(["-p", &p, "index", &file_path])
-                                .env("SPEEDY_NO_DAEMON", "1")
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null());
-                            #[cfg(windows)]
-                            {
-                                use std::os::windows::process::CommandExt;
-                                spawn_cmd.creation_flags(CREATE_NO_WINDOW);
-                            }
-                            if let Ok(mut child) = spawn_cmd.spawn() {
-                                let pid = child.id();
-                                pids.lock().unwrap().insert(pid);
-                                let _ = child.wait();
-                                pids.lock().unwrap().remove(&pid);
+                            let features = slc_features::load_features(Some(&p));
+
+                            if features.speedy_indexer {
+                                let mut spawn_cmd = std::process::Command::new(&exe);
+                                spawn_cmd
+                                    .args(["-p", &p, "index", &file_path])
+                                    .env("SPEEDY_NO_DAEMON", "1")
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null());
+                                #[cfg(windows)]
+                                {
+                                    use std::os::windows::process::CommandExt;
+                                    spawn_cmd.creation_flags(CREATE_NO_WINDOW);
+                                }
+                                if let Ok(mut child) = spawn_cmd.spawn() {
+                                    let pid = child.id();
+                                    pids.lock().unwrap().insert(pid);
+                                    let _ = child.wait();
+                                    pids.lock().unwrap().remove(&pid);
+                                }
                             }
 
                             // Also update the SLC symbol graph when language_context is enabled.
-                            let features = slc_features::load_features(Some(&p));
                             if features.language_context {
                                 if let Some(slc_exe) = slc_features::find_slc_exe() {
                                     let mut slc_cmd = std::process::Command::new(&slc_exe);
@@ -1305,6 +1310,12 @@ async fn handle_sync(
     let canonical = Path::new(raw_path).canonicalize()?;
     let path_str = canonical.to_string_lossy().to_string();
 
+    let features = slc_features::load_features(Some(&path_str));
+    if !features.speedy_indexer {
+        info!(target: "sync", workspace = %path_str, "Sync skipped (speedy_indexer disabled)");
+        return Ok(());
+    }
+
     let started = Instant::now();
     let exe = find_speedy_exe();
     let mut cmd = tokio::process::Command::new(&exe);
@@ -1333,56 +1344,220 @@ async fn handle_reindex(raw_path: &str) -> Result<String> {
     let canonical = Path::new(raw_path).canonicalize()?;
     let path_str = canonical.to_string_lossy().to_string();
 
-    let started = Instant::now();
-    let exe = find_speedy_exe();
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.current_dir(&path_str)
-        .args(["index", "."])
-        .env("SPEEDY_NO_DAEMON", "1");
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd.output().await?;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    // Hard wall-clock cap on the ai-context reindex. The child must NEVER be
+    // able to wedge the daemon: if it stops making progress (deadlock on a
+    // lock, infinite loop, runaway embed loop), we kill it and continue
+    // with SLC. 30 min is generous because the first index on a big repo
+    // can blow through thousands of sequential Ollama embed calls.
+    const AI_CONTEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+    const AI_CONTEXT_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        error!(target: "index", workspace = %path_str, ms = elapsed_ms, stderr = %stderr.trim(), "Reindex failed");
-        anyhow::bail!("reindex failed: {}", stderr.trim());
-    }
-    info!(target: "index", workspace = %path_str, ms = elapsed_ms, stdout = %stdout.trim(), "Reindex done");
-
-    // Also full-index the symbol graph when language_context is enabled.
+    // Load features first so we can skip steps that are disabled.
     let features = slc_features::load_features(Some(&path_str));
+
+    let started = Instant::now();
+
+    // AI-context reindex — only when the speedy_indexer feature is enabled.
+    let (stdout, ai_ok, ai_timed_out) = if features.speedy_indexer {
+        let exe = find_speedy_exe();
+        let mut cmd = tokio::process::Command::new(&exe);
+        cmd.current_dir(&path_str)
+            .args(["index", "--clear", "."])
+            .env("SPEEDY_NO_DAEMON", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        info!(target: "index", workspace = %path_str, timeout_s = AI_CONTEXT_TIMEOUT.as_secs(), "AI-context reindex starting");
+
+        let child = cmd.spawn()?;
+        let workspace_for_heartbeat = path_str.clone();
+        let started_for_heartbeat = started;
+        let heartbeat = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(AI_CONTEXT_HEARTBEAT);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ticker.tick().await; // first tick fires immediately, skip it
+            loop {
+                ticker.tick().await;
+                let secs = started_for_heartbeat.elapsed().as_secs();
+                info!(
+                    target: "index",
+                    workspace = %workspace_for_heartbeat,
+                    elapsed_s = secs,
+                    "AI-context reindex still running (Ollama embed loop is the usual bottleneck)"
+                );
+            }
+        });
+
+        let wait_fut = child.wait_with_output();
+        let (output_opt, timed_out) = match tokio::time::timeout(AI_CONTEXT_TIMEOUT, wait_fut).await {
+            Ok(Ok(o)) => (Some(o), false),
+            Ok(Err(e)) => {
+                error!(target: "index", workspace = %path_str, error = %e, "AI-context wait error");
+                (None, false)
+            }
+            Err(_) => {
+                // Timeout fired. `kill_on_drop` will reap the process when `child`
+                // is dropped at function exit, but the future already consumed it,
+                // so we cannot drop it explicitly here — `wait_with_output` moves
+                // `child`. The kill propagates via the OS once the pipes close.
+                (None, true)
+            }
+        };
+        heartbeat.abort();
+
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        let (stdout, stderr, exit_code, ok) = match output_opt {
+            Some(o) => (
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+                o.status.code(),
+                o.status.success(),
+            ),
+            None => (String::new(), String::new(), None, false),
+        };
+
+        if ok {
+            info!(target: "index", workspace = %path_str, ms = elapsed_ms, stdout = %stdout.trim(), "AI-context reindex done");
+        } else if timed_out {
+            error!(
+                target: "index",
+                workspace = %path_str,
+                ms = elapsed_ms,
+                timeout_s = AI_CONTEXT_TIMEOUT.as_secs(),
+                "AI-context reindex TIMED OUT and was killed — continuing with SLC if enabled"
+            );
+        } else {
+            // Don't bail: SLC (speedy-language-context) is an independent feature
+            // and must still get a chance to run even when AI-context fails on
+            // this workspace (e.g. a panic on a single bad file). We log loudly
+            // and proceed.
+            error!(
+                target: "index",
+                workspace = %path_str,
+                ms = elapsed_ms,
+                exit_code = ?exit_code,
+                stdout = %stdout.trim(),
+                stderr = %stderr.trim(),
+                "AI-context reindex failed (continuing with SLC if enabled)"
+            );
+        }
+
+        (stdout, ok, timed_out)
+    } else {
+        info!(target: "index", workspace = %path_str, "AI-context reindex skipped (speedy_indexer disabled)");
+        (String::new(), true, false)
+    };
+    let mut slc_ok: Option<bool> = None;
+    let mut slc_err: Option<String> = None;
     if features.language_context {
-        if let Some(slc_exe) = slc_features::find_slc_exe() {
-            let mut slc_cmd = tokio::process::Command::new(&slc_exe);
-            slc_cmd
-                .arg("--path").arg(&path_str)
-                .arg("index")
-                .env("SPEEDY_NO_DAEMON", "1")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            #[cfg(windows)]
-            slc_cmd.creation_flags(CREATE_NO_WINDOW);
-            match slc_cmd.output().await {
-                Ok(o) if o.status.success() => {
-                    info!(target: "index", workspace = %path_str, "SLC index done");
-                }
-                Ok(o) => {
-                    warn!(target: "index", workspace = %path_str, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "SLC index failed");
-                }
-                Err(e) => {
-                    warn!(target: "index", workspace = %path_str, error = %e, "failed to run slc index");
+        match slc_features::find_slc_exe() {
+            Some(slc_exe) => {
+                // Clear the SLC graph DB before a full re-index so deleted files
+                // don't leave stale symbols behind.
+                let mut slc_clear_cmd = tokio::process::Command::new(&slc_exe);
+                slc_clear_cmd
+                    .arg("--path").arg(&path_str)
+                    .arg("clear-index")
+                    .env("SPEEDY_NO_DAEMON", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(windows)]
+                slc_clear_cmd.creation_flags(CREATE_NO_WINDOW);
+                let _ = slc_clear_cmd.output().await;
+
+                info!(target: "index", workspace = %path_str, exe = %slc_exe.display(), "SLC index starting");
+                let slc_started = Instant::now();
+                let mut slc_cmd = tokio::process::Command::new(&slc_exe);
+                slc_cmd
+                    .arg("--path").arg(&path_str)
+                    .arg("index")
+                    .env("SPEEDY_NO_DAEMON", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                #[cfg(windows)]
+                slc_cmd.creation_flags(CREATE_NO_WINDOW);
+                match slc_cmd.output().await {
+                    Ok(o) => {
+                        let slc_ms = slc_started.elapsed().as_millis() as u64;
+                        let so = String::from_utf8_lossy(&o.stdout);
+                        let se = String::from_utf8_lossy(&o.stderr);
+                        if o.status.success() {
+                            info!(
+                                target: "index",
+                                workspace = %path_str,
+                                ms = slc_ms,
+                                stdout = %so.trim(),
+                                "SLC index done"
+                            );
+                            slc_ok = Some(true);
+                        } else {
+                            error!(
+                                target: "index",
+                                workspace = %path_str,
+                                ms = slc_ms,
+                                exit_code = ?o.status.code(),
+                                stderr = %se.trim(),
+                                stdout = %so.trim(),
+                                "SLC index failed"
+                            );
+                            slc_ok = Some(false);
+                            slc_err = Some(se.trim().to_string());
+                        }
+                    }
+                    Err(e) => {
+                        error!(target: "index", workspace = %path_str, error = %e, "failed to spawn SLC index");
+                        slc_ok = Some(false);
+                        slc_err = Some(e.to_string());
+                    }
                 }
             }
-        } else {
-            tracing::debug!("speedy-language-context not found; skipping slc index");
+            None => {
+                warn!(
+                    target: "index",
+                    workspace = %path_str,
+                    "speedy-language-context executable not found next to daemon or in PATH — skipping SLC index"
+                );
+            }
         }
+    } else {
+        info!(target: "index", workspace = %path_str, "SLC index skipped (language_context feature disabled)");
     }
 
-    Ok(stdout.trim().to_string())
+    // Decide overall result. If AI-context failed AND SLC didn't succeed,
+    // surface an error to the caller. Otherwise return a summary so the GUI
+    // toast tells the user which half ran.
+    let ai_status = if !features.speedy_indexer {
+        "skipped"
+    } else if ai_ok {
+        "ok"
+    } else if ai_timed_out {
+        "timeout"
+    } else {
+        "failed"
+    };
+    let summary = format!(
+        "ai-context: {} | slc: {}",
+        ai_status,
+        match slc_ok {
+            Some(true) => "ok".to_string(),
+            Some(false) => format!("failed ({})", slc_err.as_deref().unwrap_or("see logs")),
+            None => if features.language_context { "not-found".to_string() } else { "disabled".to_string() },
+        }
+    );
+
+    // Only bail if something that was supposed to run actually failed.
+    if features.speedy_indexer && !ai_ok && slc_ok != Some(true) {
+        anyhow::bail!("reindex failed — {summary}");
+    }
+
+    Ok(if features.speedy_indexer && ai_ok { stdout.trim().to_string() } else { summary })
 }
 
 async fn handle_workspace_status(
@@ -1547,6 +1722,91 @@ fn tail_log_blocking(logs_dir: &Path, n: usize) -> Vec<LogLine> {
         .collect()
 }
 
+/// Circular log file: keeps the most recent `max_lines` log entries.
+/// When the line count reaches `max_lines`, the file is rewritten keeping
+/// only the last `max_lines / 2` lines. This means disk usage is bounded to
+/// roughly `max_lines` lines at all times, with no separate rotation files.
+struct CircularLogWriter {
+    path: PathBuf,
+    file: BufWriter<File>,
+    line_count: usize,
+    max_lines: usize,
+}
+
+impl CircularLogWriter {
+    fn open(path: PathBuf, max_lines: usize) -> std::io::Result<Self> {
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let existing_lines = content.lines().count();
+        let (file, line_count) = if existing_lines > max_lines {
+            let kept = Self::tail_lines(&content, max_lines / 2);
+            std::fs::write(&path, kept.as_bytes())?;
+            (OpenOptions::new().append(true).open(&path)?, max_lines / 2)
+        } else {
+            (OpenOptions::new().create(true).append(true).open(&path)?, existing_lines)
+        };
+        Ok(Self { path, file: BufWriter::new(file), line_count, max_lines })
+    }
+
+    fn tail_lines(content: &str, n: usize) -> String {
+        let lines: Vec<&str> = content.lines().collect();
+        let from = lines.len().saturating_sub(n);
+        let mut out = lines[from..].join("\n");
+        if !out.is_empty() { out.push('\n'); }
+        out
+    }
+
+    fn trim(&mut self) -> std::io::Result<()> {
+        self.file.flush()?;
+        let content = std::fs::read_to_string(&self.path)?;
+        let trimmed = Self::tail_lines(&content, self.max_lines / 2);
+        let new_count = trimmed.lines().count();
+        std::fs::write(&self.path, trimmed.as_bytes())?;
+        self.file = BufWriter::new(OpenOptions::new().append(true).open(&self.path)?);
+        self.line_count = new_count;
+        Ok(())
+    }
+}
+
+impl Write for CircularLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.file.write(buf)?;
+        self.line_count += buf[..n].iter().filter(|&&b| b == b'\n').count();
+        if self.line_count >= self.max_lines {
+            let _ = self.trim();
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// `MakeWriter` adapter so `CircularLogWriter` can be used with
+/// `tracing_subscriber::fmt::layer().with_writer(...)`.
+#[derive(Clone)]
+struct CircularLogMaker(Arc<StdMutex<CircularLogWriter>>);
+
+impl CircularLogMaker {
+    fn new(path: PathBuf, max_lines: usize) -> std::io::Result<Self> {
+        CircularLogWriter::open(path, max_lines).map(|w| Self(Arc::new(StdMutex::new(w))))
+    }
+}
+
+struct CircularLogGuard<'a>(std::sync::MutexGuard<'a, CircularLogWriter>);
+
+impl Write for CircularLogGuard<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.0.write(buf) }
+    fn flush(&mut self) -> std::io::Result<()> { self.0.flush() }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CircularLogMaker {
+    type Writer = CircularLogGuard<'a>;
+    fn make_writer(&'a self) -> Self::Writer {
+        CircularLogGuard(self.0.lock().unwrap())
+    }
+}
+
 fn main() -> Result<()> {
     let cli = DaemonCli::parse();
 
@@ -1559,12 +1819,9 @@ fn main() -> Result<()> {
 
     let logs_dir = speedy_core::daemon_util::exe_log_dir();
 
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "daemon.log");
-    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
-    // Leak the guard so the writer thread keeps flushing for the entire daemon
-    // lifetime; without this, dropping the guard at end-of-main can race the
-    // last log writes.
-    Box::leak(Box::new(file_guard));
+    let log_path = logs_dir.join("daemon.log");
+    let circular_log = CircularLogMaker::new(log_path, 5000)
+        .expect("failed to open daemon log file");
 
     let (log_tx, _initial_rx) = broadcast::channel::<LogLine>(LOG_BROADCAST_CAPACITY);
 
@@ -1581,7 +1838,7 @@ fn main() -> Result<()> {
         .with(
             tracing_subscriber::fmt::layer()
                 .json()
-                .with_writer(file_writer),
+                .with_writer(circular_log),
         )
         .with(BroadcastLayer { tx: log_tx.clone() })
         .init();

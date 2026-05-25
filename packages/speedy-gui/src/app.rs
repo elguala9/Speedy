@@ -185,6 +185,19 @@ impl App for SpeedyApp {
                     }
                     if state_snapshot.busy > 0 {
                         ui.spinner();
+                        let n_idx = state_snapshot.indexing.len();
+                        let n_syn = state_snapshot.syncing.len();
+                        let label = match (n_idx, n_syn) {
+                            (i, 0) if i > 0 => format!("indexing {i}…"),
+                            (0, s) if s > 0 => format!("syncing {s}…"),
+                            (i, s) if i > 0 && s > 0 => format!("idx {i} + sync {s}…"),
+                            _ => "lavorando…".to_string(),
+                        };
+                        ui.label(
+                            RichText::new(label)
+                                .color(Color32::from_rgb(180, 180, 80))
+                                .small(),
+                        );
                     }
                 });
             });
