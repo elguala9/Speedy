@@ -62,7 +62,7 @@ fn main() {
         println!("║   All E2E tests passed!               ║");
         println!("╚════════════════════════════════════════╝");
     } else {
-        let model = std::env::var("SPEEDY_MODEL").unwrap_or_else(|_| "nomic-embed-text".to_string());
+        let model = std::env::var("SPEEDY_MODEL").unwrap_or_else(|_| "all-minilm".to_string());
         println!("╔════════════════════════════════════════╗");
         println!("║   E2E skipped (ollama unavailable)    ║");
         println!("║   Install the model:                  ║");

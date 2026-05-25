@@ -266,6 +266,12 @@ impl GraphStore {
         )?;
         Ok(())
     }
+
+    pub fn clear_all(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("DELETE FROM slc_files;")?;
+        Ok(())
+    }
 }
 
 fn row_to_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<Symbol> {

@@ -55,6 +55,7 @@ pub fn parse_file(path: &Path, source: &[u8]) -> Vec<ParsedSymbol> {
         "swift" => parse_with(tree_sitter_swift::LANGUAGE.into(), source, Lang::Swift),
         "kt" | "kts" => parse_with(tree_sitter_kotlin::LANGUAGE.into(), source, Lang::Kotlin),
         "scala" | "sc" => parse_with(tree_sitter_scala::LANGUAGE.into(), source, Lang::Scala),
+        "dart" => parse_with(tree_sitter_dart::LANGUAGE.into(), source, Lang::Dart),
         _ => Vec::new(),
     }
 }
@@ -98,6 +99,7 @@ pub fn parse_edges(path: &Path, source: &[u8], symbols: &[ParsedSymbol]) -> Vec<
         "swift" => (tree_sitter_swift::LANGUAGE.into(), Lang::Swift),
         "kt" | "kts" => (tree_sitter_kotlin::LANGUAGE.into(), Lang::Kotlin),
         "scala" | "sc" => (tree_sitter_scala::LANGUAGE.into(), Lang::Scala),
+        "dart" => (tree_sitter_dart::LANGUAGE.into(), Lang::Dart),
         _ => return Vec::new(),
     };
     let mut parser = Parser::new();
@@ -226,6 +228,7 @@ enum Lang {
     Swift,
     Kotlin,
     Scala,
+    Dart,
 }
 
 fn parse_with(grammar: tree_sitter::Language, source: &[u8], lang: Lang) -> Vec<ParsedSymbol> {
@@ -291,6 +294,7 @@ fn extract_symbol(node: Node<'_>, source: &[u8], lang: Lang) -> Option<ParsedSym
         Lang::Swift => extract_swift(node, source),
         Lang::Kotlin => extract_kotlin(node, source),
         Lang::Scala => extract_scala(node, source),
+        Lang::Dart => extract_dart(node, source),
     }
 }
 
@@ -763,6 +767,45 @@ fn extract_scala(node: Node<'_>, source: &[u8]) -> Option<ParsedSymbol> {
     Some(make_symbol(kind, name, node, source, is_public))
 }
 
+// ─── Dart ─────────────────────────────────────────────────────────────
+
+fn extract_dart(node: Node<'_>, source: &[u8]) -> Option<ParsedSymbol> {
+    // nielsenko/tree-sitter-dart node types — see node-types.json:
+    //   function_signature  → both top-level functions and methods
+    //   class_definition / class_declaration → class
+    //   mixin_declaration   → treat as Class (no dedicated Mixin kind)
+    //   enum_declaration    → enum
+    //   extension_declaration / extension_type_declaration → Class
+    //   constructor_signature / factory_constructor_signature → Function
+    //   type_alias          → Type
+    let kind = match node.kind() {
+        "function_signature" => SymbolKind::Function,
+        "class_definition" | "class_declaration" => SymbolKind::Class,
+        "mixin_declaration" => SymbolKind::Class,
+        "enum_declaration" => SymbolKind::Enum,
+        "extension_declaration" | "extension_type_declaration" => SymbolKind::Class,
+        "constructor_signature" | "factory_constructor_signature" => SymbolKind::Function,
+        "type_alias" => SymbolKind::Type,
+        _ => return None,
+    };
+
+    let name = node
+        .child_by_field_name("name")
+        .map(|n| node_text(n, source).to_string())
+        .or_else(|| {
+            child_text_with_kind(node, source, &["identifier", "type_identifier"])
+        })
+        .unwrap_or_default();
+    if name.is_empty() {
+        return None;
+    }
+
+    // Dart convention: leading underscore → library-private.
+    let is_public = !name.starts_with('_');
+
+    Some(make_symbol(kind, name, node, source, is_public))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,6 +1069,31 @@ mod tests {
                 .any(|s| s.name == "Singleton" && matches!(s.kind, crate::graph::SymbolKind::Struct)),
             "Singleton object missing"
         );
+    }
+
+    #[test]
+    fn parse_dart_class_and_function() {
+        let src = b"class Greeter {\n  String name;\n  Greeter(this.name);\n  String greet() => 'Hi $name';\n  void _secret() {}\n}\nint topLevel() => 42;\n";
+        let syms = parse_file(&PathBuf::from("t.dart"), src);
+        assert!(
+            !syms.is_empty(),
+            "expected at least one Dart symbol, got none — check tree-sitter-dart node types"
+        );
+        assert!(
+            syms.iter().any(|s| s.name == "Greeter"
+                && matches!(s.kind, crate::graph::SymbolKind::Class)),
+            "Greeter class missing; got: {:?}",
+            syms.iter().map(|s| (&s.name, &s.kind)).collect::<Vec<_>>()
+        );
+        assert!(
+            syms.iter()
+                .any(|s| s.name == "topLevel" && matches!(s.kind, crate::graph::SymbolKind::Function)),
+            "topLevel function missing"
+        );
+        let secret = syms.iter().find(|s| s.name == "_secret");
+        if let Some(s) = secret {
+            assert!(!s.is_public, "_secret should be library-private");
+        }
     }
 
     #[test]

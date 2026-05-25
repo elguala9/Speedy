@@ -19,7 +19,13 @@ fn main() -> Result<()> {
     use tracing_subscriber::prelude::*;
     let logs_dir = speedy_core::daemon_util::exe_log_dir();
     let file_appender = tracing_appender::rolling::daily(&logs_dir, "speedy-ai-context.log");
-    let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+    // Leak the guard so the non-blocking writer thread keeps flushing for the
+    // entire process lifetime. Without this, if the process exits via Ctrl+C
+    // or a hard kill, the in-flight log lines can be lost — including the
+    // final "index done" summary.
+    Box::leak(Box::new(file_guard));
+
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::registry()
@@ -35,7 +41,30 @@ fn main() -> Result<()> {
     }
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async_main(cli))
+    let cmd_started = std::time::Instant::now();
+    let result = rt.block_on(async {
+        tokio::select! {
+            res = async_main(cli) => res,
+            _ = tokio::signal::ctrl_c() => {
+                tracing::warn!(
+                    target: "ai-context",
+                    elapsed_ms = cmd_started.elapsed().as_millis() as u64,
+                    "interrupted by user (Ctrl+C) — exiting before completion"
+                );
+                Err(anyhow::anyhow!("interrupted by Ctrl+C"))
+            }
+        }
+    });
+
+    if let Err(e) = &result {
+        tracing::error!(
+            target: "ai-context",
+            error = %e,
+            elapsed_ms = cmd_started.elapsed().as_millis() as u64,
+            "command failed"
+        );
+    }
+    result
 }
 
 fn resolve_socket_name(cli: &Cli) -> String {
@@ -158,13 +187,25 @@ fn should_skip_daemon_check(cli: &Cli) -> bool {
 
     if let Some(cmd) = &cli.command {
         return matches!(cmd,
-            Commands::Daemon
+            // Per flow.md §6 + §7: lanciando `speedy-ai-context.exe` a mano,
+            // i sub-comandi puntuali (index/query/context/sync/reembed)
+            // devono girare interamente in-process — niente auto-spawn del
+            // daemon, niente registrazione automatica del workspace. Il
+            // path "via daemon" è invece `speedy-cli` → daemon → exec, che
+            // spawna comunque `speedy-ai-context.exe` con SPEEDY_NO_DAEMON=1.
+            Commands::Index { .. }
+            | Commands::Query { .. }
+            | Commands::Context
+            | Commands::Sync
+            | Commands::Reembed
+            | Commands::Daemon
             | Commands::Workspace { .. }
             | Commands::InstallHooks { .. }
             | Commands::UninstallHooks { .. }
             | Commands::Enable { .. }
             | Commands::Disable { .. }
             | Commands::Features
+            | Commands::ClearIndex
         );
     }
 
@@ -247,19 +288,44 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     match &cli.command {
-        Some(Commands::Index { subdir }) => {
+        Some(Commands::Index { subdir, clear }) => {
+            let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
+            if *clear {
+                indexer.db.clear_all_chunks().await?;
+            }
             let stats = indexer.index_directory(subdir).await?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            info!(
+                target: "ai-context",
+                command = "index",
+                subdir = %subdir,
+                files = stats.files,
+                chunks = stats.chunks,
+                elapsed_ms,
+                "index done"
+            );
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             } else {
-                println!("Indexed {} files, {} chunks", stats.files, stats.chunks);
+                println!("Indexed {} files, {} chunks in {} ms", stats.files, stats.chunks, elapsed_ms);
             }
         }
         Some(Commands::Query { query, top_k }) => {
+            let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let k = top_k.unwrap_or(5);
             let results = indexer.query(query, k).await?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            info!(
+                target: "ai-context",
+                command = "query",
+                query = %query,
+                top_k = k,
+                results = results.len(),
+                elapsed_ms,
+                "query done"
+            );
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else {
@@ -271,8 +337,18 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Context) => {
+            let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let ctx = indexer.project_context().await?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            info!(
+                target: "ai-context",
+                command = "context",
+                files = ctx.file_count,
+                chunks = ctx.chunk_count,
+                elapsed_ms,
+                "context done"
+            );
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&ctx)?);
             } else {
@@ -283,20 +359,42 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Sync) => {
+            let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.sync_all().await?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            info!(
+                target: "ai-context",
+                command = "sync",
+                added = stats.files,
+                updated = stats.chunks,
+                removed = stats.removed,
+                elapsed_ms,
+                "sync done"
+            );
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             } else {
                 println!(
-                    "Synced: {} added, {} updated, {} removed",
-                    stats.files, stats.chunks, stats.removed
+                    "Synced: {} added, {} updated, {} removed in {} ms",
+                    stats.files, stats.chunks, stats.removed, elapsed_ms
                 );
             }
         }
         Some(Commands::Reembed) => {
+            let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.reembed().await?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            info!(
+                target: "ai-context",
+                command = "reembed",
+                model = %indexer.model,
+                files = stats.files,
+                chunks = stats.chunks,
+                elapsed_ms,
+                "reembed done"
+            );
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             } else {
@@ -410,6 +508,15 @@ async fn async_main(cli: Cli) -> Result<()> {
                 println!("{} language_context (code intelligence)", bullet(f.language_context));
             }
         }
+        Some(Commands::ClearIndex) => {
+            let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
+            indexer.db.clear_all_chunks().await?;
+            if cli.json {
+                println!("{}", serde_json::json!({ "cleared": true }));
+            } else {
+                println!("Index cleared.");
+            }
+        }
         None => {
             anyhow::bail!("No command specified. Use --help for usage.");
         }
@@ -489,27 +596,36 @@ mod tests {
     }
 
     #[test]
-    fn test_skip_daemon_check_does_not_skip_index() {
+    fn test_skip_daemon_check_skips_index() {
+        // `index` is a standalone one-shot — it must not auto-spawn or talk
+        // to the daemon. See the comment in should_skip_daemon_check.
         let cli = make_cli(&["speedy", "index"]);
-        assert!(!should_skip_daemon_check(&cli));
+        assert!(should_skip_daemon_check(&cli));
     }
 
     #[test]
-    fn test_skip_daemon_check_does_not_skip_query() {
+    fn test_skip_daemon_check_skips_query() {
+        // Per flow.md §6 + §7: subcomando one-shot da CLI → standalone.
         let cli = make_cli(&["speedy", "query", "test"]);
-        assert!(!should_skip_daemon_check(&cli));
+        assert!(should_skip_daemon_check(&cli));
     }
 
     #[test]
-    fn test_skip_daemon_check_does_not_skip_sync() {
+    fn test_skip_daemon_check_skips_sync() {
         let cli = make_cli(&["speedy", "sync"]);
-        assert!(!should_skip_daemon_check(&cli));
+        assert!(should_skip_daemon_check(&cli));
     }
 
     #[test]
-    fn test_skip_daemon_check_does_not_skip_context() {
+    fn test_skip_daemon_check_skips_context() {
         let cli = make_cli(&["speedy", "context"]);
-        assert!(!should_skip_daemon_check(&cli));
+        assert!(should_skip_daemon_check(&cli));
+    }
+
+    #[test]
+    fn test_skip_daemon_check_skips_reembed() {
+        let cli = make_cli(&["speedy", "reembed"]);
+        assert!(should_skip_daemon_check(&cli));
     }
 
     #[test]

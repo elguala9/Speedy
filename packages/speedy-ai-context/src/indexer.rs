@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexStats {
@@ -29,9 +28,55 @@ pub struct Indexer {
     pub root: String,
     pub model: String,
     embed_cache: Mutex<HashMap<String, Vec<f32>>>,
+    pub index_concurrency: usize,
+}
+
+struct PreparedFile {
+    file_path: String,
+    chunks: Vec<crate::document::Chunk>,
+    chunk_hashes: Vec<String>,
+    file_hash: String,
+    last_modified: String,
 }
 
 const METADATA_MODEL_KEY: &str = "embedding_model";
+
+fn log_progress(
+    root: &str,
+    start: &Instant,
+    done: usize,
+    total: usize,
+    chunks: usize,
+    failures: usize,
+    last_log: &mut Instant,
+) {
+    let elapsed = start.elapsed();
+    let rate = done as f64 / elapsed.as_secs_f64().max(0.001);
+    let remaining = total.saturating_sub(done);
+    let eta_s = if rate > 0.0 { (remaining as f64 / rate) as u64 } else { 0 };
+    tracing::info!(
+        target: "ai-context",
+        processed = done,
+        total,
+        chunks,
+        failures,
+        elapsed_s = elapsed.as_secs(),
+        files_per_sec = format!("{rate:.2}"),
+        eta_s,
+        "index_directory progress"
+    );
+    let _ = std::fs::write(
+        std::path::Path::new(root).join(".speedy").join("index-progress.json"),
+        format!("{{\"processed\":{done},\"total\":{total}}}"),
+    );
+    *last_log = Instant::now();
+}
+
+/// Hard cap on the per-process embed cache. With ~6 KB embedding vectors,
+/// this bounds the cache at roughly 60 MB of RAM — enough to avoid
+/// re-embedding duplicate chunks across an indexing pass while preventing
+/// unbounded growth on workspaces with tens of thousands of unique chunks.
+const EMBED_CACHE_MAX_ENTRIES: usize = 10_000;
 
 impl Indexer {
     pub async fn new(config: &Config) -> Result<Self> {
@@ -95,6 +140,7 @@ impl Indexer {
             root,
             model: config.model.clone(),
             embed_cache: Mutex::new(HashMap::new()),
+            index_concurrency: config.index_concurrency,
         })
     }
 
@@ -110,14 +156,149 @@ impl Indexer {
         Ok(stats)
     }
 
+    /// Read, hash-check, and chunk a file without performing any embedding or
+    /// DB writes. Returns `None` if the file is unchanged (mtime/hash match)
+    /// or should be skipped (oversized, binary, non-UTF-8).
+    async fn prepare_file(
+        &self,
+        file_path: &str,
+        file_meta_cache: &HashMap<String, crate::db::FileMeta>,
+    ) -> Result<Option<PreparedFile>> {
+        let path = Path::new(file_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let metadata = fs::metadata(path).await
+            .context(format!("failed to read metadata for: {file_path}"))?;
+
+        if metadata.len() > crate::MAX_INDEXABLE_FILE_SIZE {
+            tracing::warn!(
+                file = %file_path,
+                size = metadata.len(),
+                limit = crate::MAX_INDEXABLE_FILE_SIZE,
+                "skipping oversized file"
+            );
+            return Ok(None);
+        }
+
+        let last_modified = metadata.modified().ok().map(|t| {
+            let dt: chrono::DateTime<chrono::Utc> = t.into();
+            dt.to_rfc3339()
+        }).unwrap_or_default();
+
+        // Mtime pre-filter: skip file read if mtime unchanged.
+        if !last_modified.is_empty() {
+            if let Some(m) = file_meta_cache.get(file_path) {
+                if m.last_modified == last_modified {
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Move the CPU-heavy work (read + hash + chunk) off the async reactor.
+        // For files >= 64 KB we memory-map instead of heap-copying the bytes.
+        let stored_meta = file_meta_cache.get(file_path).cloned();
+        let file_path_owned = file_path.to_string();
+        let size = metadata.len();
+        const MMAP_THRESHOLD: u64 = 64 * 1024;
+
+        let blocking_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(String, Vec<crate::document::Chunk>, Vec<String>)>> {
+            let (file_hash, chunks) = if size >= MMAP_THRESHOLD {
+                let file = std::fs::File::open(&file_path_owned)?;
+                // SAFETY: the file is only read; no writer is assumed during indexing.
+                let mmap = unsafe { memmap2::Mmap::map(&file)? };
+                drop(file);
+                let s = match std::str::from_utf8(&mmap) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::debug!(file = %file_path_owned, "skipping non-UTF-8 file");
+                        return Ok(None);
+                    }
+                };
+                let fh = hash::hash_bytes(s.as_bytes());
+                if let Some(ref m) = stored_meta {
+                    if m.hash == fh { return Ok(None); }
+                }
+                let ch = document::Document::chunk_file(s, 1000, 200);
+                (fh, ch)
+            } else {
+                let bytes = match std::fs::read(&file_path_owned) {
+                    Ok(b) => b,
+                    Err(_) => return Ok(None),
+                };
+                let s = match String::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::debug!(file = %file_path_owned, "skipping non-UTF-8 file");
+                        return Ok(None);
+                    }
+                };
+                let fh = hash::hash_bytes(s.as_bytes());
+                if let Some(ref m) = stored_meta {
+                    if m.hash == fh { return Ok(None); }
+                }
+                let ch = document::Document::chunk_file(&s, 1000, 200);
+                (fh, ch)
+            };
+            let chunk_hashes = chunks.iter()
+                .map(|c| hash::hash_bytes(c.text.as_bytes()))
+                .collect::<Vec<_>>();
+            Ok(Some((file_hash, chunks, chunk_hashes)))
+        })
+        .await
+        .context("file processing task panicked")?
+        .context(format!("failed to process: {file_path}"))?;
+
+        let Some((file_hash, chunks, chunk_hashes)) = blocking_result else {
+            return Ok(None);
+        };
+
+        Ok(Some(PreparedFile {
+            file_path: file_path.to_string(),
+            chunks,
+            chunk_hashes,
+            file_hash,
+            last_modified,
+        }))
+    }
+
     pub async fn index_directory(&self, path: &str) -> Result<IndexStats> {
         let start = Instant::now();
+
+        let t_walk = Instant::now();
         let filter = FileFilter::new(path);
         let files: Vec<String> = filter.filtered_files().into_iter()
             .filter(|f| !FileFilter::is_binary(Path::new(f)))
             .collect();
+        let walk_ms = t_walk.elapsed().as_millis() as u64;
         let total = files.len();
-        let mut total_chunks = 0;
+
+        // Load all stored file meta in one DB query — eliminates per-file round-trips.
+        let file_meta_cache = self.db.get_all_file_meta().await
+            .unwrap_or_default();
+
+        tracing::info!(
+            target: "ai-context",
+            root = %path,
+            files = total,
+            cached_files = file_meta_cache.len(),
+            walk_ms,
+            "index_directory: file scan done, starting per-file indexing"
+        );
+
+        let concurrency = self.index_concurrency;
+        let mut total_chunks = 0usize;
+        let mut failures = 0usize;
+        let mut done = 0usize;
+        let mut last_progress_log = Instant::now();
+        const PROGRESS_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+        // Write initial progress so the GUI can show 0/N immediately.
+        let _ = std::fs::write(
+            std::path::Path::new(path).join(".speedy").join("index-progress.json"),
+            format!("{{\"processed\":0,\"total\":{total}}}"),
+        );
 
         let pb = indicatif::ProgressBar::new(total as u64);
         pb.set_style(indicatif::ProgressStyle::default_bar()
@@ -125,89 +306,344 @@ impl Indexer {
             .unwrap()
             .progress_chars("##-"));
 
-        for file_path in &files {
-            let short = if file_path.len() > 50 {
-                format!("...{}", &file_path[file_path.len()-47..])
-            } else {
-                file_path.clone()
-            };
-            pb.set_message(short);
-            match self.index_file(file_path).await {
-                Ok(chunks) => total_chunks += chunks,
-                Err(e) => error!("Failed: {file_path}: {e}"),
+        for batch in files.chunks(concurrency) {
+            // Phase 1: read + chunk all files in this batch concurrently (no embed yet).
+            let prep_futs: Vec<_> = batch.iter()
+                .map(|f| self.prepare_file(f, &file_meta_cache))
+                .collect();
+            let prep_results = futures::future::join_all(prep_futs).await;
+
+            let mut prepared: Vec<PreparedFile> = Vec::new();
+            for (file_path, result) in batch.iter().zip(prep_results) {
+                match result {
+                    Ok(Some(p)) => prepared.push(p),
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("Failed to prepare {file_path}: {e:#}");
+                        tracing::error!(
+                            target: "ai-context",
+                            file = %file_path,
+                            error = %format!("{:#}", e),
+                            "file prepare failed"
+                        );
+                        failures += 1;
+                    }
+                }
+                done += 1;
+                pb.inc(1);
             }
-            pb.inc(1);
+
+            if prepared.is_empty() {
+                if last_progress_log.elapsed() >= PROGRESS_LOG_EVERY {
+                    log_progress(path, &start, done, total, total_chunks, failures, &mut last_progress_log);
+                }
+                continue;
+            }
+
+            // Phase 2: collect embeddings needed — split into cache hits and misses.
+            // Pre-extracting hits before the embed call guards against eviction
+            // during Phase 3 overwriting a hash we already resolved.
+            let mut hit_map: HashMap<String, Vec<f32>> = HashMap::new();
+            let mut miss_hashes: Vec<String> = Vec::new();
+            let mut miss_texts: Vec<String> = Vec::new();
+            let mut miss_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+            {
+                let cache = self.embed_cache.lock().await;
+                for prep in &prepared {
+                    for (ci, hash) in prep.chunk_hashes.iter().enumerate() {
+                        if hit_map.contains_key(hash.as_str()) {
+                            continue;
+                        }
+                        if let Some(emb) = cache.get(hash) {
+                            hit_map.insert(hash.clone(), emb.clone());
+                        } else if miss_set.insert(hash.clone()) {
+                            miss_hashes.push(hash.clone());
+                            miss_texts.push(prep.chunks[ci].text.clone());
+                        }
+                    }
+                }
+            }
+
+            // Phase 3: single embed_batch for ALL uncached chunks across the batch.
+            let new_map: HashMap<String, Vec<f32>> = if !miss_texts.is_empty() {
+                let texts: Vec<&str> = miss_texts.iter().map(|s| s.as_str()).collect();
+                let batch_embs = match self.embedder.embed_batch(&texts).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        error!("embed_batch failed for batch ({} files): {e:#}", prepared.len());
+                        failures += prepared.len();
+                        done += 0;
+                        if last_progress_log.elapsed() >= PROGRESS_LOG_EVERY {
+                            log_progress(path, &start, done, total, total_chunks, failures, &mut last_progress_log);
+                        }
+                        continue;
+                    }
+                };
+                if batch_embs.len() != miss_hashes.len() {
+                    error!(
+                        "embed_batch returned {} vectors for {} texts — skipping batch",
+                        batch_embs.len(), miss_hashes.len()
+                    );
+                    failures += prepared.len();
+                    continue;
+                }
+                let mut cache = self.embed_cache.lock().await;
+                let mut map = HashMap::with_capacity(miss_hashes.len());
+                for (hash, emb) in miss_hashes.iter().zip(batch_embs) {
+                    if cache.len() >= EMBED_CACHE_MAX_ENTRIES {
+                        if let Some(victim) = cache.keys().next().cloned() {
+                            cache.remove(&victim);
+                        }
+                    }
+                    cache.insert(hash.clone(), emb.clone());
+                    map.insert(hash.clone(), emb);
+                }
+                map
+            } else {
+                HashMap::new()
+            };
+
+            // Merge hits + new embeddings into a single lookup table.
+            let all_embeddings: HashMap<String, Vec<f32>> = hit_map.into_iter()
+                .chain(new_map)
+                .collect();
+
+            // Phase 4: build ChunkRecords and write all files in one DB transaction.
+            let mut replacements: Vec<(String, Vec<crate::db::ChunkRecord>)> =
+                Vec::with_capacity(prepared.len());
+            for prep in &prepared {
+                let records: Vec<crate::db::ChunkRecord> = prep.chunks.iter()
+                    .zip(prep.chunk_hashes.iter())
+                    .enumerate()
+                    .map(|(ci, (chunk, hash))| crate::db::ChunkRecord {
+                        id: format!("{}:{}", prep.file_path, ci),
+                        file_path: prep.file_path.clone(),
+                        line: chunk.line,
+                        text: chunk.text.clone(),
+                        hash: prep.file_hash.clone(),
+                        embedding: all_embeddings.get(hash.as_str())
+                            .cloned()
+                            .expect("every chunk must have an embedding"),
+                        last_modified: prep.last_modified.clone(),
+                    })
+                    .collect();
+                total_chunks += records.len();
+                replacements.push((prep.file_path.clone(), records));
+            }
+
+            if let Err(e) = self.db.replace_file_chunks_batch(&replacements).await {
+                error!("DB batch write failed: {e:#}");
+                failures += replacements.len();
+            } else {
+                if let Some(last) = replacements.last() {
+                    let short = if last.0.len() > 50 {
+                        format!("...{}", &last.0[last.0.len()-47..])
+                    } else {
+                        last.0.clone()
+                    };
+                    pb.set_message(short);
+                }
+            }
+
+            if last_progress_log.elapsed() >= PROGRESS_LOG_EVERY {
+                log_progress(path, &start, done, total, total_chunks, failures, &mut last_progress_log);
+            }
         }
 
         pb.finish_and_clear();
+        let _ = std::fs::remove_file(
+            std::path::Path::new(path).join(".speedy").join("index-progress.json"),
+        );
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        tracing::info!(
+            target: "ai-context",
+            root = %path,
+            files = total,
+            chunks = total_chunks,
+            failures,
+            walk_ms,
+            duration_ms,
+            files_per_sec = format!("{:.2}", total as f64 / start.elapsed().as_secs_f64().max(0.001)),
+            "index_directory complete"
+        );
 
         Ok(IndexStats {
             files: total,
             chunks: total_chunks,
             removed: 0,
-            duration_ms: start.elapsed().as_millis() as u64,
+            duration_ms,
         })
     }
 
     pub async fn index_file(&self, file_path: &str) -> Result<usize> {
+        let t_total = Instant::now();
         let path = Path::new(file_path);
         if !path.exists() {
             self.db.remove_chunks_for_file(file_path).await?;
             return Ok(0);
         }
 
-        let content = match fs::read_to_string(path).await {
-            Ok(c) => c,
-            Err(_) => return Ok(0),
-        };
-        let file_hash = hash::hash_file(path).await
-            .context(format!("failed to hash file: {file_path}"))?;
         let metadata = fs::metadata(path).await
             .context(format!("failed to read metadata for: {file_path}"))?;
-        let last_modified = metadata
-            .modified()
-            .ok()
-            .map(|t| {
-                let dt: chrono::DateTime<Utc> = t.into();
-                dt.to_rfc3339()
-            })
-            .unwrap_or_default();
 
-        let chunks = document::Document::chunk_file(&content, 1000, 200);
-        let mut records = Vec::with_capacity(chunks.len());
+        // Size guard: refuse to load multi-MB/GB files into memory. Without
+        // this, a single oversized file (generated Dart, build artifact,
+        // data dump) makes `read_to_string` allocate the whole file at once
+        // and abort the process with OOM. See lib.rs for the rationale.
+        if metadata.len() > crate::MAX_INDEXABLE_FILE_SIZE {
+            tracing::warn!(
+                file = %file_path,
+                size = metadata.len(),
+                limit = crate::MAX_INDEXABLE_FILE_SIZE,
+                "skipping oversized file"
+            );
+            self.db.remove_chunks_for_file(file_path).await?;
+            return Ok(0);
+        }
 
-        for chunk in &chunks {
-            let embedding = {
-                let chunk_hash = crate::hash::hash_bytes(chunk.text.as_bytes());
-                let cached = {
-                    let cache = self.embed_cache.lock().await;
-                    cache.get(&chunk_hash).cloned()
-                };
-                if let Some(emb) = cached {
-                    emb
-                } else {
-                    let emb = self.embedder.embed(&chunk.text).await
-                        .context(format!("failed to embed chunk at line {}", chunk.line))?;
-                    let mut cache = self.embed_cache.lock().await;
-                    cache.insert(chunk_hash, emb.clone());
-                    emb
+        // Compute mtime before any file read — used for the fast-path skip.
+        let last_modified = metadata.modified().ok().map(|t| {
+            let dt: chrono::DateTime<Utc> = t.into();
+            dt.to_rfc3339()
+        }).unwrap_or_default();
+
+        // One DB query gives us both stored hash and stored mtime.
+        let stored_meta = self.db.get_file_meta(file_path).await.unwrap_or(None);
+
+        // Mtime pre-filter: skip file read entirely if mtime is unchanged.
+        if !last_modified.is_empty() {
+            if let Some(ref m) = stored_meta {
+                if m.last_modified == last_modified {
+                    return Ok(0);
                 }
-            };
+            }
+        }
+
+        let t_read = Instant::now();
+        let bytes = match fs::read(path).await {
+            Ok(b) => b,
+            Err(_) => return Ok(0),
+        };
+        // Skip files that aren't valid UTF-8 — they're binary blobs that
+        // slipped past the extension filter (no point chunking them).
+        let content = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::debug!(file = %file_path, "skipping non-UTF-8 file");
+                return Ok(0);
+            }
+        };
+        let read_ms = t_read.elapsed().as_millis() as u64;
+        let bytes_len = content.len();
+        let file_hash = hash::hash_bytes(content.as_bytes());
+
+        // Hash fallback: mtime changed (e.g. git checkout) but content is identical.
+        if let Some(ref m) = stored_meta {
+            if m.hash == file_hash {
+                return Ok(0);
+            }
+        }
+
+        let t_chunk = Instant::now();
+        let chunks = document::Document::chunk_file(&content, 1000, 200);
+        let chunk_ms = t_chunk.elapsed().as_millis() as u64;
+
+        let mut embed_total_ms: u64 = 0;
+        let mut embed_calls: usize = 0;
+        let mut embed_cache_hits: usize = 0;
+        let mut embed_max_ms: u64 = 0;
+
+        // Precompute chunk hashes; check cache for each chunk.
+        let chunk_hashes: Vec<String> = chunks.iter()
+            .map(|c| hash::hash_bytes(c.text.as_bytes()))
+            .collect();
+        let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
+        let mut uncached_indices: Vec<usize> = Vec::new();
+        {
+            let cache = self.embed_cache.lock().await;
+            for (i, ch) in chunk_hashes.iter().enumerate() {
+                if let Some(emb) = cache.get(ch) {
+                    embed_cache_hits += 1;
+                    embeddings[i] = Some(emb.clone());
+                } else {
+                    uncached_indices.push(i);
+                }
+            }
+        }
+
+        // Batch-embed all uncached chunks in a single provider call.
+        if !uncached_indices.is_empty() {
+            let texts: Vec<&str> = uncached_indices.iter()
+                .map(|&i| chunks[i].text.as_str())
+                .collect();
+            let t_embed = Instant::now();
+            let batch = self.embedder.embed_batch(&texts).await
+                .context(format!("failed to embed chunks in {file_path}"))?;
+            let embed_ms = t_embed.elapsed().as_millis() as u64;
+            embed_total_ms += embed_ms;
+            embed_calls += 1;
+            if embed_ms > embed_max_ms { embed_max_ms = embed_ms; }
+            if embed_ms > 2000 {
+                tracing::warn!(
+                    target: "ai-context",
+                    file = %file_path,
+                    chunks = texts.len(),
+                    embed_ms,
+                    "slow embed batch (>2s)"
+                );
+            }
+            let mut cache = self.embed_cache.lock().await;
+            for (pos, &chunk_idx) in uncached_indices.iter().enumerate() {
+                let emb = batch[pos].clone();
+                let ch = &chunk_hashes[chunk_idx];
+                if cache.len() >= EMBED_CACHE_MAX_ENTRIES {
+                    if let Some(victim) = cache.keys().next().cloned() {
+                        cache.remove(&victim);
+                    }
+                }
+                cache.insert(ch.clone(), emb.clone());
+                embeddings[chunk_idx] = Some(emb);
+            }
+        }
+
+        let mut records = Vec::with_capacity(chunks.len());
+        for (idx, (chunk, emb)) in chunks.iter().zip(embeddings).enumerate() {
             records.push(ChunkRecord {
-                id: Uuid::new_v4().to_string(),
+                id: format!("{}:{}", file_path, idx),
                 file_path: file_path.to_string(),
                 line: chunk.line,
                 text: chunk.text.clone(),
                 hash: file_hash.clone(),
-                embedding,
+                embedding: emb.expect("every chunk must have an embedding"),
                 last_modified: last_modified.clone(),
             });
         }
 
+        let t_db = Instant::now();
         self.db.remove_chunks_for_file(file_path).await
             .context(format!("failed to remove old chunks for: {file_path}"))?;
         self.db.insert_chunks(&records).await
             .context("failed to insert chunks into database")?;
+        let db_ms = t_db.elapsed().as_millis() as u64;
+
+        let total_ms = t_total.elapsed().as_millis() as u64;
+        tracing::info!(
+            target: "ai-context",
+            file = %file_path,
+            bytes = bytes_len,
+            chunks = chunks.len(),
+            embed_calls,
+            embed_cache_hits,
+            embed_total_ms,
+            embed_avg_ms = if embed_calls > 0 { embed_total_ms / embed_calls as u64 } else { 0 },
+            embed_max_ms,
+            read_ms,
+            chunk_ms,
+            db_ms,
+            total_ms,
+            "file indexed"
+        );
 
         Ok(records.len())
     }
@@ -242,6 +678,7 @@ impl Indexer {
             root,
             model,
             embed_cache: Mutex::new(HashMap::new()),
+            index_concurrency: 4,
         }
     }
 
@@ -306,6 +743,51 @@ mod tests {
         (idx, stub)
     }
 
+    /// Regression test for the OOM bug: oversized files must be skipped
+    /// without ever being read into memory. We write a file just over the
+    /// size limit and check that index_file returns Ok(0) and emits no
+    /// embed calls.
+    #[tokio::test]
+    async fn test_index_file_skips_oversized_file() {
+        let dir = TempDir::new().unwrap();
+        let huge = dir.path().join("huge.rs");
+        // 5 MiB + 1 byte — just over the cap.
+        let size = (crate::MAX_INDEXABLE_FILE_SIZE as usize) + 1;
+        std::fs::write(&huge, vec![b'x'; size]).unwrap();
+
+        let (idx, stub) = make_indexer(&dir).await;
+        let n = idx.index_file(huge.to_str().unwrap()).await.unwrap();
+        assert_eq!(n, 0, "oversized file must produce zero chunks");
+        assert!(
+            stub.calls.lock().unwrap().is_empty(),
+            "oversized file must not trigger any embed call"
+        );
+    }
+
+    /// Regression test for the chunker infinite-loop bug: a file with a
+    /// `\n\n` separator just past the overlap boundary used to make
+    /// `chunk_file` spin forever or allocate billions of windows. With the
+    /// forward-progress invariant in place it must terminate quickly.
+    #[test]
+    fn test_chunk_file_forward_progress_on_adversarial_overlap() {
+        // 1 KiB of garbage, a `\n\n` at index 199-200, then more garbage.
+        // chunk_size=1000, overlap=200 (the production defaults).
+        let mut content = String::with_capacity(3000);
+        content.push_str(&"x".repeat(199));
+        content.push_str("\n\n");
+        content.push_str(&"y".repeat(2000));
+        let chunks = crate::document::Document::chunk_file(&content, 1000, 200);
+        // Must terminate; with the bug it spun forever.
+        assert!(
+            chunks.len() < 20,
+            "expected modest chunk count, got {}",
+            chunks.len()
+        );
+        // And cover the whole input.
+        let last = chunks.last().unwrap();
+        assert!(last.text.ends_with('y'), "last chunk should reach end of content");
+    }
+
     #[tokio::test]
     async fn test_index_file_nonexistent_removes_stale_chunks() {
         let dir = TempDir::new().unwrap();
@@ -356,13 +838,13 @@ mod tests {
         let calls_after_first = stub.calls.lock().unwrap().len();
         assert_eq!(calls_after_first, n1, "one embed call per chunk on first index");
 
-        // Second call: same content → embed_cache hit → no new embed calls
+        // Second call: same content → file-level hash-skip → 0 chunks returned, no new embed calls
         let n2 = idx.index_file(file.to_str().unwrap()).await.unwrap();
         let calls_after_second = stub.calls.lock().unwrap().len();
-        assert_eq!(n1, n2, "same file produces same chunk count");
+        assert_eq!(n2, 0, "unchanged file is skipped (hash-skip fast path)");
         assert_eq!(
             calls_after_first, calls_after_second,
-            "no new embed calls when content is in cache"
+            "no new embed calls when file hash is unchanged"
         );
     }
 
@@ -542,6 +1024,16 @@ mod tests {
                 Ok(self.hashes.lock().unwrap().get(file_path).cloned())
             }
 
+            async fn get_file_meta(&self, file_path: &str) -> anyhow::Result<Option<crate::db::FileMeta>> {
+                Ok(self.chunks.lock().unwrap()
+                    .iter()
+                    .find(|c| c.file_path == file_path)
+                    .map(|c| crate::db::FileMeta {
+                        hash: c.hash.clone(),
+                        last_modified: c.last_modified.clone(),
+                    }))
+            }
+
             async fn get_metadata(&self, key: &str) -> anyhow::Result<Option<String>> {
                 Ok(self.metadata.lock().unwrap().get(key).cloned())
             }
@@ -557,6 +1049,35 @@ mod tests {
             async fn clear_all_chunks(&self) -> anyhow::Result<()> {
                 self.chunks.lock().unwrap().clear();
                 self.hashes.lock().unwrap().clear();
+                Ok(())
+            }
+
+            async fn get_all_file_meta(&self) -> anyhow::Result<HashMap<String, crate::db::FileMeta>> {
+                let chunks = self.chunks.lock().unwrap();
+                let mut map = HashMap::new();
+                for c in chunks.iter() {
+                    map.entry(c.file_path.clone()).or_insert(crate::db::FileMeta {
+                        hash: c.hash.clone(),
+                        last_modified: c.last_modified.clone(),
+                    });
+                }
+                Ok(map)
+            }
+
+            async fn replace_file_chunks_batch(
+                &self,
+                replacements: &[(String, Vec<crate::db::ChunkRecord>)],
+            ) -> anyhow::Result<()> {
+                let mut chunks = self.chunks.lock().unwrap();
+                let mut hashes = self.hashes.lock().unwrap();
+                for (file_path, new_chunks) in replacements {
+                    chunks.retain(|c| &c.file_path != file_path);
+                    hashes.remove(file_path.as_str());
+                    for c in new_chunks {
+                        chunks.push(c.clone());
+                        hashes.insert(c.file_path.clone(), c.hash.clone());
+                    }
+                }
                 Ok(())
             }
         }
@@ -609,13 +1130,13 @@ mod tests {
             let calls_after_first = stub.calls.lock().unwrap().len();
             assert_eq!(calls_after_first, n1, "one embed call per chunk on first index");
 
-            // Second call: same content → embed_cache hit → no new embed calls
+            // Second call: same content → file-level hash-skip → 0 returned, no new embed calls
             let n2 = idx.index_file(file.to_str().unwrap()).await.unwrap();
             let calls_after_second = stub.calls.lock().unwrap().len();
-            assert_eq!(n1, n2, "same file should produce same chunk count");
+            assert_eq!(n2, 0, "unchanged file is skipped (hash-skip fast path)");
             assert_eq!(
                 calls_after_first, calls_after_second,
-                "no new embed calls when content is in cache"
+                "no new embed calls when file hash is unchanged"
             );
         }
 

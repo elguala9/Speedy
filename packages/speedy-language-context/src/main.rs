@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+use tracing::info;
+use tracing_subscriber::prelude::*;
 
 use speedy_language_context::cli::{Cli, Commands};
 use speedy_language_context::graph::GraphStore;
@@ -8,21 +11,60 @@ use speedy_language_context::indexer::Indexer;
 use speedy_language_context::{mcp, search, skeleton};
 
 fn main() -> Result<()> {
-    // tracing → stderr by default; stdout is reserved for MCP traffic.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    // tracing → stderr (stdout is reserved for MCP traffic) + rolling daily
+    // file in `<exe dir>/logs/speedy-language-context.log.YYYY-MM-DD` so every
+    // CLI call leaves a durable record (duration, file counts, ...).
+    let logs_dir = speedy_core::daemon_util::exe_log_dir();
+    let file_appender = tracing_appender::rolling::daily(&logs_dir, "speedy-language-context.log");
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+    // Leak the guard so the writer flushes for the entire process lifetime.
+    Box::leak(Box::new(file_guard));
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(std::io::stderr),
         )
-        .with_target(false)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_writer(file_writer),
+        )
         .init();
 
     let cli = Cli::parse();
     let root = resolve_root(&cli.workspace_path)?;
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async_main(cli, root))
+    let cmd_started = Instant::now();
+    let result = rt.block_on(async {
+        tokio::select! {
+            res = async_main(cli, root) => res,
+            _ = tokio::signal::ctrl_c() => {
+                tracing::warn!(
+                    target: "language-context",
+                    elapsed_ms = cmd_started.elapsed().as_millis() as u64,
+                    "interrupted by user (Ctrl+C) — exiting before completion"
+                );
+                Err(anyhow::anyhow!("interrupted by Ctrl+C"))
+            }
+        }
+    });
+
+    if let Err(e) = &result {
+        tracing::error!(
+            target: "language-context",
+            error = %e,
+            elapsed_ms = cmd_started.elapsed().as_millis() as u64,
+            "command failed"
+        );
+    }
+    result
 }
 
 fn resolve_root(p: &Option<PathBuf>) -> Result<PathBuf> {
@@ -36,17 +78,31 @@ fn resolve_root(p: &Option<PathBuf>) -> Result<PathBuf> {
 async fn async_main(cli: Cli, root: PathBuf) -> Result<()> {
     match cli.command {
         Commands::Index => cmd_index(&root, cli.json).await,
+        Commands::Sync => cmd_index(&root, cli.json).await,
         Commands::Update { files } => cmd_update(&root, &files, cli.json).await,
         Commands::Status => cmd_status(&root, cli.json),
         Commands::Serve => mcp::run_server(root).await,
         Commands::Skeleton { files, detail } => cmd_skeleton(&root, &files, &detail),
         Commands::Search { query, top_k } => cmd_search(&root, &query, top_k, cli.json),
+        Commands::ClearIndex => cmd_clear_index(&root, cli.json),
     }
 }
 
 async fn cmd_index(root: &Path, as_json: bool) -> Result<()> {
+    let started = Instant::now();
     let indexer = Indexer::new(root)?;
     let stats = indexer.full_index().await?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    info!(
+        target: "language-context",
+        command = "index",
+        workspace = %root.display(),
+        files = stats.files_indexed,
+        skipped = stats.files_skipped,
+        symbols = stats.symbols_found,
+        elapsed_ms,
+        "index done"
+    );
     if as_json {
         println!("{}", serde_json::to_string_pretty(&stats)?);
     } else {
@@ -59,8 +115,21 @@ async fn cmd_index(root: &Path, as_json: bool) -> Result<()> {
 }
 
 async fn cmd_update(root: &Path, files: &[PathBuf], as_json: bool) -> Result<()> {
+    let started = Instant::now();
     let indexer = Indexer::new(root)?;
     let stats = indexer.index_files(files).await?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    info!(
+        target: "language-context",
+        command = "update",
+        workspace = %root.display(),
+        requested = files.len(),
+        files = stats.files_indexed,
+        skipped = stats.files_skipped,
+        symbols = stats.symbols_found,
+        elapsed_ms,
+        "update done"
+    );
     if as_json {
         println!("{}", serde_json::to_string_pretty(&stats)?);
     } else {
@@ -73,11 +142,23 @@ async fn cmd_update(root: &Path, files: &[PathBuf], as_json: bool) -> Result<()>
 }
 
 fn cmd_status(root: &Path, as_json: bool) -> Result<()> {
+    let started = Instant::now();
     let store = GraphStore::open(root)?;
     let files = store.file_count()?;
     let symbols = store.symbol_count()?;
     let edges = store.edge_count()?;
     let last_indexed = store.get_meta("last_indexed_at")?.unwrap_or_else(|| "never".to_string());
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    info!(
+        target: "language-context",
+        command = "status",
+        workspace = %root.display(),
+        files,
+        symbols,
+        edges,
+        elapsed_ms,
+        "status done"
+    );
     if as_json {
         let v = serde_json::json!({
             "files": files,
@@ -96,17 +177,50 @@ fn cmd_status(root: &Path, as_json: bool) -> Result<()> {
 }
 
 fn cmd_skeleton(root: &Path, files: &[String], detail: &str) -> Result<()> {
+    let started = Instant::now();
     let store = GraphStore::open(root)?;
     let detail = detail.parse()?;
     let refs: Vec<&str> = files.iter().map(String::as_str).collect();
     let out = skeleton::get_skeleton(&store, root, &refs, detail)?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    info!(
+        target: "language-context",
+        command = "skeleton",
+        workspace = %root.display(),
+        files = files.len(),
+        elapsed_ms,
+        "skeleton done"
+    );
     println!("{out}");
     Ok(())
 }
 
+fn cmd_clear_index(root: &Path, as_json: bool) -> Result<()> {
+    let store = GraphStore::open(root)?;
+    store.clear_all()?;
+    if as_json {
+        println!("{}", serde_json::json!({ "cleared": true }));
+    } else {
+        println!("Index cleared.");
+    }
+    Ok(())
+}
+
 fn cmd_search(root: &Path, query: &str, top_k: usize, as_json: bool) -> Result<()> {
+    let started = Instant::now();
     let store = GraphStore::open(root)?;
     let results = search::search(&store, query, top_k)?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    info!(
+        target: "language-context",
+        command = "search",
+        workspace = %root.display(),
+        query = %query,
+        top_k,
+        results = results.len(),
+        elapsed_ms,
+        "search done"
+    );
     if as_json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {

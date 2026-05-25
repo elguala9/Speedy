@@ -159,11 +159,54 @@ impl WorkspacesView {
             }
         });
 
+        let is_indexing = state.indexing.contains(path);
+        let is_syncing = state.syncing.contains(path);
+
+        if is_indexing {
+            ui.horizontal(|ui| {
+                if let Some(&(processed, total)) = state.index_progress.get(path) {
+                    if total > 0 {
+                        let fraction = processed as f32 / total as f32;
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .text(format!("{processed} / {total} file"))
+                                .desired_width(220.0),
+                        );
+                    } else {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Indicizzando…").color(Color32::from_rgb(180, 180, 80)),
+                        );
+                    }
+                } else {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new("Indicizzando…").color(Color32::from_rgb(180, 180, 80)),
+                    );
+                }
+            });
+        }
+
+        if is_syncing {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Sincronizzando…").color(Color32::from_rgb(180, 180, 80)));
+            });
+        }
+
         ui.horizontal(|ui| {
-            if ui.button("Index").clicked() {
+            if ui
+                .add_enabled(!is_indexing, egui::Button::new("Index"))
+                .on_hover_text("Re-indicizza questo workspace")
+                .clicked()
+            {
                 bridge.reindex_workspace(path.to_string());
             }
-            if ui.button("Sync").clicked() {
+            if ui
+                .add_enabled(!is_syncing, egui::Button::new("Sync"))
+                .on_hover_text("Sincronizza questo workspace")
+                .clicked()
+            {
                 bridge.sync_workspace(path.to_string());
             }
             if ui.button("Open folder").clicked() {

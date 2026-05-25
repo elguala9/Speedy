@@ -9,6 +9,16 @@ use speedy_core::config::Config;
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     async fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Embed multiple texts in one call. Default impl calls `embed` serially.
+    /// Providers that support batch APIs (Ollama `/api/embed`, OpenAI) override this.
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.push(self.embed(t).await?);
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -55,14 +65,30 @@ impl EmbeddingProvider for OllamaProvider {
         };
 
         let url = format!("{}/api/embeddings", self.base_url.trim_end_matches('/'));
-        let resp = self
+        let t_total = std::time::Instant::now();
+        let t_send = std::time::Instant::now();
+        let response = self
             .client
             .post(&url)
             .json(&request)
             .send()
-            .await?
-            .json::<OllamaEmbedResponse>()
             .await?;
+        let send_ms = t_send.elapsed().as_millis() as u64;
+        let t_decode = std::time::Instant::now();
+        let resp = response.json::<OllamaEmbedResponse>().await?;
+        let decode_ms = t_decode.elapsed().as_millis() as u64;
+        let total_ms = t_total.elapsed().as_millis() as u64;
+        // debug-level: the per-file summary in indexer.rs is the primary
+        // signal. Set RUST_LOG=ai_context=debug to see one row per HTTP call.
+        tracing::debug!(
+            target: "ai-context",
+            model = %self.model,
+            text_len = text.len(),
+            send_ms,
+            decode_ms,
+            total_ms,
+            "ollama embed call"
+        );
 
         Ok(resp.embedding)
     }
@@ -232,6 +258,68 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
                 let builder = self.client.post(&url).json(&body);
                 let resp = self.apply_auth(builder).send().await?.json::<GeminiResp>().await?;
                 Ok(resp.embedding.values)
+            }
+        }
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        match &self.protocol {
+            HttpProtocol::Ollama => {
+                // Ollama ≥0.3 supports /api/embed with an input array.
+                #[derive(serde::Serialize)]
+                struct OllamaBatchReq<'a> { model: &'a str, input: &'a [&'a str] }
+                #[derive(Deserialize)]
+                struct OllamaBatchResp { embeddings: Vec<Vec<f32>> }
+
+                // all-minilm and similar small models have a ~256 token context.
+                // Truncate to 500 chars to avoid "input length exceeds context length" errors.
+                const MAX_INPUT_CHARS: usize = 500;
+                let truncated: Vec<&str> = texts.iter()
+                    .map(|t| {
+                        if t.len() <= MAX_INPUT_CHARS { return *t; }
+                        let mut end = MAX_INPUT_CHARS;
+                        while !t.is_char_boundary(end) { end -= 1; }
+                        &t[..end]
+                    })
+                    .collect();
+
+                let url = format!("{}/api/embed", self.base_url);
+                let builder = self.client.post(&url).json(&OllamaBatchReq {
+                    model: &self.model,
+                    input: &truncated,
+                });
+                let http_resp = self.apply_auth(builder).send().await?;
+                let body = http_resp.text().await?;
+                let resp = serde_json::from_str::<OllamaBatchResp>(&body).map_err(|e| {
+                    tracing::error!(target: "ai-context", ollama_response = %body, "ollama /api/embed returned unexpected body");
+                    e
+                })?;
+                Ok(resp.embeddings)
+            }
+            HttpProtocol::OpenAI => {
+                // OpenAI /v1/embeddings accepts an array for input.
+                #[derive(serde::Serialize)]
+                struct OpenAIBatchReq<'a> { model: &'a str, input: &'a [&'a str] }
+                #[derive(Deserialize)]
+                struct OpenAIData { embedding: Vec<f32> }
+                #[derive(Deserialize)]
+                struct OpenAIBatchResp { data: Vec<OpenAIData> }
+
+                let url = format!("{}/v1/embeddings", self.base_url);
+                let builder = self.client.post(&url).json(&OpenAIBatchReq {
+                    model: &self.model,
+                    input: texts,
+                });
+                let resp = self.apply_auth(builder).send().await?.json::<OpenAIBatchResp>().await?;
+                Ok(resp.data.into_iter().map(|d| d.embedding).collect())
+            }
+            HttpProtocol::Gemini => {
+                // Gemini has no batch embed endpoint — fall back to serial.
+                let mut out = Vec::with_capacity(texts.len());
+                for t in texts {
+                    out.push(self.embed(t).await?);
+                }
+                Ok(out)
             }
         }
     }
@@ -646,7 +734,7 @@ pub mod tests {
     fn test_config_defaults_ollama() {
         let config = speedy_core::config::Config::default();
         assert_eq!(config.provider_type, "ollama");
-        assert_eq!(config.model, "nomic-embed-text");
+        assert_eq!(config.model, "all-minilm");
         assert_eq!(config.ollama_url, "http://localhost:11434");
     }
 

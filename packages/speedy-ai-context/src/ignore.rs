@@ -13,24 +13,29 @@ impl FileFilter {
     }
 
     pub fn filtered_files(&self) -> Vec<String> {
-        let mut files = Vec::new();
-        let walker = WalkBuilder::new(&self.root)
+        use std::sync::{Arc, Mutex};
+        let files: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        WalkBuilder::new(&self.root)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
             .add_custom_ignore_filename(".speedyignore")
             .follow_links(false)
-            .max_depth(None)
-            .build();
-
-        for entry in walker.flatten() {
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                if let Some(path) = entry.path().to_str() {
-                    files.push(path.to_string());
-                }
-            }
-        }
-        files
+            .build_parallel()
+            .run(|| {
+                let files = Arc::clone(&files);
+                Box::new(move |result| {
+                    if let Ok(entry) = result {
+                        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                            if let Some(path) = entry.path().to_str() {
+                                files.lock().unwrap().push(path.to_string());
+                            }
+                        }
+                    }
+                    ignore::WalkState::Continue
+                })
+            });
+        Arc::try_unwrap(files).unwrap().into_inner().unwrap()
     }
 
     pub fn is_binary(path: &Path) -> bool {

@@ -11,6 +11,21 @@ pub fn hash_bytes(data: &[u8]) -> String {
 
 pub async fn hash_file(path: &Path) -> anyhow::Result<String> {
     use anyhow::Context;
+
+    // Refuse to slurp huge files into memory — bound by the same limit the
+    // indexer uses so callers can't accidentally trigger an OOM abort by
+    // hashing a multi-GB build artifact.
+    let meta = fs::metadata(path).await
+        .context(format!("failed to stat file for hashing: {}", path.display()))?;
+    if meta.len() > crate::MAX_INDEXABLE_FILE_SIZE {
+        anyhow::bail!(
+            "file too large to hash in-memory: {} ({} bytes > {} byte limit)",
+            path.display(),
+            meta.len(),
+            crate::MAX_INDEXABLE_FILE_SIZE
+        );
+    }
+
     let content = fs::read(path).await
         .context(format!("failed to read file for hashing: {}", path.display()))?;
     Ok(hash_bytes(&content))

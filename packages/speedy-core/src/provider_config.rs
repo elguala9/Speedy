@@ -20,6 +20,7 @@ pub struct JsonConfig {
     pub top_k: Option<usize>,
     pub watch_delay_ms: Option<u64>,
     pub ignore_patterns: Option<Vec<String>>,
+    pub index_concurrency: Option<usize>,
 }
 
 pub fn merge_provider(base: &mut ProviderConfig, overlay: ProviderConfig) {
