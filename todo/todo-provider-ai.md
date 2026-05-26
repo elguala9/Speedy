@@ -55,7 +55,7 @@ Il file può contenere anche solo alcuni campi — i restanti vengono risolti da
 
 **Ollama (default, embedding nativo)**
 ```json
-{ "provider": { "type": "ollama", "model": "nomic-embed-text" } }
+{ "provider": { "type": "ollama", "model": "all-minilm" } }
 ```
 
 **OpenAI (embedding nativo)**

@@ -435,6 +435,95 @@ fn test_workspace_tools_return_valid_response() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+// ── Tool implementation tests — Priorità 4 ────────────────────────────────
+
+#[test]
+fn test_index_status_shows_counts_after_reindex() {
+    let ws = temp_workspace(); // lib.rs with `pub fn add`
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+    client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"force_reindex","arguments":{}}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"index_status","arguments":{}}}"#,
+    ))
+    .unwrap();
+
+    assert!(resp["error"].is_null(), "index_status should not error: {resp}");
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    let status: serde_json::Value =
+        serde_json::from_str(text).expect("index_status should return JSON");
+    assert_ne!(status["last_indexed"], "never", "workspace should be indexed: {status}");
+    assert!(
+        status["symbols"].as_u64().unwrap_or(0) > 0,
+        "should have at least one symbol: {status}"
+    );
+    assert!(
+        status["files"].as_u64().unwrap_or(0) > 0,
+        "should have at least one file: {status}"
+    );
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_get_skeleton_after_indexing_returns_symbols() {
+    let ws = temp_workspace(); // lib.rs with `pub fn add`
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+    client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"force_reindex","arguments":{}}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_skeleton","arguments":{"files":["lib.rs"],"detail":"standard"}}}"#,
+    ))
+    .unwrap();
+
+    assert!(resp["error"].is_null(), "get_skeleton should not error: {resp}");
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "get_skeleton returned empty text after indexing");
+    assert!(
+        text.contains("add"),
+        "skeleton should contain the 'add' function from lib.rs: {text}"
+    );
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_run_pipeline_on_indexed_workspace() {
+    let ws = temp_workspace(); // lib.rs with `pub fn add`
+    let mut client = McpClient::start(&ws);
+
+    client.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+    client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"force_reindex","arguments":{}}}"#);
+
+    let resp: serde_json::Value = serde_json::from_str(&client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_pipeline","arguments":{"task":"add function","top_k":5}}}"#,
+    ))
+    .unwrap();
+
+    assert!(resp["error"].is_null(), "run_pipeline should not error: {resp}");
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "run_pipeline returned empty text");
+    let result: serde_json::Value =
+        serde_json::from_str(text).expect("run_pipeline should return JSON");
+    assert_eq!(result["task"], "add function", "task field mismatch: {result}");
+    assert!(result["matches"].is_array(), "should have matches array: {result}");
+    assert!(result["impact"].is_array(), "should have impact array: {result}");
+    let matches = result["matches"].as_array().unwrap();
+    assert!(
+        !matches.is_empty(),
+        "should find at least one match for 'add function' in lib.rs: {result}"
+    );
+
+    client.stop();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[test]
 fn test_workspace_add_and_list_roundtrip() {
     // If speedy-cli is available, adding a workspace should make it appear in list.

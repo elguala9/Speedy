@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 speedy-core = { path = "../speedy-core" }
+speedy-ai-context = { path = "../speedy-ai-context" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"

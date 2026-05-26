@@ -20,7 +20,7 @@ If a field is absent in the workspace file, it is inherited from the user file. 
   "provider": {
     "type": "ollama",
     "base_url": "http://localhost:11434",
-    "model": "nomic-embed-text",
+    "model": "all-minilm",
     "api_key": "",
     "command": "",
     "dims": 384
@@ -39,7 +39,7 @@ All fields are optional. The default is Ollama on localhost.
 |---|---|---|---|
 | `type` | string | `"ollama"` | Provider type |
 | `base_url` | string | *(provider default)* | Base URL of the endpoint |
-| `model` | string | `"nomic-embed-text"` | Embedding model |
+| `model` | string | `"all-minilm"` | Embedding model |
 | `api_key` | string | *(empty)* | API key (not needed for Ollama/agent) |
 | `command` | string | *(empty)* | Command for `type: "agent"` |
 | `dims` | number | `384` | Vector dimension for generative providers (Anthropic, DeepSeek) |
@@ -57,12 +57,12 @@ No API key required. Requires Ollama running locally.
   "provider": {
     "type": "ollama",
     "base_url": "http://localhost:11434",
-    "model": "nomic-embed-text"
+    "model": "all-minilm"
   }
 }
 ```
 
-Recommended models: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embedding:0.6b`
+Default: `all-minilm`. Other models: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embedding:0.6b`
 
 ---
 

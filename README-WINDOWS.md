@@ -30,7 +30,7 @@ Follow these steps if you prefer to install manually without using the installer
 1. **Ollama** — [ollama.com](https://ollama.com) — must be running in the background.
 2. Download the embedding model (once only):
    ```powershell
-   ollama pull nomic-embed-text
+   ollama pull all-minilm
    ```
 
 ---

@@ -24,7 +24,7 @@ If Ollama is not already installed and the embedding model not pulled, indexing 
 ollama --version
 
 # Pull the default embedding model (once only)
-ollama pull nomic-embed-text
+ollama pull all-minilm
 ```
 
 Ollama runs an HTTP server on `http://localhost:11434` by default. No configuration is needed if it is running on the default port.
@@ -168,15 +168,16 @@ If the binaries are not on PATH, use the full path:
 
 ### speedy-ai-context-mcp (semantic search)
 
-| Tool                    | Description                                         |
-|-------------------------|-----------------------------------------------------|
-| `speedy_query`          | Semantic search in natural language                 |
-| `speedy_index`          | Index a directory                                   |
-| `speedy_context`        | Project context summary                             |
-| `speedy_workspace_add`  | Register a workspace                                |
-| `speedy_workspace_remove` | Unregister a workspace                            |
-| `speedy_workspace_list` | List all registered workspaces                      |
-| `speedy_force_reindex`  | Force a full reindex                                |
+| Tool                    | Parameters (key ones)                                              | Description                                         |
+|-------------------------|--------------------------------------------------------------------|-----------------------------------------------------|
+| `speedy_query`          | `query` (req), `top_k` (opt, def 5), `mode` (`full`\|`files`, def `full`) | Semantic/conceptual search. **Requires embedding model (Ollama).** Use for "where is X logic?" questions. Use `mode:"files"` to get only unique paths — cheaper in tokens |
+| `speedy_grep`           | `pattern` (req), `top_k` (opt, def 20)                            | Keyword/phrase search via SQLite FTS5. **No Ollama required.** Use for exact symbol names, function signatures, string literals. Supports `fn*` prefix, `"phrase"`, `fn OR struct` |
+| `speedy_index`          | —                                                                  | Index a directory                                   |
+| `speedy_context`        | —                                                                  | Project context summary                             |
+| `speedy_workspace_add`  | `path` (req)                                                       | Register a workspace                                |
+| `speedy_workspace_remove` | `path` (req)                                                     | Unregister a workspace                              |
+| `speedy_workspace_list` | —                                                                  | List all registered workspaces                      |
+| `speedy_force_reindex`  | `path` (opt)                                                       | Force a full reindex                                |
 
 ### speedy-language-context-mcp (code graph)
 
@@ -256,8 +257,10 @@ speedy-cli daemon status              # daemon status
 speedy-cli workspace list             # list registered workspaces
 speedy-cli workspace add <path>       # register a workspace
 speedy-cli index                      # index current directory
-speedy-cli query "authentication"     # semantic search
+speedy-cli query "authentication"     # semantic search (requires Ollama)
 speedy-cli query "database pool" -k 10  # top 10 results
+speedy-cli grep "fn authenticate"     # keyword search (no Ollama required)
+speedy-cli grep "\"error handling\""  # phrase search
 speedy-cli context                    # project context summary
 speedy-cli force                      # force full reindex
 ```

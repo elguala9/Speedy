@@ -8,7 +8,8 @@ Compatible with any MCP client: opencode, Claude Code, Cursor, Windsurf, and mor
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `speedy_query` | `query` (req), `top_k` (opt, default 5) | Semantic search over the codebase using natural language |
+| `speedy_query` | `query` (req), `top_k` (opt, default 5), `mode` (opt, `full`\|`files`, default `full`) | Semantic/conceptual search using natural language. Requires an embedding model (Ollama or configured provider). Use for "where is X logic?" questions when you don't know the exact symbol name. Use `mode: "files"` for token-efficient location queries |
+| `speedy_grep` | `pattern` (req), `top_k` (opt, default 20) | Keyword/phrase search using SQLite FTS5. **No embedding model required** — works even without Ollama. Use for exact symbol names, function signatures, string literals. Supports FTS5 syntax: `fn*` (prefix), `"phrase search"`, `fn OR struct` |
 | `speedy_index` | `path` (opt, default `.`) | Index a directory into the vector database |
 | `speedy_context` | — | Show project context summary |
 | `speedy_workspace_add` | `path` (req) | Add a directory to the workspace registry |

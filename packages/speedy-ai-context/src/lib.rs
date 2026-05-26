@@ -15,3 +15,4 @@ pub mod indexer;
 pub mod text;
 
 pub use constants::MAX_INDEXABLE_FILE_SIZE;
+pub use indexer::IndexerBuilder;

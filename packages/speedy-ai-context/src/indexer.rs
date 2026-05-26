@@ -42,6 +42,80 @@ struct PreparedFile {
 
 const METADATA_MODEL_KEY: &str = "embedding_model";
 
+// ---------------------------------------------------------------------------
+// IndexerBuilder — dependency-injection entry point
+// ---------------------------------------------------------------------------
+
+pub struct IndexerBuilder {
+    db: Option<Arc<dyn VectorStore>>,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
+    root: Option<String>,
+    model: String,
+    index_concurrency: usize,
+}
+
+impl IndexerBuilder {
+    pub fn new() -> Self {
+        Self {
+            db: None,
+            embedder: None,
+            root: None,
+            model: "all-minilm".to_string(),
+            index_concurrency: 4,
+        }
+    }
+
+    pub fn db(mut self, db: Arc<dyn VectorStore>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    pub fn embedder(mut self, embedder: Arc<dyn EmbeddingProvider>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    pub fn root(mut self, root: impl Into<String>) -> Self {
+        self.root = Some(root.into());
+        self
+    }
+
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
+    }
+
+    pub fn concurrency(mut self, n: usize) -> Self {
+        self.index_concurrency = n;
+        self
+    }
+
+    pub async fn build(self) -> Result<Indexer> {
+        let root = match self.root {
+            Some(r) => r,
+            None => std::env::current_dir()
+                .context("failed to get current directory")?
+                .to_string_lossy()
+                .to_string(),
+        };
+        let db: Arc<dyn VectorStore> = match self.db {
+            Some(db) => db,
+            None => SqliteVectorStore::new(&root).await
+                .context("failed to initialize vector database")?,
+        };
+        let embedder = self.embedder
+            .ok_or_else(|| anyhow::anyhow!("embedder is required — call .embedder() on the builder"))?;
+        Ok(Indexer {
+            db,
+            embedder,
+            root,
+            model: self.model,
+            embed_cache: Mutex::new(HashMap::new()),
+            index_concurrency: self.index_concurrency,
+        })
+    }
+}
+
 fn write_index_progress(root: &str, processed: usize, total: usize) {
     let _ = std::fs::write(
         Path::new(root).join(".speedy").join("index-progress.json"),
@@ -89,8 +163,6 @@ impl Indexer {
             .context("failed to get current directory")?
             .to_string_lossy()
             .to_string();
-        let db: Arc<dyn VectorStore> = SqliteVectorStore::new(&root).await
-            .context("failed to initialize vector database")?;
 
         // Auto-create .speedyignore if missing: merge .gitignore (if present) + default patterns
         let speedyignore = Path::new(&root).join(".speedyignore");
@@ -111,13 +183,21 @@ impl Indexer {
 
         let embedder = embed::create_provider(config)?;
 
+        let indexer = IndexerBuilder::new()
+            .root(root)
+            .model(config.model.clone())
+            .concurrency(config.index_concurrency)
+            .embedder(embedder)
+            .build()
+            .await?;
+
         // Compatibility check: warn if the DB was built with a different model
         // than what's configured now. Old chunks won't be in the same vector
         // space as new query embeddings, so similarity scores become garbage.
         // We warn but don't refuse — the user might be mid-transition and want
         // to run `reembed` next. Indexing only writes the marker once.
-        let chunk_count = db.count_chunks().await.unwrap_or(0);
-        match db.get_metadata(METADATA_MODEL_KEY).await? {
+        let chunk_count = indexer.db.count_chunks().await.unwrap_or(0);
+        match indexer.db.get_metadata(METADATA_MODEL_KEY).await? {
             Some(stored) if stored != config.model => {
                 tracing::warn!(
                     "Embedding model mismatch: DB built with '{stored}' but configured model is '{}'. \
@@ -131,22 +211,15 @@ impl Indexer {
                      Assuming current model '{}' — run `speedy reembed` if wrong.",
                     config.model
                 );
-                db.set_metadata(METADATA_MODEL_KEY, &config.model).await?;
+                indexer.db.set_metadata(METADATA_MODEL_KEY, &config.model).await?;
             }
             None => {
-                db.set_metadata(METADATA_MODEL_KEY, &config.model).await?;
+                indexer.db.set_metadata(METADATA_MODEL_KEY, &config.model).await?;
             }
             _ => {}
         }
 
-        Ok(Self {
-            db,
-            embedder,
-            root,
-            model: config.model.clone(),
-            embed_cache: Mutex::new(HashMap::new()),
-            index_concurrency: config.index_concurrency,
-        })
+        Ok(indexer)
     }
 
     /// Drop every chunk and re-index the entire workspace with the current
@@ -1076,6 +1149,28 @@ mod tests {
                     }
                 }
                 Ok(())
+            }
+
+            async fn text_search(
+                &self,
+                pattern: &str,
+                top_k: usize,
+            ) -> anyhow::Result<Vec<crate::db::SearchResult>> {
+                let results: Vec<crate::db::SearchResult> = self
+                    .chunks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c.text.contains(pattern))
+                    .take(top_k)
+                    .map(|c| crate::db::SearchResult {
+                        path: c.file_path.clone(),
+                        line: c.line,
+                        text: c.text.clone(),
+                        score: 1.0,
+                    })
+                    .collect();
+                Ok(results)
             }
         }
 
