@@ -114,6 +114,7 @@ Source: "..\dist\speedy-language-context-mcp.exe";  DestDir: "{app}"; Flags: ign
 Source: "..\installer\README.txt";       DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\INSTALLATION.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\FOR-IA.md";        DestDir: "{app}"; Flags: ignoreversion
+Source: "..\installer\SETTINGS_MCP.md";  DestDir: "{app}"; Flags: ignoreversion
 
 ; Script di disinstallazione di emergenza — se l'uninstaller di Inno Setup
 ; si blocca per qualsiasi motivo, l'utente può lanciare questo script.

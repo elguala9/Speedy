@@ -68,7 +68,7 @@ To build the installer from source:
 ```bash
 # 1. Install Rust: https://rustup.rs/
 # 2. Install Ollama and pull an embedding model
-ollama pull nomic-embed-text
+ollama pull all-minilm
 ```
 
 **Build + copy to `dist/` in one shot (recommended):**
@@ -187,7 +187,7 @@ the last manual `index` / `sync` captured.
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (edition 2021)
-- [Ollama](https://ollama.ai/) running locally, with an embedding model pulled (default: `nomic-embed-text`)
+- [Ollama](https://ollama.ai/) running locally, with an embedding model pulled (default: `all-minilm`)
 
 ## CLI reference (summary)
 
@@ -215,7 +215,8 @@ Global flags: `-p/--path`, `--daemon-socket`, `--json`.
 | Command                          | What it does                                                        |
 |----------------------------------|---------------------------------------------------------------------|
 | `index [<subdir>]`               | Send `exec ... index <subdir>` to the daemon                        |
-| `query <q> [-k <N>]`             | Send `exec ... query <q> -k <N>`                                    |
+| `query <q> [-k <N>]`             | Send `exec ... query <q> -k <N>` — semantic search (requires embedding model) |
+| `grep <pattern> [-k <N>]`        | FTS5 keyword search directly on the local index (no embedding, no daemon) |
 | `context`                        | Send `exec ... context`                                             |
 | `sync`                           | Send `exec ... sync`                                                |
 | `force [-p <path>]`              | Send `sync <path>` directly (daemon-driven incremental sync)        |
@@ -250,11 +251,12 @@ A system tray icon (green = daemon alive, red = down) provides quick
 
 Communicates over stdio. Tools exposed:
 
-| Tool             | Args                                       | Underlying call                                       |
-|------------------|--------------------------------------------|-------------------------------------------------------|
-| `speedy_query`   | `{ query: string, top_k?: number }`        | `$SPEEDY_BIN query <q> -k <top_k> --json`             |
-| `speedy_index`   | `{ path?: string }`                        | `$SPEEDY_BIN index <path>`                            |
-| `speedy_context` | `{}`                                       | `$SPEEDY_BIN context --json`                          |
+| Tool             | Args                                                  | Underlying call                                       |
+|------------------|-------------------------------------------------------|-------------------------------------------------------|
+| `speedy_query`   | `{ query: string, top_k?: number, mode?: string }`    | `$SPEEDY_BIN query <q> -k <top_k> --json` — semantic search, requires embedding model |
+| `speedy_grep`    | `{ pattern: string, top_k?: number }`                 | `$SPEEDY_BIN grep <pattern> -k <top_k> --json` — FTS5 keyword search, no embedding required |
+| `speedy_index`   | `{ path?: string }`                                   | `$SPEEDY_BIN index <path>`                            |
+| `speedy_context` | `{}`                                                  | `$SPEEDY_BIN context --json`                          |
 
 Set `SPEEDY_BIN` to choose the underlying binary (default: `speedy-cli`).
 
@@ -335,7 +337,7 @@ Full provider reference: **[`CONFIG.md`](./CONFIG.md)**.
 | `SPEEDY_DAEMON_DIR`       | platform config dir        | Override the dir for `daemon.pid` / `workspaces.json`                      |
 | `SPEEDY_BIN`              | `speedy-cli`               | Binary that `speedy-mcp` invokes for tool calls                            |
 | `SPEEDY_PROVIDER`         | `ollama`                   | Embedding provider type (`ollama`, `openai`, `gemini`, `anthropic`, `agent`, …) |
-| `SPEEDY_MODEL`            | `nomic-embed-text`         | Embedding model name                                                       |
+| `SPEEDY_MODEL`            | `all-minilm`               | Embedding model name                                                       |
 | `SPEEDY_BASE_URL`         | *(provider default)*       | Base URL of the embedding endpoint                                         |
 | `SPEEDY_API_KEY`          | *(empty)*                  | API key for remote providers                                               |
 | `SPEEDY_AGENT_COMMAND`    | *(empty)*                  | External command when `SPEEDY_PROVIDER=agent`                              |
@@ -351,7 +353,7 @@ Place `.speedy/config.speedy.json` in your workspace (or `~/.speedy/config.speed
 {
   "provider": {
     "type": "ollama",
-    "model": "nomic-embed-text"
+    "model": "all-minilm"
   },
   "top_k": 10
 }
@@ -362,7 +364,7 @@ Place `.speedy/config.speedy.json` in your workspace (or `~/.speedy/config.speed
 ### TOML config file (`speedy.toml` / `.speedy/config.toml`)
 
 ```toml
-model = "nomic-embed-text"
+model = "all-minilm"
 ollama_url = "http://localhost:11434"
 provider_type = "ollama"
 top_k = 10

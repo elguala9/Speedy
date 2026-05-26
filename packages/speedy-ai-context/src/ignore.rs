@@ -28,7 +28,10 @@ impl FileFilter {
                     if let Ok(entry) = result {
                         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                             if let Some(path) = entry.path().to_str() {
-                                files.lock().unwrap().push(path.to_string());
+                                // Strip Windows Extended-Length Path prefix (\\?\) that the
+                                // ignore crate can emit on Windows; no-op on Linux/macOS.
+                                let normalized = path.strip_prefix(r"\\?\").unwrap_or(path);
+                                files.lock().unwrap().push(normalized.to_string());
                             }
                         }
                     }
@@ -121,6 +124,27 @@ mod tests {
     fn test_is_binary_python_bytecode() {
         assert!(FileFilter::is_binary(Path::new("module.pyc")));
         assert!(FileFilter::is_binary(Path::new("module.pyo")));
+    }
+
+    #[test]
+    fn test_windows_unc_prefix_stripped() {
+        let raw = r"\\?\C:\project\src\main.rs";
+        let normalized = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+        assert_eq!(normalized, r"C:\project\src\main.rs");
+    }
+
+    #[test]
+    fn test_non_unc_path_unchanged() {
+        let raw = r".\src\main.rs";
+        let normalized = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+        assert_eq!(normalized, raw);
+    }
+
+    #[test]
+    fn test_linux_path_unchanged() {
+        let raw = "/home/user/project/src/main.rs";
+        let normalized = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+        assert_eq!(normalized, raw);
     }
 
     #[test]

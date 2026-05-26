@@ -87,10 +87,14 @@
 I test esistenti in `packages/speedy-language-context/tests/mcp_binary_test.rs` verificano
 solo il protocollo. Aggiungere test che verifichino il comportamento reale degli strumenti:
 
-### [ ] `index_status` tool — workspace indicizzato vs vuoto
-### [ ] `get_skeleton` tool — workspace con simboli Rust reali
-### [ ] `run_pipeline` tool — input/output su workspace di test
-### [ ] `save_observation` / `search_observations` — persistenza FTS
+### [x] `index_status` tool — workspace indicizzato vs vuoto
+- **Done (2026-05-26)**: `test_index_status_shows_counts_after_reindex` — dopo force_reindex controlla symbols > 0, files > 0, last_indexed != "never".
+### [x] `get_skeleton` tool — workspace con simboli Rust reali
+- **Done (2026-05-26)**: `test_get_skeleton_after_indexing_returns_symbols` — dopo force_reindex, skeleton di lib.rs contiene "add".
+### [x] `run_pipeline` tool — input/output su workspace di test
+- **Done (2026-05-26)**: `test_run_pipeline_on_indexed_workspace` — task "add function" su workspace indicizzato ritorna matches + impact non vuoti.
+### [x] `save_observation` / `search_observations` — persistenza FTS
+- **Done (preesistente, verificato 2026-05-26)**: coperto da `test_save_observation_and_search_returns_result`, `test_search_observations_on_empty_store_returns_ok`, `test_save_multiple_observations_and_search`.
 
 **Pattern consigliato**: usare `temp_workspace()` già presente nel test file,
 aggiungere file `.rs` reali, chiamare gli strumenti dopo avere indicizzato.

@@ -4508,6 +4508,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "speedy-ai-context",
  "speedy-core",
  "tokio",
  "tracing",

@@ -64,11 +64,11 @@ In silent/winget installs this task is **never executed** unless the user explic
 #### `pullmodel` — Download default AI model *(unchecked by default — opt-in)*
 
 Shown only when
-`%USERPROFILE%\.ollama\models\manifests\registry.ollama.ai\library\nomic-embed-text\latest`
+`%USERPROFILE%\.ollama\models\manifests\registry.ollama.ai\library\all-minilm\latest`
 is absent.
 
 - Waits 5 seconds (allows Ollama service to start after a fresh install).
-- Runs: `ollama pull nomic-embed-text` (~270 MB download).
+- Runs: `ollama pull all-minilm` (~45 MB download).
 - Executed via PowerShell, hidden window.
 
 ---
@@ -94,7 +94,7 @@ winget install Parresia.Speedy
    │
    ├─ [Ollama: NOT installed — opt-in, skipped in silent mode]
    │
-   ├─ [nomic-embed-text: NOT installed — opt-in, skipped in silent mode]
+   ├─ [all-minilm: NOT installed — opt-in, skipped in silent mode]
    │
    └─ Start speedy-daemon.exe in background
 ```

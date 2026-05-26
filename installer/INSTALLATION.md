@@ -31,11 +31,11 @@ Ollama starts an HTTP server on `http://localhost:11434` by default.
 ### 2. Pull the default embedding model
 
 ```bash
-ollama pull nomic-embed-text
+ollama pull all-minilm
 ```
 
-`nomic-embed-text` is the model Speedy uses out of the box.
-Other supported models: `mxbai-embed-large`, `qwen3-embedding:0.6b`.
+`all-minilm` is the model Speedy uses out of the box.
+Other supported models: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embedding:0.6b`.
 
 > **Not using Ollama?**
 > You can switch to OpenAI, Google, or any OpenAI-compatible provider.

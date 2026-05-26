@@ -83,10 +83,19 @@ fn handle_request(
         "tools/list" => {
             let tools = vec![
                 tool_json("speedy_query",
-                    "Semantic search over the codebase using natural language.",
+                    "Semantic/conceptual search over the codebase. Requires an embedding model \
+                     (Ollama or configured provider). Use for 'where is X logic handled?' questions \
+                     when you don't know the exact symbol name. \
+                     For exact keyword/symbol searches, prefer speedy_grep (no embedding required).",
                     serde_json::json!({
                         "query": {"type": "string", "description": "Natural language query"},
-                        "top_k": {"type": "number", "description": "Number of results (default: 5)", "default": 5}
+                        "top_k": {"type": "number", "description": "Number of results (default: 5)", "default": 5},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["full", "files"],
+                            "description": "Output mode: 'full' returns chunks with text (default), 'files' returns only unique file paths (token-efficient for location queries)",
+                            "default": "full"
+                        }
                     }),
                     &["query"]),
                 tool_json("speedy_index",
@@ -135,6 +144,17 @@ fn handle_request(
                         "path": {"type": "string", "description": "Workspace path (default: .)", "default": "."}
                     }),
                     &["files"]),
+                tool_json("speedy_grep",
+                    "Keyword/phrase search over indexed files using SQLite FTS5. \
+                     Does NOT require an embedding model — works even without Ollama. \
+                     Use for exact symbol names, string literals, function signatures, or \
+                     structural queries. Supports FTS5 syntax: 'fn authenticate', \
+                     '\"error handling\"' (phrase), 'fn*' (prefix), 'fn OR struct'.",
+                    serde_json::json!({
+                        "pattern": {"type": "string", "description": "FTS5 search pattern"},
+                        "top_k": {"type": "number", "description": "Max results (default: 20)", "default": 20}
+                    }),
+                    &["pattern"]),
             ];
             Some(JsonRpcResponse::success(req.id, serde_json::json!({"tools": tools})))
         }
@@ -145,6 +165,7 @@ fn handle_request(
             match name {
                 "speedy_query" => {
                     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("full");
                     let default_top_k = std::env::var("SPEEDY_MCP_TOP_K")
                         .ok()
                         .and_then(|s| s.parse::<u64>().ok())
@@ -152,7 +173,14 @@ fn handle_request(
                     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(default_top_k);
                     let cmd_args = ["query", query, "-k", &top_k.to_string(), "--json"];
                     match run_cmd(&cmd_args) {
-                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Ok(output) => {
+                            let result_text = if mode == "files" {
+                                compact_to_files(&output)
+                            } else {
+                                output
+                            };
+                            Some(JsonRpcResponse::success(req.id, content_json(&result_text)))
+                        }
                         Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy query failed: {e}"))),
                     }
                 }
@@ -228,6 +256,15 @@ fn handle_request(
                         Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy lc skeleton failed: {e}"))),
                     }
                 }
+                "speedy_grep" => {
+                    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+                    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(20);
+                    let cmd_args = ["grep", pattern, "-k", &top_k.to_string(), "--json"];
+                    match run_cmd(&cmd_args) {
+                        Ok(output) => Some(JsonRpcResponse::success(req.id, content_json(&output))),
+                        Err(e) => Some(JsonRpcResponse::error(req.id, -32000, format!("speedy grep failed: {e}"))),
+                    }
+                }
                 _ => Some(JsonRpcResponse::error(req.id, -32601, format!("Unknown tool: {name}"))),
             }
         }
@@ -254,6 +291,25 @@ fn tool_json(name: &str, description: &str, properties: serde_json::Value, requi
 
 fn content_json(text: &str) -> serde_json::Value {
     serde_json::json!({"content": [{"type": "text", "text": text}]})
+}
+
+fn compact_to_files(json_output: &str) -> String {
+    let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(json_output) else {
+        return json_output.to_string();
+    };
+    let mut by_file: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for r in &results {
+        let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let score = r.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let entry = by_file.entry(path).or_insert(0.0);
+        if score > *entry { *entry = score; }
+    }
+    let mut files: Vec<_> = by_file.into_iter().collect();
+    files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let compact: Vec<serde_json::Value> = files.into_iter()
+        .map(|(path, score)| serde_json::json!({"path": path, "score": score}))
+        .collect();
+    serde_json::to_string(&compact).unwrap_or_default()
 }
 
 fn run_speedy(args: &[&str]) -> Result<String, String> {
@@ -423,11 +479,11 @@ mod tests {
     // ── tools/list ──────────────────────────────────────
 
     #[test]
-    fn test_tools_list_has_nine_tools() {
+    fn test_tools_list_has_ten_tools() {
         let resp = send("tools/list", serde_json::json!({}));
         let tools = &resp["result"]["tools"];
         assert!(tools.is_array());
-        assert_eq!(tools.as_array().unwrap().len(), 9);
+        assert_eq!(tools.as_array().unwrap().len(), 10);
     }
 
     #[test]
@@ -448,6 +504,7 @@ mod tests {
             "speedy_force_reindex",
             "speedy_lc_status",
             "speedy_lc_skeleton",
+            "speedy_grep",
         ]);
     }
 
@@ -728,6 +785,51 @@ mod tests {
         assert!(resp["result"].is_null(), "expected null result, got: {}", resp["result"]);
     }
 
+    // ── tools/call: speedy_grep ─────────────────────────────
+
+    #[test]
+    fn test_call_grep_success() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_grep",
+            "arguments": {"pattern": "fn main"}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+        assert_eq!(resp["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn test_call_grep_with_top_k() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_grep",
+            "arguments": {"pattern": "authenticate", "top_k": 5}
+        }));
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn test_call_grep_binary_failure() {
+        let fail_runner = |_: &[&str]| Err("binary not found".to_string());
+        let line = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "speedy_grep", "arguments": {"pattern": "fn main"}}
+        });
+        let json = process_line(&line.to_string(), &fail_runner, &mock_runner("ok"));
+        let resp = parse_response(&json.unwrap());
+        assert_error(&resp, -32000, "speedy grep failed");
+    }
+
+    #[test]
+    fn test_tools_list_grep_schema() {
+        let resp = send("tools/list", serde_json::json!({}));
+        let grep = resp["result"]["tools"].as_array().unwrap()
+            .iter().find(|t| t["name"] == "speedy_grep").unwrap().clone();
+        assert!(grep["description"].as_str().unwrap().contains("FTS5"));
+        let schema = &grep["inputSchema"];
+        assert_eq!(schema["properties"]["pattern"]["type"], "string");
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "pattern"));
+    }
+
     // ── unknown method ──────────────────────────────────
 
     #[test]
@@ -755,6 +857,64 @@ mod tests {
         let json = process_line(line, &mock_runner(""), &mock_runner(""));
         let resp: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
         assert!(resp["id"].is_null());
+    }
+
+    // ── speedy_query mode parameter ─────────────────────
+
+    #[test]
+    fn test_tools_list_query_schema_has_mode() {
+        let resp = send("tools/list", serde_json::json!({}));
+        let q = &resp["result"]["tools"][0];
+        assert_eq!(q["name"], "speedy_query");
+        let schema = &q["inputSchema"];
+        assert!(schema["properties"]["mode"]["type"].as_str() == Some("string"));
+        let modes = schema["properties"]["mode"]["enum"].as_array().unwrap();
+        let mode_strs: Vec<&str> = modes.iter().filter_map(|v| v.as_str()).collect();
+        assert!(mode_strs.contains(&"full"));
+        assert!(mode_strs.contains(&"files"));
+    }
+
+    #[test]
+    fn test_call_query_mode_files_passes_through() {
+        let resp = send("tools/call", serde_json::json!({
+            "name": "speedy_query",
+            "arguments": {"query": "auth logic", "mode": "files"}
+        }));
+        // mock_runner returns "ok" which is not valid JSON, so compact_to_files falls back
+        assert_eq!(resp["result"]["content"][0]["type"], "text");
+        assert_eq!(resp["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn test_compact_to_files_deduplicates() {
+        let input = serde_json::json!([
+            {"path": "src/auth.rs", "line": 10, "text": "fn login", "score": 0.9},
+            {"path": "src/auth.rs", "line": 50, "text": "fn logout", "score": 0.7},
+            {"path": "src/main.rs", "line": 1, "text": "fn main", "score": 0.5}
+        ]).to_string();
+        let output = compact_to_files(&input);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed.len(), 2, "should deduplicate to 2 unique files");
+        assert_eq!(parsed[0]["path"], "src/auth.rs");
+        assert_eq!(parsed[0]["score"], 0.9, "should keep max score");
+        assert_eq!(parsed[1]["path"], "src/main.rs");
+        assert!(!parsed[0].as_object().unwrap().contains_key("text"), "should not include text");
+        assert!(!parsed[0].as_object().unwrap().contains_key("line"), "should not include line");
+    }
+
+    #[test]
+    fn test_compact_to_files_invalid_json_fallback() {
+        let input = "not valid json";
+        let output = compact_to_files(input);
+        assert_eq!(output, input, "should return raw input on parse error");
+    }
+
+    #[test]
+    fn test_compact_to_files_empty_array() {
+        let input = "[]";
+        let output = compact_to_files(input);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+        assert!(parsed.is_empty());
     }
 
     // ── run_speedy function ──────────────────────────

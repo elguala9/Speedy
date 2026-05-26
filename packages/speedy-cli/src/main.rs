@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use speedy_ai_context::db::VectorStore as _;
 use speedy_core::daemon_client::DaemonClient;
 use speedy_core::daemon_util;
 use anyhow::{Context, Result};
@@ -48,6 +49,13 @@ enum Commands {
     Force {
         #[arg(short = 'p', help = "Workspace path (default: current dir)")]
         path: Option<String>,
+    },
+    #[command(about = "Keyword search over indexed files (no embedding model required)")]
+    Grep {
+        #[arg(help = "FTS5 search pattern (e.g. 'fn authenticate', '\"error handling\"', 'fn*')")]
+        pattern: String,
+        #[arg(short = 'k', long = "top-k", default_value = "20")]
+        top_k: usize,
     },
     #[command(about = "Daemon management")]
     Daemon {
@@ -475,7 +483,9 @@ mod tests {
 
 fn should_skip_daemon_check(cli: &Cli) -> bool {
     match &cli.command {
-        Some(Commands::Daemon { .. }) | Some(Commands::Workspace { .. }) => true,
+        Some(Commands::Daemon { .. })
+        | Some(Commands::Workspace { .. })
+        | Some(Commands::Grep { .. }) => true,
         None => true,
         _ => false,
     }
@@ -630,6 +640,23 @@ async fn async_main(cli: Cli) -> Result<()> {
                 }
             }
         },
+        Some(Commands::Grep { pattern, top_k }) => {
+            let db = speedy_ai_context::db::SqliteVectorStore::new(&cwd_str)
+                .await
+                .context("cannot open local index — run 'speedy-cli index' first")?;
+            let results = db.text_search(pattern, *top_k).await
+                .with_context(|| format!("text search failed for pattern: {pattern:?}"))?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&results)?);
+            } else if results.is_empty() {
+                println!("No matches for: {pattern}");
+            } else {
+                for r in &results {
+                    let snippet = &r.text[..r.text.len().min(120)];
+                    println!("{}:{} — {snippet}", r.path, r.line);
+                }
+            }
+        }
         None => {
             anyhow::bail!("No command specified. Use --help for usage.");
         }
