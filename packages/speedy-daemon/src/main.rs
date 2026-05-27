@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, Mutex};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+use speedy_core::hash_registry::HashRegistry;
 use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ToNsName};
 use speedy_core::local_sock::{ListenerTrait as _, Stream as LocalStream, StreamTrait as _};
 use tracing::{info, warn, error};
@@ -411,6 +412,11 @@ fn start_workspace_watcher(
                     let m = metrics.clone();
                     let event_at = event_at_clone.clone();
                     std::thread::spawn(move || {
+                        // Open the registry inside the spawned thread — Connection is !Send
+                        // so it cannot cross the thread boundary. Opening per batch is cheap
+                        // (WAL mode, single row reads).
+                        let registry = HashRegistry::open(Path::new(&p)).ok();
+
                         for event in &events {
                             if should_ignore_watch_path(&event.path) {
                                 continue;
@@ -444,28 +450,50 @@ fn start_workspace_watcher(
                             let features = slc_features::load_features(Some(&p));
 
                             if features.speedy_indexer {
-                                let mut spawn_cmd = std::process::Command::new(&exe);
-                                spawn_cmd
-                                    .args(["-p", &p, "index", &file_path])
-                                    .env("SPEEDY_NO_DAEMON", "1")
-                                    .stdout(Stdio::null())
-                                    .stderr(Stdio::null());
-                                #[cfg(windows)]
-                                {
-                                    use std::os::windows::process::CommandExt;
-                                    spawn_cmd.creation_flags(CREATE_NO_WINDOW);
-                                }
-                                if let Ok(mut child) = spawn_cmd.spawn() {
-                                    let pid = child.id();
-                                    pids.lock().unwrap().insert(pid);
-                                    let _ = child.wait();
-                                    pids.lock().unwrap().remove(&pid);
+                                let skip = registry.as_ref()
+                                    .map(|r| r.mtime_unchanged(&event.path, "ai-context"))
+                                    .unwrap_or(false);
+                                if skip {
+                                    tracing::debug!(
+                                        target: "watcher",
+                                        workspace = %p,
+                                        file = %file_path,
+                                        "ai-context: mtime unchanged, skipping spawn"
+                                    );
+                                } else {
+                                    let mut spawn_cmd = std::process::Command::new(&exe);
+                                    spawn_cmd
+                                        .args(["-p", &p, "index", &file_path])
+                                        .env("SPEEDY_NO_DAEMON", "1")
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null());
+                                    #[cfg(windows)]
+                                    {
+                                        use std::os::windows::process::CommandExt;
+                                        spawn_cmd.creation_flags(CREATE_NO_WINDOW);
+                                    }
+                                    if let Ok(mut child) = spawn_cmd.spawn() {
+                                        let pid = child.id();
+                                        pids.lock().unwrap().insert(pid);
+                                        let _ = child.wait();
+                                        pids.lock().unwrap().remove(&pid);
+                                    }
                                 }
                             }
 
                             // Also update the SLC symbol graph when language_context is enabled.
                             if features.language_context {
-                                if let Some(slc_exe) = slc_features::find_slc_exe() {
+                                let skip = registry.as_ref()
+                                    .map(|r| r.mtime_unchanged(&event.path, "language-context"))
+                                    .unwrap_or(false);
+                                if skip {
+                                    tracing::debug!(
+                                        target: "watcher",
+                                        workspace = %p,
+                                        file = %file_path,
+                                        "language-context: mtime unchanged, skipping spawn"
+                                    );
+                                } else if let Some(slc_exe) = slc_features::find_slc_exe() {
                                     let mut slc_cmd = std::process::Command::new(&slc_exe);
                                     slc_cmd
                                         .arg("--path").arg(&p)
