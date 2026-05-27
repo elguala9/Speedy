@@ -117,16 +117,16 @@ impl IndexerBuilder {
 }
 
 fn write_index_progress(root: &str, processed: usize, total: usize) {
+    let dir = speedy_core::daemon_util::workspace_data_dir(std::path::Path::new(root));
     let _ = std::fs::write(
-        Path::new(root).join(".speedy").join("index-progress.json"),
+        dir.join("index-progress.json"),
         format!("{{\"processed\":{processed},\"total\":{total}}}"),
     );
 }
 
 fn clear_index_progress(root: &str) {
-    let _ = std::fs::remove_file(
-        Path::new(root).join(".speedy").join("index-progress.json"),
-    );
+    let dir = speedy_core::daemon_util::workspace_data_dir(std::path::Path::new(root));
+    let _ = std::fs::remove_file(dir.join("index-progress.json"));
 }
 
 fn log_progress(

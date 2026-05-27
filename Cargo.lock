@@ -4525,8 +4525,11 @@ dependencies = [
  "dirs 5.0.1",
  "fd-lock",
  "interprocess",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
  "toml",
  "walkdir",
@@ -4614,6 +4617,20 @@ dependencies = [
  "tree-sitter-scala",
  "tree-sitter-swift",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "speedy-text"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ignore",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "speedy-core",
+ "walkdir",
 ]
 
 [[package]]
