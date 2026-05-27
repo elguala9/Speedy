@@ -36,15 +36,14 @@ pub struct WorkspaceStatus {
     pub last_event_at: Option<u64>,
     /// Unix seconds when the last `sync` finished. `None` if never run.
     pub last_sync_at: Option<u64>,
-    /// Size of `.speedy/sac.sqlite` in bytes. 0 if the file does not exist.
+    /// Size of the workspace index DB (`sac.sqlite`) in bytes. 0 if the file does not exist.
     pub index_size_bytes: u64,
     /// Number of chunk rows. None if unknown (e.g. DB not openable from the
     /// daemon without spawning speedy.exe — kept optional for forward-compat).
     pub chunk_count: Option<u64>,
 }
 
-/// One entry from `scan <root>`: a directory that contains a `.speedy/`
-/// subdirectory with an index database.
+/// One entry from `scan <root>`: a workspace that has been indexed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanResult {
     pub path: String,
@@ -53,7 +52,7 @@ pub struct ScanResult {
     /// RFC3339 timestamp of the index DB's last modification, or `None` if
     /// the OS did not report it.
     pub last_modified: Option<String>,
-    /// Size in bytes of `.speedy/sac.sqlite`. 0 if the file does not exist.
+    /// Size in bytes of the workspace index DB (`sac.sqlite`). 0 if the file does not exist.
     pub db_size_bytes: u64,
 }
 

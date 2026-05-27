@@ -190,9 +190,9 @@ impl DaemonClient {
         Ok(parsed.paths)
     }
 
-    /// Walk `root` looking for `.speedy/sac.sqlite` and return one entry per
-    /// hit. `max_depth` caps how deep the walker descends (default 8 on the
-    /// daemon side if `None`).
+    /// Scan AppData workspaces directory for indexed workspaces under `root`
+    /// and return one entry per hit. `max_depth` is no longer used (kept for
+    /// protocol compatibility).
     pub async fn scan(&self, root: &str, max_depth: Option<usize>) -> Result<Vec<ScanResult>> {
         let req = match max_depth {
             Some(d) => format!("scan\t{root}\t{d}"),

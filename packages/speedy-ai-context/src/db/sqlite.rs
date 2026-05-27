@@ -42,10 +42,7 @@ impl SqliteVectorStore {
     pub async fn new(path: &str) -> Result<Arc<Self>> {
         load_sqlite_vec_extension();
 
-        let db_dir = Path::new(path).join(".speedy");
-        std::fs::create_dir_all(&db_dir)
-            .context(format!("failed to create .speedy directory in {path}"))?;
-        let db_path = db_dir.join("sac.sqlite");
+        let db_path = speedy_core::daemon_util::workspace_data_dir(Path::new(path)).join("sac.sqlite");
         let conn = Connection::open(&db_path)
             .context(format!("failed to open database at {}", db_path.display()))?;
 

@@ -1608,7 +1608,7 @@ async fn handle_workspace_status(
         }
     };
 
-    let db_path = Path::new(&path_str).join(".speedy").join("sac.sqlite");
+    let db_path = speedy_core::daemon_util::workspace_data_dir(Path::new(&path_str)).join("sac.sqlite");
     let index_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
     let chunk_count = if db_path.exists() {
@@ -1641,8 +1641,8 @@ async fn handle_workspace_status(
     })
 }
 
-/// Parse `[\t<root>[\t<max_depth>]]` and walk the filesystem reporting every
-/// directory that contains `.speedy/sac.sqlite`. Skips common build dirs.
+/// Parse `[\t<root>[\t<max_depth>]]` and scan AppData workspaces directory
+/// reporting every workspace that has been indexed.
 async fn handle_scan(args: &str) -> String {
     let trimmed = args.trim_start_matches(['\t', ' ']);
     let mut parts = trimmed.split(['\t', '\n']);
@@ -1663,42 +1663,52 @@ async fn handle_scan(args: &str) -> String {
     serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
+fn scan_speedy_dirs(root: &Path, _max_depth: usize) -> Vec<ScanResult> {
     let registered: std::collections::HashSet<String> = workspace::list()
         .unwrap_or_default()
         .into_iter()
         .map(|e| e.path)
         .collect();
 
-    let skip = speedy_core::default_ignores::watch_dirs();
+    // Base dir is the same as workspace_data_dir uses
+    let base = if let Ok(r) = std::env::var("SPEEDY_WORKSPACE_DATA_ROOT") {
+        std::path::PathBuf::from(r)
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    };
+    let workspaces_dir = base.join("workspaces");
+
+    let Ok(entries) = std::fs::read_dir(&workspaces_dir) else {
+        return Vec::new();
+    };
 
     let mut out = Vec::new();
-    let walker = walkdir::WalkDir::new(root)
-        .max_depth(max_depth)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !skip.iter().any(|d| *d == name.as_ref())
-        });
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let ws_txt = entry.path().join("workspace.txt");
+        let Ok(ws_path) = std::fs::read_to_string(&ws_txt) else { continue };
+        let ws_path = ws_path.trim().to_string();
+        if ws_path.is_empty() { continue }
 
-    for entry in walker.flatten() {
-        if !entry.file_type().is_dir() {
-            continue;
+        // Filter by root prefix if provided
+        let root_str = root.to_string_lossy();
+        if root_str != "/" && root_str != "\\" && root_str.len() > 3 {
+            if !ws_path.starts_with(root_str.as_ref()) {
+                continue;
+            }
         }
-        let path = entry.path();
-        let db = path.join(".speedy").join("sac.sqlite");
-        if !db.exists() {
-            continue;
-        }
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let path_str = canonical.to_string_lossy().to_string();
-        let registered = registered.contains(&path_str);
+
+        if !Path::new(&ws_path).exists() { continue }
+
+        let db = entry.path().join("sac.sqlite");
         let (last_modified, db_size_bytes) = match std::fs::metadata(&db) {
             Ok(m) => {
-                let ts = m
-                    .modified()
-                    .ok()
+                let ts = m.modified().ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| {
                         let secs = d.as_secs() as i64;
@@ -1710,7 +1720,9 @@ fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
             }
             Err(_) => (None, 0),
         };
-        out.push(ScanResult { path: path_str, registered, last_modified, db_size_bytes });
+
+        let registered = registered.contains(&ws_path);
+        out.push(ScanResult { path: ws_path, registered, last_modified, db_size_bytes });
     }
     out
 }
@@ -3137,7 +3149,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_finds_directory_with_sac_sqlite() {
-        // Create a root with one .speedy/sac.sqlite inside.
+        // Create a workspace data root and register proj-a inside it.
         let root = std::env::temp_dir().join(format!(
             "speedy_d_scan_{}",
             std::time::SystemTime::now()
@@ -3146,9 +3158,12 @@ mod tests {
                 .as_nanos()
         ));
         let project = root.join("proj-a");
-        let speedy_dir = project.join(".speedy");
-        std::fs::create_dir_all(&speedy_dir).unwrap();
-        std::fs::write(speedy_dir.join("sac.sqlite"), b"fake db content").unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Use root as the workspace data root so scan_speedy_dirs finds the entry.
+        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", root.to_str().unwrap());
+        let data_dir = speedy_core::daemon_util::workspace_data_dir(&project);
+        std::fs::write(data_dir.join("sac.sqlite"), b"fake db content").unwrap();
 
         let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let active_pids = Arc::new(StdMutex::new(HashSet::new()));
@@ -3415,9 +3430,9 @@ not-json-line\n\
                 .unwrap()
                 .as_nanos()
         ));
-        let speedy_dir = dir.join(".speedy");
-        std::fs::create_dir_all(&speedy_dir).unwrap();
-        let db_path = speedy_dir.join("sac.sqlite");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", dir.to_str().unwrap());
+        let db_path = speedy_core::daemon_util::workspace_data_dir(&dir).join("sac.sqlite");
 
         // Create a minimal chunks table and insert 3 rows.
         {
