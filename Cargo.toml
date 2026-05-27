@@ -9,6 +9,7 @@ members = [
     "packages/speedy-mcp",
     "packages/speedy-gui",
     "packages/speedy-language-context",
+    "packages/speedy-text",
     "xtask",
 ]
 

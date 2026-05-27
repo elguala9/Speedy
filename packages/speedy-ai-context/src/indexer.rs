@@ -1,4 +1,5 @@
 use speedy_core::config::Config;
+use speedy_core::hash_registry::HashRegistry;
 use crate::constants::{EMBED_CACHE_MAX_ENTRIES, MMAP_THRESHOLD, PROGRESS_LOG_INTERVAL};
 use crate::db::{ChunkRecord, ProjectSummary, SearchResult, SqliteVectorStore, VectorStore};
 use crate::embed::{self, EmbeddingProvider};
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::error;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::Mutex;
 
@@ -38,6 +39,7 @@ struct PreparedFile {
     chunk_hashes: Vec<String>,
     file_hash: String,
     last_modified: String,
+    mtime_secs: u64,
 }
 
 const METADATA_MODEL_KEY: &str = "embedding_model";
@@ -226,6 +228,10 @@ impl Indexer {
     /// embedding provider. Use after switching `SPEEDY_MODEL`. Persists the
     /// new model name in the DB metadata table on success.
     pub async fn reembed(&self) -> Result<IndexStats> {
+        // Clear the shared hash registry so every file is treated as new.
+        if let Ok(registry) = HashRegistry::open(Path::new(&self.root)) {
+            let _ = registry.delete_context("ai-context");
+        }
         self.db.clear_all_chunks().await
             .context("failed to clear existing chunks before reembed")?;
         let stats = self.index_directory(&self.root).await?;
@@ -260,10 +266,15 @@ impl Indexer {
             return Ok(None);
         }
 
-        let last_modified = metadata.modified().ok().map(|t| {
+        let modified_time = metadata.modified().ok();
+        let last_modified = modified_time.map(|t| {
             let dt: chrono::DateTime<chrono::Utc> = t.into();
             dt.to_rfc3339()
         }).unwrap_or_default();
+        let mtime_secs = metadata.modified().ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         // Mtime pre-filter: skip file read if mtime unchanged.
         if !last_modified.is_empty() {
@@ -337,6 +348,7 @@ impl Indexer {
             chunk_hashes,
             file_hash,
             last_modified,
+            mtime_secs,
         }))
     }
 
@@ -515,6 +527,17 @@ impl Indexer {
                     };
                     pb.set_message(short);
                 }
+                // Update shared hash registry for every successfully written file.
+                if let Ok(registry) = HashRegistry::open(Path::new(&self.root)) {
+                    for prep in &prepared {
+                        let _ = registry.set_indexed(
+                            Path::new(&prep.file_path),
+                            "ai-context",
+                            &prep.file_hash,
+                            prep.mtime_secs,
+                        );
+                    }
+                }
             }
 
             if last_progress_log.elapsed() >= PROGRESS_LOG_INTERVAL {
@@ -577,6 +600,10 @@ impl Indexer {
             let dt: chrono::DateTime<Utc> = t.into();
             dt.to_rfc3339()
         }).unwrap_or_default();
+        let mtime_secs = metadata.modified().ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         // One DB query gives us both stored hash and stored mtime.
         let stored_meta = self.db.get_file_meta(file_path).await.unwrap_or(None);
@@ -696,6 +723,17 @@ impl Indexer {
         self.db.insert_chunks(&records).await
             .context("failed to insert chunks into database")?;
         let db_ms = t_db.elapsed().as_millis() as u64;
+
+        // Update shared hash registry so the daemon can skip future spawns when
+        // the file hasn't changed.
+        if let Ok(registry) = HashRegistry::open(Path::new(&self.root)) {
+            let _ = registry.set_indexed(
+                Path::new(file_path),
+                "ai-context",
+                &file_hash,
+                mtime_secs,
+            );
+        }
 
         let total_ms = t_total.elapsed().as_millis() as u64;
         tracing::info!(
