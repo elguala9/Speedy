@@ -1,16 +1,9 @@
-mod config;
-mod db;
-mod ignore;
-mod indexer;
-mod query;
-mod tokenize;
-mod walk;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use tokenize::SearchType;
+use speedy_text::tokenize::SearchType;
+use speedy_text::{config, db, indexer, query};
 
 #[derive(Parser)]
 #[command(name = "speedy-text-context", about = "Index and query text symbol occurrences in a repo")]
@@ -28,6 +21,13 @@ enum Commands {
     /// Incremental update: add/update modified files, remove deleted files
     Sync {
         path: PathBuf,
+    },
+    /// Re-index a single file (used by the daemon file watcher)
+    Update {
+        /// Workspace root
+        path: PathBuf,
+        /// File that changed (absolute or relative to root)
+        file: PathBuf,
     },
     /// Query the index for a symbol
     Query {
@@ -94,6 +94,15 @@ fn run() -> Result<()> {
                 .with_context(|| format!("cannot open DB at {}", db_path.display()))?;
             db::migrate(&conn)?;
             indexer::sync(&mut conn, &root)?;
+        }
+
+        Commands::Update { path, file } => {
+            let root = config::find_root(&path);
+            let db_path = config::db_path(&root);
+            let mut conn = db::open(&db_path)
+                .with_context(|| format!("cannot open DB at {}", db_path.display()))?;
+            db::migrate(&conn)?;
+            indexer::update_file(&mut conn, &root, &file)?;
         }
 
         Commands::Query {

@@ -6,7 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::{config, db, tokenize, walk};
 
-const MAX_FILE_BYTES: usize = 5 * 1024 * 1024; // 5 MB
+const MAX_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 
 pub fn index(conn: &mut Connection, root: &Path) -> Result<()> {
     let allowed_exts = config::load_or_create_extensions(root)?;
@@ -177,12 +177,89 @@ pub fn sync(conn: &mut Connection, root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Incrementally (re)index a single file. Used by the daemon file watcher so a
+/// change to one file doesn't trigger a full-tree walk. If the file no longer
+/// exists, is binary/too-large, or its extension isn't tracked, the stored
+/// occurrences for that path are removed.
+pub fn update_file(conn: &mut Connection, root: &Path, file: &Path) -> Result<()> {
+    let allowed_exts = config::load_or_create_extensions(root)?;
+    let norm = config::normalize_path(root, file);
+
+    let ext = file
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Untracked extension or deleted file → drop any stale occurrences.
+    if !allowed_exts.contains(&ext) || !file.exists() {
+        let tx = conn.transaction()?;
+        db::delete_file(&*tx, &norm)?;
+        tx.commit()?;
+        return Ok(());
+    }
+
+    let content_bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[speedy-text] warning: cannot read {}: {}", norm, e);
+            return Ok(());
+        }
+    };
+
+    if content_bytes.contains(&0u8) || content_bytes.len() > MAX_FILE_BYTES {
+        // Binary or oversized: ensure it isn't lingering in the index.
+        let tx = conn.transaction()?;
+        db::delete_file(&*tx, &norm)?;
+        tx.commit()?;
+        return Ok(());
+    }
+
+    let hash = HashRegistry::hash_bytes(&content_bytes);
+    let registry = HashRegistry::open(root).ok();
+
+    // Unchanged content → only refresh the registry mtime, skip the rewrite.
+    if db::get_file_hash(conn, &norm)?.as_deref() == Some(hash.as_str()) {
+        if let Some(ref reg) = registry {
+            let mtime = file_mtime_secs(file);
+            let _ = reg.set_indexed(file, "text", &hash, mtime);
+        }
+        return Ok(());
+    }
+
+    let content = match std::str::from_utf8(&content_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("[speedy-text] warning: non-UTF-8 file {}, skipping", norm);
+            return Ok(());
+        }
+    };
+
+    let tokens = tokenize::tokenize(content);
+
+    {
+        let tx = conn.transaction()?;
+        db::delete_file(&*tx, &norm)?;
+        db::insert_occurrences(&*tx, &norm, &ext, &tokens)?;
+        db::upsert_indexed_file(&*tx, &norm, &ext, &hash)?;
+        tx.commit()?;
+    }
+
+    if let Some(ref reg) = registry {
+        let mtime = file_mtime_secs(file);
+        let _ = reg.set_indexed(file, "text", &hash, mtime);
+    }
+
+    Ok(())
+}
+
+/// Returns mtime as milliseconds since epoch (sub-second precision avoids fast-path
+/// false-positives when index and file write happen within the same wall-clock second).
 fn file_mtime_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 

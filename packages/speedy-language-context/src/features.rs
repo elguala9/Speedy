@@ -9,6 +9,8 @@ pub struct Features {
     pub speedy_indexer: bool,
     #[serde(default = "default_true")]
     pub language_context: bool,
+    #[serde(default = "default_true")]
+    pub text_context: bool,
 }
 
 fn default_true() -> bool {
@@ -20,6 +22,7 @@ impl Default for Features {
         Self {
             speedy_indexer: true,
             language_context: true,
+            text_context: true,
         }
     }
 }

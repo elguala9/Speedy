@@ -102,6 +102,10 @@ The default installer location on Windows is
     "speedy-lc": {
       "command": "C:\\Users\\luca\\AppData\\Local\\Programs\\Speedy\\speedy-language-context-mcp.exe",
       "args": []
+    },
+    "speedy-text": {
+      "command": "C:\\Users\\luca\\AppData\\Local\\Programs\\Speedy\\speedy-text-context-mcp.exe",
+      "args": []
     }
   }
 }
@@ -130,6 +134,10 @@ On Linux/macOS drop the `.exe` suffix:
     },
     "speedy-lc": {
       "command": "/usr/local/bin/speedy-language-context-mcp",
+      "args": []
+    },
+    "speedy-text": {
+      "command": "/usr/local/bin/speedy-text-context-mcp",
       "args": []
     }
   }

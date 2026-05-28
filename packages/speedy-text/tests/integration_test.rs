@@ -91,8 +91,8 @@ fn test_index_creates_db() {
     let dir = make_workspace();
     index(&dir);
     assert!(
-        dir.join(".speedy").join("index.db").exists(),
-        ".speedy/index.db not created"
+        dir.join(".speedy-text").join("index.db").exists(),
+        ".speedy-text/index.db not created"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -279,15 +279,15 @@ fn test_index_does_not_index_speedy_text_dir() {
     let dir = make_workspace();
     index(&dir);
 
-    // Write a file with a unique symbol inside .speedy/
-    let internal = dir.join(".speedy").join("internal.txt");
+    // Write a file with a unique symbol inside .speedy-text/ (where the DB lives)
+    let internal = dir.join(".speedy-text").join("internal.txt");
     std::fs::write(&internal, "UniqueInternalSymbol123\n").unwrap();
 
     // Re-index (index always clears first)
     index(&dir);
 
     let v = query_json(&dir, &["UniqueInternalSymbol123"]);
-    assert_eq!(count(&v), 0, ".speedy/ must not be indexed: {v}");
+    assert_eq!(count(&v), 0, ".speedy-text/ must not be indexed: {v}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -316,6 +316,33 @@ fn test_sub_token_col_positions() {
         .expect("should have a result on line 4 (PREFIX_Dummy_SUFFIX)");
     assert_eq!(sub["col_start"].as_u64(), Some(7), "col_start of sub-token: {sub}");
     assert_eq!(sub["col_end"].as_u64(), Some(12), "col_end of sub-token: {sub}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_cased_finds_camel_sub_token() {
+    let dir = make_workspace();
+    // Add a file with a camelCase token containing Dummy
+    std::fs::write(dir.join("docs").join("camel.md"), "FooDummyBar\n").unwrap();
+    index(&dir);
+
+    // --type cased must find Dummy inside FooDummyBar
+    let v = query_json(&dir, &["Dummy", "--type", "cased", "--ext", "md"]);
+    let results = v["results"].as_array().expect("results must be array");
+    assert!(
+        results.iter().any(|r| r["file"].as_str().unwrap_or("").contains("camel.md")),
+        "cased query must find Dummy inside FooDummyBar: {v}"
+    );
+
+    // --type isolated_special must NOT find Dummy in camel.md
+    // (FooDummyBar has no _ / - separators; the only stored entry is the whole token)
+    let v_iso = query_json(&dir, &["Dummy", "--type", "isolated_special", "--ext", "md"]);
+    let iso_results = v_iso["results"].as_array().expect("array");
+    assert!(
+        !iso_results.iter().any(|r| r["file"].as_str().unwrap_or("").contains("camel.md")),
+        "isolated_special must not find Dummy as camel sub-token: {v_iso}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

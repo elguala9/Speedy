@@ -513,6 +513,39 @@ fn start_workspace_watcher(
                                     }
                                 }
                             }
+
+                            // Also update the text-symbol index when text_context is enabled.
+                            if features.text_context {
+                                let skip = registry.as_ref()
+                                    .map(|r| r.mtime_unchanged(&event.path, "text"))
+                                    .unwrap_or(false);
+                                if skip {
+                                    tracing::debug!(
+                                        target: "watcher",
+                                        workspace = %p,
+                                        file = %file_path,
+                                        "text-context: mtime unchanged, skipping spawn"
+                                    );
+                                } else if let Some(text_exe) = slc_features::find_text_exe() {
+                                    let mut text_cmd = std::process::Command::new(&text_exe);
+                                    text_cmd
+                                        .arg("update")
+                                        .arg(&p)
+                                        .arg(&file_path)
+                                        .stdin(Stdio::null())
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null());
+                                    #[cfg(windows)]
+                                    {
+                                        use std::os::windows::process::CommandExt;
+                                        text_cmd.creation_flags(CREATE_NO_WINDOW);
+                                    }
+                                    match text_cmd.spawn() {
+                                        Ok(_) => tracing::debug!(workspace = %p, file = %file_path, "text update spawned by watcher"),
+                                        Err(e) => tracing::warn!(workspace = %p, error = %e, "failed to spawn text update from watcher"),
+                                    }
+                                }
+                            }
                         }
                     });
                 }
@@ -1558,6 +1591,64 @@ async fn handle_reindex(raw_path: &str) -> Result<String> {
         info!(target: "index", workspace = %path_str, "SLC index skipped (language_context feature disabled)");
     }
 
+    // Text-symbol index — its `index` command clears and rebuilds on its own,
+    // so no separate clear step is needed.
+    let mut text_ok: Option<bool> = None;
+    let mut text_err: Option<String> = None;
+    if features.text_context {
+        match slc_features::find_text_exe() {
+            Some(text_exe) => {
+                info!(target: "index", workspace = %path_str, exe = %text_exe.display(), "text index starting");
+                let text_started = Instant::now();
+                let mut text_cmd = tokio::process::Command::new(&text_exe);
+                text_cmd
+                    .arg("index")
+                    .arg(&path_str)
+                    .env("SPEEDY_NO_DAEMON", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                #[cfg(windows)]
+                text_cmd.creation_flags(CREATE_NO_WINDOW);
+                match text_cmd.output().await {
+                    Ok(o) => {
+                        let text_ms = text_started.elapsed().as_millis() as u64;
+                        let se = String::from_utf8_lossy(&o.stderr);
+                        if o.status.success() {
+                            info!(target: "index", workspace = %path_str, ms = text_ms, "text index done");
+                            text_ok = Some(true);
+                        } else {
+                            error!(
+                                target: "index",
+                                workspace = %path_str,
+                                ms = text_ms,
+                                exit_code = ?o.status.code(),
+                                stderr = %se.trim(),
+                                "text index failed"
+                            );
+                            text_ok = Some(false);
+                            text_err = Some(se.trim().to_string());
+                        }
+                    }
+                    Err(e) => {
+                        error!(target: "index", workspace = %path_str, error = %e, "failed to spawn text index");
+                        text_ok = Some(false);
+                        text_err = Some(e.to_string());
+                    }
+                }
+            }
+            None => {
+                warn!(
+                    target: "index",
+                    workspace = %path_str,
+                    "speedy-text-context executable not found next to daemon or in PATH — skipping text index"
+                );
+            }
+        }
+    } else {
+        info!(target: "index", workspace = %path_str, "text index skipped (text_context feature disabled)");
+    }
+
     // Decide overall result. If AI-context failed AND SLC didn't succeed,
     // surface an error to the caller. Otherwise return a summary so the GUI
     // toast tells the user which half ran.
@@ -1571,12 +1662,17 @@ async fn handle_reindex(raw_path: &str) -> Result<String> {
         "failed"
     };
     let summary = format!(
-        "ai-context: {} | slc: {}",
+        "ai-context: {} | slc: {} | text: {}",
         ai_status,
         match slc_ok {
             Some(true) => "ok".to_string(),
             Some(false) => format!("failed ({})", slc_err.as_deref().unwrap_or("see logs")),
             None => if features.language_context { "not-found".to_string() } else { "disabled".to_string() },
+        },
+        match text_ok {
+            Some(true) => "ok".to_string(),
+            Some(false) => format!("failed ({})", text_err.as_deref().unwrap_or("see logs")),
+            None => if features.text_context { "not-found".to_string() } else { "disabled".to_string() },
         }
     );
 
@@ -1695,10 +1791,19 @@ fn scan_speedy_dirs(root: &Path, _max_depth: usize) -> Vec<ScanResult> {
         let ws_path = ws_path.trim().to_string();
         if ws_path.is_empty() { continue }
 
-        // Filter by root prefix if provided
-        let root_str = root.to_string_lossy();
-        if root_str != "/" && root_str != "\\" && root_str.len() > 3 {
-            if !ws_path.starts_with(root_str.as_ref()) {
+        // Filter by root prefix if provided. Both sides are normalized first:
+        // `ws_path` is a canonical path (which on Windows carries a `\\?\`
+        // verbatim prefix), while the scan `root` is whatever the caller sent
+        // (usually non-canonical). Without stripping that prefix the
+        // `starts_with` check would never match on Windows.
+        let root_canon = root
+            .canonicalize()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| root.to_string_lossy().into_owned());
+        let root_norm = root_canon.strip_prefix(r"\\?\").unwrap_or(&root_canon);
+        let ws_norm = ws_path.strip_prefix(r"\\?\").unwrap_or(&ws_path);
+        if root_norm != "/" && root_norm != "\\" && root_norm.len() > 3 {
+            if !ws_norm.starts_with(root_norm) {
                 continue;
             }
         }
@@ -1918,6 +2023,8 @@ mod slc_features {
         pub speedy_indexer: bool,
         #[serde(default = "default_true")]
         pub language_context: bool,
+        #[serde(default = "default_true")]
+        pub text_context: bool,
     }
 
     impl Features {
@@ -1925,6 +2032,7 @@ mod slc_features {
             Self {
                 speedy_indexer: true,
                 language_context: true,
+                text_context: true,
             }
         }
     }
@@ -1981,6 +2089,7 @@ mod slc_features {
         match name {
             "speedy_indexer" | "speedy-indexer" => f.speedy_indexer = enabled,
             "language_context" | "language-context" => f.language_context = enabled,
+            "text_context" | "text-context" => f.text_context = enabled,
             other => anyhow::bail!("unknown feature: {other}"),
         }
 
@@ -2017,12 +2126,24 @@ mod slc_features {
     /// Locate the `speedy-language-context` executable: same directory as this
     /// daemon binary first, then PATH. Returns `None` if not found.
     pub fn find_slc_exe() -> Option<PathBuf> {
-        let exe_name = if cfg!(windows) {
+        find_exe_near_daemon(if cfg!(windows) {
             "speedy-language-context.exe"
         } else {
             "speedy-language-context"
-        };
-        // Same dir as the running daemon
+        })
+    }
+
+    /// Locate the `speedy-text-context` executable (same strategy as `find_slc_exe`).
+    pub fn find_text_exe() -> Option<PathBuf> {
+        find_exe_near_daemon(if cfg!(windows) {
+            "speedy-text-context.exe"
+        } else {
+            "speedy-text-context"
+        })
+    }
+
+    /// Find an executable next to the running daemon binary first, then on PATH.
+    fn find_exe_near_daemon(exe_name: &str) -> Option<PathBuf> {
         if let Ok(self_exe) = std::env::current_exe() {
             if let Some(dir) = self_exe.parent() {
                 let candidate = dir.join(exe_name);
@@ -2031,7 +2152,6 @@ mod slc_features {
                 }
             }
         }
-        // Fallback: search PATH
         std::env::var_os("PATH").and_then(|path_var| {
             std::env::split_paths(&path_var)
                 .map(|dir| dir.join(exe_name))
