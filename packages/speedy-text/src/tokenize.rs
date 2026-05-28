@@ -67,14 +67,60 @@ pub fn tokenize(content: &str) -> Vec<Token> {
                 col_end: end as u32,
             });
 
-            // Emit sub-components for tokens containing _ or -
             if symbol.bytes().any(|b| b == b'_' || b == b'-') {
+                // Split on _ / - separators → isolated_special sub-tokens
                 emit_sub_tokens(symbol, start, line_no, &mut tokens);
+            } else {
+                // Split on camelCase boundaries → cased sub-tokens
+                emit_camel_sub_tokens(symbol, start, line_no, &mut tokens);
             }
         }
     }
 
     tokens
+}
+
+/// Splits a camelCase token (e.g. `FooDummyBar` → `Foo`, `Dummy`, `Bar`) and emits
+/// each component as a `cased` sub-token. Also handles SCREAMING_CAMEL runs like
+/// `HTMLParser` → `HTML`, `Parser`. Only emits when at least two components exist.
+fn emit_camel_sub_tokens(symbol: &str, sym_start: usize, line_no: u32, out: &mut Vec<Token>) {
+    let bytes = symbol.as_bytes();
+    let len = bytes.len();
+    let mut boundaries = vec![0usize];
+
+    let mut i = 1usize;
+    while i < len {
+        let prev = bytes[i - 1];
+        let curr = bytes[i];
+        if prev.is_ascii_lowercase() && curr.is_ascii_uppercase() {
+            // e.g. fooBar: o→B
+            boundaries.push(i);
+        } else if prev.is_ascii_uppercase() && curr.is_ascii_uppercase() {
+            if i + 1 < len && bytes[i + 1].is_ascii_lowercase() {
+                // e.g. HTMLParser: L→P (next is 'a')
+                boundaries.push(i);
+            }
+        }
+        i += 1;
+    }
+
+    if boundaries.len() <= 1 {
+        return;
+    }
+
+    boundaries.push(len);
+    for w in boundaries.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        if e - s >= 2 {
+            out.push(Token {
+                symbol: symbol[s..e].to_string(),
+                search_type: SearchType::Cased,
+                line_no,
+                col_start: (sym_start + s) as u32,
+                col_end: (sym_start + e) as u32,
+            });
+        }
+    }
 }
 
 fn emit_sub_tokens(symbol: &str, sym_start: usize, line_no: u32, out: &mut Vec<Token>) {

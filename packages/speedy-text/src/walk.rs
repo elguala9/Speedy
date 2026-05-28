@@ -6,12 +6,12 @@ use crate::ignore::build_walker;
 
 /// Returns (absolute_path, lowercase_ext_without_dot) for every file under `root`
 /// whose extension is in `allowed_exts`, respecting gitignore + .speedyignore rules.
-/// `.speedy/` and `.git/` directories are always skipped.
+/// `.speedy-text/` and `.git/` directories are always skipped.
 pub fn walk(root: &Path, allowed_exts: &HashSet<String>) -> Result<Vec<(PathBuf, String)>> {
     let walker = build_walker(root)
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
-            name != ".speedy" && name != ".git"
+            name != ".speedy-text" && name != ".git"
         })
         .build();
 

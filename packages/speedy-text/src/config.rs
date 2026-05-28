@@ -7,7 +7,7 @@ pub fn find_root(start: &Path) -> PathBuf {
 }
 
 pub fn db_path(root: &Path) -> PathBuf {
-    root.join(".speedy").join("index.db")
+    root.join(".speedy-text").join("index.db")
 }
 
 pub fn extensions_path(root: &Path) -> PathBuf {

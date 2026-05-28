@@ -29,6 +29,10 @@ CLI and two MCP servers for AI coding agents.
     MCP server for code graph analysis. Exposes symbol skeletons,
     impact analysis, and workspace indexing for AI agents.
 
+  speedy-text-context-mcp.exe
+    MCP server for text-symbol search. Finds symbol occurrences in
+    docs/config files with line/column positions for AI agents.
+
   speedy-gui.exe
     Desktop GUI to manage the daemon, workspaces, and view live logs.
 
@@ -38,6 +42,10 @@ CLI and two MCP servers for AI coding agents.
 
   speedy-language-context.exe
     The code graph daemon. Normally called by the MCP server.
+
+  speedy-text-context.exe
+    The text-symbol indexer/query worker. Normally called by the
+    daemon — you rarely need to invoke this directly.
 
 
 ---------------------------------------------------------------------
@@ -123,6 +131,13 @@ Tools available:
   save_observation   Save a note about the codebase
   search_observations  Search saved notes
 
+--- speedy-text-context-mcp (text-symbol search) ---
+
+Tools available:
+  text_query         Find symbol occurrences in docs/config files
+  text_status        Index stats (files, occurrences, unique symbols)
+  text_force_reindex Drop the text index and re-index the workspace
+
 
 ---------------------------------------------------------------------
   MCP CONFIGURATION EXAMPLES
@@ -138,6 +153,10 @@ Tools available:
     },
     "speedy-lc": {
       "command": "speedy-language-context-mcp",
+      "args": ["--workspace", "C:\\path\\to\\your\\project"]
+    },
+    "speedy-text": {
+      "command": "speedy-text-context-mcp",
       "args": ["--workspace", "C:\\path\\to\\your\\project"]
     }
   }

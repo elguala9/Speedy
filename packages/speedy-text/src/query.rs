@@ -8,30 +8,31 @@ use crate::{
 };
 
 #[derive(Serialize)]
-struct ResultEntry {
-    file: String,
-    line: u32,
-    col_start: u32,
-    col_end: u32,
+pub struct ResultEntry {
+    pub file: String,
+    pub line: u32,
+    pub col_start: u32,
+    pub col_end: u32,
 }
 
 #[derive(Serialize)]
-struct QueryResult {
-    symbol: String,
+pub struct QueryResult {
+    pub symbol: String,
     #[serde(rename = "type")]
-    search_type: String,
-    ext: Option<String>,
-    count: usize,
-    results: Vec<ResultEntry>,
+    pub search_type: String,
+    pub ext: Option<String>,
+    pub count: usize,
+    pub results: Vec<ResultEntry>,
 }
 
-pub fn run_query(
+/// Run a query and return the structured result (for the MCP / library callers).
+pub fn query_json(
     conn: &Connection,
     symbol: &str,
     search_type: &SearchType,
     ext_filter: Option<&str>,
     ignore_case: bool,
-) -> Result<()> {
+) -> Result<QueryResult> {
     let occurrences = db::query_occurrences(conn, symbol, search_type, ext_filter, ignore_case)?;
 
     let entries: Vec<ResultEntry> = occurrences
@@ -44,14 +45,24 @@ pub fn run_query(
         })
         .collect();
 
-    let result = QueryResult {
+    Ok(QueryResult {
         symbol: symbol.to_string(),
         search_type: search_type.as_str().to_string(),
         ext: ext_filter.map(|e| e.to_string()),
         count: entries.len(),
         results: entries,
-    };
+    })
+}
 
+/// Run a query and print the result as pretty JSON (CLI path).
+pub fn run_query(
+    conn: &Connection,
+    symbol: &str,
+    search_type: &SearchType,
+    ext_filter: Option<&str>,
+    ignore_case: bool,
+) -> Result<()> {
+    let result = query_json(conn, symbol, search_type, ext_filter, ignore_case)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
