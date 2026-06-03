@@ -1,7 +1,7 @@
 //! Free-form notes that the AI can save and retrieve via the MCP server.
 //! Backed by SQLite + FTS5 in the shared AppData `workspaces/<hash>/slc.sqlite`.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;

@@ -2,10 +2,9 @@ use super::*;
 
 #[tokio::test]
 async fn test_sqlite_roundtrip() {
-    let dir = std::env::temp_dir().join("speedy_test_db_vec");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = tempfile::TempDir::new().unwrap();
 
-    let store = SqliteVectorStore::new(dir.to_str().unwrap())
+    let store = SqliteVectorStore::new(dir.path().to_str().unwrap())
         .await
         .expect("create store");
 
@@ -33,15 +32,12 @@ async fn test_sqlite_roundtrip() {
 
     store.remove_chunks_for_file("src/main.rs").await.unwrap();
     assert_eq!(store.count_chunks().await.unwrap(), 0);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn test_metadata_roundtrip() {
-    let dir = std::env::temp_dir().join("speedy_test_metadata_vec");
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = SqliteVectorStore::new(dir.to_str().unwrap()).await.unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = SqliteVectorStore::new(dir.path().to_str().unwrap()).await.unwrap();
 
     assert!(store.get_metadata("embedding_model").await.unwrap().is_none());
     store.set_metadata("embedding_model", "nomic-embed-text").await.unwrap();
@@ -54,15 +50,12 @@ async fn test_metadata_roundtrip() {
         store.get_metadata("embedding_model").await.unwrap().as_deref(),
         Some("all-minilm"),
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn test_clear_all_chunks_empties_store() {
-    let dir = std::env::temp_dir().join("speedy_test_clear_vec");
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = SqliteVectorStore::new(dir.to_str().unwrap()).await.unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = SqliteVectorStore::new(dir.path().to_str().unwrap()).await.unwrap();
 
     let records = vec![
         ChunkRecord {
@@ -90,8 +83,6 @@ async fn test_clear_all_chunks_empties_store() {
     store.clear_all_chunks().await.unwrap();
     assert_eq!(store.count_chunks().await.unwrap(), 0);
     assert!(store.similarity_search(&[1.0, 0.0], 5).await.unwrap().is_empty());
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -181,8 +172,7 @@ async fn test_insert_chunks_after_clear_accepts_different_dimension() {
 
 #[tokio::test]
 async fn test_sqlite_persists() {
-    let dir = std::env::temp_dir().join("speedy_test_persist_vec");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = tempfile::TempDir::new().unwrap();
 
     let records = vec![ChunkRecord {
         id: "p-1".to_string(),
@@ -195,19 +185,17 @@ async fn test_sqlite_persists() {
     }];
 
     {
-        let store = SqliteVectorStore::new(dir.to_str().unwrap()).await.unwrap();
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap()).await.unwrap();
         store.insert_chunks(&records).await.unwrap();
     }
 
     {
-        let store = SqliteVectorStore::new(dir.to_str().unwrap()).await.unwrap();
+        let store = SqliteVectorStore::new(dir.path().to_str().unwrap()).await.unwrap();
         assert_eq!(store.count_chunks().await.unwrap(), 1);
         let results = store.similarity_search(&[0.0, 0.0, 0.99], 5).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, "lib.rs");
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
