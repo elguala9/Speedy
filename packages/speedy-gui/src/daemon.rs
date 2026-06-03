@@ -256,9 +256,9 @@ impl DaemonBridge {
         let poll_state = self.state.clone();
         let poll_path = path_for_poll;
         self.rt.spawn(async move {
-            let file = std::path::Path::new(&poll_path)
-                .join(".speedy")
-                .join("index-progress.json");
+            let file = speedy_core::daemon_util::workspace_data_dir(
+                std::path::Path::new(&poll_path)
+            ).join("index-progress.json");
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let still_running = poll_state

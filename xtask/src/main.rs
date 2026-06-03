@@ -9,6 +9,7 @@ const PACKAGES: &[&str] = &[
     "speedy-ai-context-mcp",
     "speedy-gui",
     "speedy-language-context",
+    "speedy-text",
 ];
 
 // Binaries to copy from target/release/ to dist/ (may differ from PACKAGES
@@ -21,6 +22,8 @@ const BINARIES: &[&str] = &[
     "speedy-gui",
     "speedy-language-context",
     "speedy-language-context-mcp",
+    "speedy-text-context",
+    "speedy-text-context-mcp",
 ];
 
 fn main() {

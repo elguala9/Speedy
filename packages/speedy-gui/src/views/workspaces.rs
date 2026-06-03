@@ -6,11 +6,12 @@ use std::collections::HashMap;
 struct WorkspaceFeatures {
     speedy_indexer: bool,
     language_context: bool,
+    text_context: bool,
 }
 
 impl Default for WorkspaceFeatures {
     fn default() -> Self {
-        Self { speedy_indexer: true, language_context: true }
+        Self { speedy_indexer: true, language_context: true, text_context: true }
     }
 }
 
@@ -29,6 +30,7 @@ fn load_features(workspace_path: &str) -> WorkspaceFeatures {
             return WorkspaceFeatures {
                 speedy_indexer: get_bool("speedy_indexer"),
                 language_context: get_bool("language_context"),
+                text_context: get_bool("text_context"),
             };
         }
     }
@@ -51,6 +53,7 @@ fn save_features(workspace_path: &str, f: &WorkspaceFeatures) {
     let mut section = toml::value::Table::new();
     section.insert("speedy_indexer".to_string(), toml::Value::Boolean(f.speedy_indexer));
     section.insert("language_context".to_string(), toml::Value::Boolean(f.language_context));
+    section.insert("text_context".to_string(), toml::Value::Boolean(f.text_context));
     if let toml::Value::Table(table) = &mut doc {
         table.insert("features".to_string(), toml::Value::Table(section));
     }
@@ -237,6 +240,13 @@ impl WorkspacesView {
             if ui
                 .checkbox(&mut features.language_context, "Language Context")
                 .on_hover_text("Code intelligence (speedy-language-context)")
+                .changed()
+            {
+                features_changed = true;
+            }
+            if ui
+                .checkbox(&mut features.text_context, "Text Context")
+                .on_hover_text("Text-symbol index (speedy-text-context)")
                 .changed()
             {
                 features_changed = true;

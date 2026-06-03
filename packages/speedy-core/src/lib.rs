@@ -1,4 +1,5 @@
 pub mod config;
+pub mod hash_registry;
 pub mod daemon_client;
 pub mod default_ignores;
 pub mod daemon_util;

@@ -98,12 +98,13 @@ speedy-cli workspace list
 
 ## Step 3 — Add Speedy MCP servers to your AI agent
 
-Speedy ships two independent MCP servers. Add one or both.
+Speedy ships three independent MCP servers. Add any or all.
 
 | Server binary              | Purpose                                          |
 |----------------------------|--------------------------------------------------|
 | `speedy-ai-context-mcp`    | Semantic search (natural language queries)       |
 | `speedy-language-context-mcp` | Code graph: symbol skeletons, impact analysis |
+| `speedy-text-context-mcp`  | Text-symbol search over docs/config files        |
 
 ### Claude Code — `.claude/settings.json` or `claude.json`
 
@@ -116,6 +117,10 @@ Speedy ships two independent MCP servers. Add one or both.
     },
     "speedy-lc": {
       "command": "speedy-language-context-mcp",
+      "args": ["--workspace", "C:\\path\\to\\your\\project"]
+    },
+    "speedy-text": {
+      "command": "speedy-text-context-mcp",
       "args": ["--workspace", "C:\\path\\to\\your\\project"]
     }
   }
@@ -137,6 +142,10 @@ If the binaries are not on PATH, use the full path:
     "speedy-lc": {
       "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Speedy\\speedy-language-context-mcp.exe",
       "args": ["--workspace", "C:\\path\\to\\your\\project"]
+    },
+    "speedy-text": {
+      "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Speedy\\speedy-text-context-mcp.exe",
+      "args": ["--workspace", "C:\\path\\to\\your\\project"]
     }
   }
 }
@@ -156,6 +165,10 @@ If the binaries are not on PATH, use the full path:
     },
     "speedy-lc": {
       "command": "speedy-language-context-mcp",
+      "args": ["--workspace", "/path/to/your/project"]
+    },
+    "speedy-text": {
+      "command": "speedy-text-context-mcp",
       "args": ["--workspace", "/path/to/your/project"]
     }
   }
@@ -192,6 +205,15 @@ If the binaries are not on PATH, use the full path:
 | `workspace_list`      | List all workspaces                                   |
 | `save_observation`    | Save a note about the codebase                        |
 | `search_observations` | Search saved notes                                    |
+
+### speedy-text-context-mcp (text-symbol search)
+
+| Tool                  | Parameters (key ones)                                  | Description                                          |
+|-----------------------|--------------------------------------------------------|------------------------------------------------------|
+| `text_query`          | `symbol` (req), `type` (opt), `ext` (opt), `ignore_case` (opt) | Find occurrences of a symbol in docs/config files, with line/column positions |
+| `text_replace`        | `symbol` (req), `replacement` (req), `type` (opt), `ext` (opt), `ignore_case` (opt), `whole_token_only` (opt), `force` (opt), `files` (opt), `dry_run` (opt) | Replace every occurrence of a symbol and immediately re-index the changed files (same matching semantics as `text_query`). `whole_token_only` skips sub-token matches inside larger tokens; `force` bypasses the 500-occurrence safety limit; `files` restricts to specific paths. Note: a `replacement` containing non-token chars (spaces, `.`) changes how the file re-tokenizes, so the occurrence count for the new symbol may differ. |
+| `text_status`         | —                                                      | Index stats: file, occurrence and unique-symbol counts |
+| `text_force_reindex`  | —                                                      | Drop the text index and re-index the workspace        |
 
 ---
 

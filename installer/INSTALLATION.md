@@ -51,6 +51,8 @@ Other supported models: `nomic-embed-text`, `mxbai-embed-large`, `qwen3-embeddin
 | `speedy-cli` | Thin CLI client — what you call from the terminal |
 | `speedy-ai-context-mcp` | MCP server for semantic search |
 | `speedy-language-context-mcp` | MCP server for code graph analysis |
+| `speedy-text-context` | Text-symbol indexer/query worker (called by the daemon) |
+| `speedy-text-context-mcp` | MCP server for text-symbol search |
 | `speedy-ai-context` | Indexing/query worker (called by the daemon) |
 | `speedy-gui` | Desktop GUI |
 | `README.txt` | Usage reference |
@@ -227,6 +229,10 @@ Add to your agent's config (Claude Code, Cursor, Windsurf, opencode…):
     },
     "speedy-lang": {
       "command": "speedy-language-context-mcp",
+      "args": ["--workspace", "/path/to/your/project"]
+    },
+    "speedy-text": {
+      "command": "speedy-text-context-mcp",
       "args": ["--workspace", "/path/to/your/project"]
     }
   }

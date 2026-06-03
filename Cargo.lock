@@ -424,19 +424,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blake3"
-version = "1.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9ec96fe9a81b5e365f9db71fe00edc4fe4ca2cc7dcb7861f0603012a7caa210"
-dependencies = [
- "arrayref",
- "arrayvec",
- "cc",
- "cfg-if",
- "constant_time_eq",
-]
-
-[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -819,12 +806,6 @@ dependencies = [
  "unicode-width",
  "windows-sys 0.59.0",
 ]
-
-[[package]]
-name = "constant_time_eq"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "core-foundation"
@@ -4525,8 +4506,11 @@ dependencies = [
  "dirs 5.0.1",
  "fd-lock",
  "interprocess",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
  "toml",
  "walkdir",
@@ -4584,7 +4568,6 @@ name = "speedy-language-context"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "blake3",
  "chrono",
  "clap",
  "ignore",
@@ -4614,6 +4597,23 @@ dependencies = [
  "tree-sitter-scala",
  "tree-sitter-swift",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "speedy-text"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ignore",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "speedy-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
