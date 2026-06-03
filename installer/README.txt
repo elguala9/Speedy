@@ -135,6 +135,7 @@ Tools available:
 
 Tools available:
   text_query         Find symbol occurrences in docs/config files
+  text_replace       Replace symbol occurrences and re-index changed files
   text_status        Index stats (files, occurrences, unique symbols)
   text_force_reindex Drop the text index and re-index the workspace
 

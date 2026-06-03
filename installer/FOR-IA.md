@@ -211,6 +211,7 @@ If the binaries are not on PATH, use the full path:
 | Tool                  | Parameters (key ones)                                  | Description                                          |
 |-----------------------|--------------------------------------------------------|------------------------------------------------------|
 | `text_query`          | `symbol` (req), `type` (opt), `ext` (opt), `ignore_case` (opt) | Find occurrences of a symbol in docs/config files, with line/column positions |
+| `text_replace`        | `symbol` (req), `replacement` (req), `type` (opt), `ext` (opt), `ignore_case` (opt), `whole_token_only` (opt), `force` (opt), `files` (opt), `dry_run` (opt) | Replace every occurrence of a symbol and immediately re-index the changed files (same matching semantics as `text_query`). `whole_token_only` skips sub-token matches inside larger tokens; `force` bypasses the 500-occurrence safety limit; `files` restricts to specific paths. Note: a `replacement` containing non-token chars (spaces, `.`) changes how the file re-tokenizes, so the occurrence count for the new symbol may differ. |
 | `text_status`         | —                                                      | Index stats: file, occurrence and unique-symbol counts |
 | `text_force_reindex`  | —                                                      | Drop the text index and re-index the workspace        |
 

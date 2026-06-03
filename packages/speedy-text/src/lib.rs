@@ -15,5 +15,6 @@ pub mod ignore;
 pub mod indexer;
 pub mod mcp;
 pub mod query;
+pub mod replace;
 pub mod tokenize;
 pub mod walk;
