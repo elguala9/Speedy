@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+use speedy_text::replace::{ReplaceArgs, run_replace};
 use speedy_text::tokenize::SearchType;
 use speedy_text::{config, db, indexer, query};
 
@@ -42,6 +43,33 @@ enum Commands {
         /// Case-insensitive search
         #[arg(long)]
         ignore_case: bool,
+    },
+    /// Replace occurrences of a symbol and re-index the changed files
+    Replace {
+        path: PathBuf,
+        symbol: String,
+        replacement: String,
+        /// Search type (default: cased)
+        #[arg(long, value_enum)]
+        r#type: Option<SearchTypeArg>,
+        /// Filter by file extension (e.g. md)
+        #[arg(long)]
+        ext: Option<String>,
+        /// Case-insensitive match (replacement is written literally)
+        #[arg(long)]
+        ignore_case: bool,
+        /// Skip sub-token matches inside a larger token (e.g. 'Dummy' in 'FooDummyBar')
+        #[arg(long)]
+        whole_token_only: bool,
+        /// Bypass the safety limit on large replaces
+        #[arg(long)]
+        force: bool,
+        /// Restrict the replace to these root-relative paths (repeatable)
+        #[arg(long)]
+        files: Vec<String>,
+        /// Preview changes without writing files or updating the index
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show index statistics
     Status {
@@ -119,6 +147,27 @@ fn run() -> Result<()> {
             db::migrate(&conn)?;
             let search_type: SearchType = r#type.map(Into::into).unwrap_or(SearchType::Cased);
             query::run_query(&conn, &symbol, &search_type, ext.as_deref(), ignore_case)?;
+        }
+
+        Commands::Replace { path, symbol, replacement, r#type, ext, ignore_case, whole_token_only, force, files, dry_run } => {
+            let root = config::find_root(&path);
+            let db_path = config::db_path(&root);
+            let mut conn = db::open(&db_path)
+                .with_context(|| format!("cannot open DB at {}", db_path.display()))?;
+            db::migrate(&conn)?;
+            let search_type: SearchType = r#type.map(Into::into).unwrap_or(SearchType::Cased);
+            let result = run_replace(&mut conn, &root, &ReplaceArgs {
+                symbol: &symbol,
+                replacement: &replacement,
+                search_type,
+                ext_filter: ext.as_deref(),
+                ignore_case,
+                dry_run,
+                whole_token_only,
+                force,
+                files: if files.is_empty() { None } else { Some(&files) },
+            })?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
         Commands::Status { path } => {

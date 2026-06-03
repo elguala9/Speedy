@@ -252,14 +252,14 @@ pub fn update_file(conn: &mut Connection, root: &Path, file: &Path) -> Result<()
     Ok(())
 }
 
-/// Returns mtime as milliseconds since epoch (sub-second precision avoids fast-path
-/// false-positives when index and file write happen within the same wall-clock second).
+/// Returns mtime as seconds since epoch — must match `HashRegistry::file_mtime_secs`
+/// which also uses `as_secs()`, so `set_indexed` and `mtime_unchanged` agree on units.
 fn file_mtime_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
+        .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 

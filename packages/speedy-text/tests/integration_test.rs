@@ -84,6 +84,14 @@ fn count(v: &serde_json::Value) -> u64 {
     v["count"].as_u64().unwrap_or_else(|| panic!("missing 'count' in: {v}"))
 }
 
+fn replace_json(dir: &Path, extra_args: &[&str]) -> serde_json::Value {
+    let mut args = vec!["replace", "."];
+    args.extend_from_slice(extra_args);
+    let (code, stdout, stderr) = run(dir, &args);
+    assert_eq!(code, 0, "replace failed: {stderr}");
+    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("invalid JSON: {e}\n---\n{stdout}"))
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -214,6 +222,10 @@ fn test_sync_detects_modified_file() {
     let before = query_json(&dir, &["Dummy", "--ext", "md"]);
     assert_eq!(count(&before), 4);
 
+    // Ensure the write falls in a different second than the index so mtime_unchanged
+    // (seconds-granularity) correctly sees the file as changed.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
     // Add one more Dummy to guide.md
     let md_path = dir.join("docs").join("guide.md");
     let mut content = std::fs::read_to_string(&md_path).unwrap();
@@ -342,6 +354,277 @@ fn test_cased_finds_camel_sub_token() {
         !iso_results.iter().any(|r| r["file"].as_str().unwrap_or("").contains("camel.md")),
         "isolated_special must not find Dummy as camel sub-token: {v_iso}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── replace tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_replace_isolated_basic() {
+    let dir = make_workspace();
+    index(&dir);
+
+    // isolated: 3 occurrences — "The Dummy symbol", "foo Dummy bar" in md + "// Dummy" in rs
+    let v = replace_json(&dir, &["Dummy", "Replaced", "--type", "isolated"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(3), "occurrences_replaced: {v}");
+    assert_eq!(v["files_changed"].as_u64(), Some(2), "files_changed: {v}");
+    assert_eq!(v["dry_run"].as_bool(), Some(false), "dry_run: {v}");
+    assert_eq!(v["skipped"].as_array().map(|a| a.len()), Some(0), "unexpected skips: {v}");
+
+    // Query must reflect the replacement
+    let q = query_json(&dir, &["Replaced", "--type", "isolated"]);
+    assert_eq!(count(&q), 3, "expected 3 Replaced isolated: {q}");
+    let q2 = query_json(&dir, &["Dummy", "--type", "isolated"]);
+    assert_eq!(count(&q2), 0, "Dummy isolated should be gone: {q2}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_cased_includes_sub_tokens() {
+    let dir = make_workspace();
+    // Add a file with a camelCase token containing Dummy
+    std::fs::write(dir.join("docs").join("camel.md"), "FooDummyBar\n").unwrap();
+    index(&dir);
+
+    // cased (default) expands to all types → sub-token Dummy inside FooDummyBar must be replaced
+    let v = replace_json(&dir, &["Dummy", "Sub", "--ext", "md"]);
+    assert!(v["occurrences_replaced"].as_u64().unwrap_or(0) > 0, "should replace: {v}");
+
+    let content = std::fs::read_to_string(dir.join("docs").join("camel.md")).unwrap();
+    assert!(content.contains("Sub"), "sub-token should be replaced: {content}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_isolated_special_type() {
+    let dir = make_workspace();
+    index(&dir);
+
+    // isolated_special expands to: isolated_special + isolated → 5 total
+    let v = replace_json(&dir, &["Dummy", "X", "--type", "isolated_special"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(5), "isolated_special expand: {v}");
+
+    let q = query_json(&dir, &["Dummy", "--type", "isolated_special"]);
+    assert_eq!(count(&q), 0, "all matched Dummy should be gone: {q}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_dry_run_does_not_modify() {
+    let dir = make_workspace();
+    index(&dir);
+
+    let before = std::fs::read_to_string(dir.join("docs").join("guide.md")).unwrap();
+
+    let v = replace_json(&dir, &["Dummy", "NewName", "--dry-run"]);
+    assert_eq!(v["dry_run"].as_bool(), Some(true), "dry_run flag: {v}");
+    assert!(v["occurrences_replaced"].as_u64().unwrap_or(0) > 0, "should preview replacements: {v}");
+
+    let after = std::fs::read_to_string(dir.join("docs").join("guide.md")).unwrap();
+    assert_eq!(before, after, "dry_run must not modify files");
+
+    // Index must be unchanged
+    let q = query_json(&dir, &["Dummy"]);
+    assert!(count(&q) > 0, "index must be unchanged after dry_run: {q}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_updates_index() {
+    let dir = make_workspace();
+    index(&dir);
+
+    replace_json(&dir, &["Dummy", "Placeholder"]);
+
+    let after_dummy = count(&query_json(&dir, &["Dummy"]));
+    let after_placeholder = count(&query_json(&dir, &["Placeholder"]));
+
+    assert_eq!(after_dummy, 0, "Dummy should have 0 occurrences after replace: {after_dummy}");
+    assert!(after_placeholder > 0, "Placeholder should have occurrences after replace: {after_placeholder}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_stale_skips_file() {
+    let dir = make_workspace();
+    index(&dir);
+
+    // Overwrite guide.md without syncing → index is now stale for that file
+    let md_path = dir.join("docs").join("guide.md");
+    std::fs::write(&md_path, "completely different content\n").unwrap();
+
+    let v = replace_json(&dir, &["Dummy", "NewName", "--ext", "md"]);
+
+    let skipped = v["skipped"].as_array().expect("skipped must be array");
+    assert!(!skipped.is_empty(), "stale file should be in skipped: {v}");
+    assert_eq!(v["files_changed"].as_u64(), Some(0), "no files should be changed: {v}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_multi_occurrence_same_line() {
+    let dir = make_workspace();
+    // Line with two occurrences of Foo separated by a space → both are isolated
+    std::fs::write(dir.join(".speedyextensions"), "md\n").unwrap();
+    std::fs::write(dir.join("docs").join("multi.md"), "Foo Foo\n").unwrap();
+    index(&dir);
+
+    let v = replace_json(&dir, &["Foo", "Bar", "--type", "isolated", "--ext", "md"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(2), "two occurrences on same line: {v}");
+
+    let content = std::fs::read_to_string(dir.join("docs").join("multi.md")).unwrap();
+    assert_eq!(content.trim_end_matches('\n'), "Bar Bar", "both Foo replaced: {content:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_utf8_multibyte() {
+    let dir = temp_workspace();
+    std::fs::write(dir.join(".speedyextensions"), "md\n").unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    // "café" is before the token so col offsets shift if we used chars instead of bytes
+    std::fs::write(dir.join("docs").join("utf8.md"), "café Dummy end\n").unwrap();
+    index(&dir);
+
+    let v = replace_json(&dir, &["Dummy", "REPLACED", "--type", "isolated", "--ext", "md"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(1), "utf8 replace: {v}");
+    assert_eq!(v["skipped"].as_array().map(|a| a.len()), Some(0), "no skips: {v}");
+
+    let content = std::fs::read_to_string(dir.join("docs").join("utf8.md")).unwrap();
+    assert!(content.contains("REPLACED"), "replacement present: {content}");
+    assert!(!content.contains("Dummy"), "original gone: {content}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_no_double_trigger_mtime() {
+    // After replace (which calls update_file), sync should see 0 updated for the replaced file
+    // because update_file already recorded the new mtime in the registry.
+    // This validates the mtime-unit fix: set_indexed(secs) vs mtime_unchanged(secs).
+    let dir = make_workspace();
+    index(&dir);
+
+    // Replace only in rs file
+    replace_json(&dir, &["Dummy", "Fixed", "--ext", "rs"]);
+
+    // Sync must skip the rs file (already up-to-date in index + registry)
+    let (code, _, stderr) = run(&dir, &["sync", "."]);
+    assert_eq!(code, 0, "sync failed: {stderr}");
+    assert!(stderr.contains("0 updated"), "expected 0 updated after replace: {stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_whole_token_only_skips_sub_tokens() {
+    let dir = temp_workspace();
+    std::fs::write(dir.join(".speedyextensions"), "md\n").unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    // One standalone Dummy (whole token) and one Dummy inside a camelCase token.
+    std::fs::write(dir.join("docs").join("mix.md"), "Dummy and FooDummyBar\n").unwrap();
+    index(&dir);
+
+    let v = replace_json(&dir, &["Dummy", "X", "--ext", "md", "--whole-token-only"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(1), "only the whole token replaced: {v}");
+    assert!(v["sub_tokens_skipped"].as_u64().unwrap_or(0) >= 1, "sub-token must be reported: {v}");
+
+    let content = std::fs::read_to_string(dir.join("docs").join("mix.md")).unwrap();
+    assert!(content.contains("FooDummyBar"), "sub-token must stay intact: {content}");
+    assert!(content.contains("X and"), "whole token must be replaced: {content}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_whole_token_only_underscore_sub_token() {
+    let dir = temp_workspace();
+    std::fs::write(dir.join(".speedyextensions"), "md\n").unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    // PREFIX_Dummy_SUFFIX: Dummy is an isolated_special sub-token of a larger token.
+    std::fs::write(dir.join("docs").join("us.md"), "PREFIX_Dummy_SUFFIX\n").unwrap();
+    index(&dir);
+
+    let v = replace_json(&dir, &["Dummy", "X", "--ext", "md", "--whole-token-only"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(0), "sub-token must not be replaced: {v}");
+
+    let content = std::fs::read_to_string(dir.join("docs").join("us.md")).unwrap();
+    assert!(content.contains("PREFIX_Dummy_SUFFIX"), "file must be untouched: {content}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_safety_limit_blocks_large_replace() {
+    let dir = temp_workspace();
+    std::fs::write(dir.join(".speedyextensions"), "md\n").unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    // 600 isolated occurrences > REPLACE_SAFETY_LIMIT (500).
+    let mut body = String::new();
+    for _ in 0..600 {
+        body.push_str("Dummy\n");
+    }
+    std::fs::write(dir.join("docs").join("big.md"), &body).unwrap();
+    index(&dir);
+
+    // Without --force the replace must fail and leave the file untouched.
+    let (code, _, stderr) = run(&dir, &["replace", ".", "Dummy", "X", "--type", "isolated", "--ext", "md"]);
+    assert_ne!(code, 0, "replace over the limit must fail without --force");
+    assert!(stderr.contains("safety limit"), "error should mention the safety limit: {stderr}");
+    let content = std::fs::read_to_string(dir.join("docs").join("big.md")).unwrap();
+    assert!(content.contains("Dummy"), "file must be untouched when blocked: head={:?}", &content[..20]);
+
+    // --force overrides the limit.
+    let v = replace_json(&dir, &["Dummy", "X", "--type", "isolated", "--ext", "md", "--force"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(600), "force should replace all: {v}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_dry_run_ignores_safety_limit() {
+    let dir = temp_workspace();
+    std::fs::write(dir.join(".speedyextensions"), "md\n").unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    let mut body = String::new();
+    for _ in 0..600 {
+        body.push_str("Dummy\n");
+    }
+    std::fs::write(dir.join("docs").join("big.md"), &body).unwrap();
+    index(&dir);
+
+    // dry_run previews the full count without tripping the safety limit.
+    let v = replace_json(&dir, &["Dummy", "X", "--type", "isolated", "--ext", "md", "--dry-run"]);
+    assert_eq!(v["occurrences_replaced"].as_u64(), Some(600), "dry_run should preview all: {v}");
+    let content = std::fs::read_to_string(dir.join("docs").join("big.md")).unwrap();
+    assert!(content.contains("Dummy"), "dry_run must not modify the file");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_files_filter_restricts_paths() {
+    let dir = make_workspace();
+    index(&dir);
+
+    // Dummy exists in both docs/guide.md and src/lib.rs; restrict to the md file only.
+    let v = replace_json(&dir, &["Dummy", "Renamed", "--files", "docs/guide.md"]);
+    assert!(v["occurrences_replaced"].as_u64().unwrap_or(0) > 0, "should replace in guide.md: {v}");
+    assert_eq!(v["files_changed"].as_u64(), Some(1), "only one file may change: {v}");
+
+    // src/lib.rs must be untouched.
+    let lib = std::fs::read_to_string(dir.join("src").join("lib.rs")).unwrap();
+    assert!(lib.contains("Dummy"), "lib.rs must be untouched: {lib}");
+    let guide = std::fs::read_to_string(dir.join("docs").join("guide.md")).unwrap();
+    assert!(guide.contains("Renamed"), "guide.md must be replaced: {guide}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

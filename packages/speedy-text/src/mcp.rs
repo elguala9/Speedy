@@ -3,6 +3,7 @@
 //! Tools exposed:
 //!   - `text_status`        — index stats (file/occurrence/symbol counts)
 //!   - `text_query`         — find occurrences of a symbol
+//!   - `text_replace`       — replace occurrences of a symbol and re-index changed files
 //!   - `text_force_reindex` — drop the index and re-index the workspace
 
 use anyhow::Result;
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::replace::{ReplaceArgs, run_replace};
 use crate::tokenize::SearchType;
 use crate::{config, db, indexer, query};
 
@@ -100,6 +102,25 @@ fn handle_tools_list(id: Value) -> Value {
                     }
                 },
                 {
+                    "name": "text_replace",
+                    "description": "Replace every occurrence of a symbol in the indexed files and immediately re-index the changed files. Respects the same search-type expansion as text_query.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol":      { "type": "string", "description": "Symbol to find and replace" },
+                            "replacement": { "type": "string", "description": "Text to write in place of each occurrence" },
+                            "type":        { "type": "string", "enum": ["cased", "isolated_special", "isolated"], "description": "Match strictness (default: cased)" },
+                            "ext":         { "type": "string", "description": "Restrict to a file extension, e.g. md" },
+                            "ignore_case": { "type": "boolean", "description": "Case-insensitive match (replacement is always written literally)" },
+                            "whole_token_only": { "type": "boolean", "description": "Skip sub-token matches inside a larger token, e.g. 'Dummy' inside 'FooDummyBar' (default: false)" },
+                            "force":       { "type": "boolean", "description": "Bypass the safety limit on large replaces (default: false)" },
+                            "files":       { "type": "array", "items": { "type": "string" }, "description": "Restrict the replace to these root-relative file paths (default: all indexed files)" },
+                            "dry_run":     { "type": "boolean", "description": "Preview changes without writing files or updating the index (default: false)" }
+                        },
+                        "required": ["symbol", "replacement"]
+                    }
+                },
+                {
                     "name": "text_force_reindex",
                     "description": "Drop the text index and re-index the whole workspace, then return updated stats.",
                     "inputSchema": { "type": "object", "properties": {} }
@@ -121,6 +142,10 @@ fn handle_tools_call(id: Value, params: Value, workspace_root: &Path) -> Value {
         "text_query" => match tool_query(workspace_root, args) {
             Ok(t) => t,
             Err(e) => return error_response(id, -32602, &format!("text_query failed: {e}")),
+        },
+        "text_replace" => match tool_replace(workspace_root, args) {
+            Ok(t) => t,
+            Err(e) => return error_response(id, -32602, &format!("text_replace failed: {e}")),
         },
         "text_force_reindex" => match tool_force_reindex(workspace_root) {
             Ok(t) => t,
@@ -169,6 +194,46 @@ fn tool_query(root: &Path, args: Value) -> Result<String> {
     Ok(serde_json::to_string_pretty(&result)?)
 }
 
+fn tool_replace(root: &Path, args: Value) -> Result<String> {
+    let symbol = args
+        .get("symbol")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| anyhow::anyhow!("symbol is required"))?;
+    let replacement = args
+        .get("replacement")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| anyhow::anyhow!("replacement is required"))?;
+    let search_type = match args.get("type").and_then(|t| t.as_str()) {
+        Some("isolated") => SearchType::Isolated,
+        Some("isolated_special") => SearchType::IsolatedSpecial,
+        _ => SearchType::Cased,
+    };
+    let ext = args.get("ext").and_then(|e| e.as_str());
+    let ignore_case = args.get("ignore_case").and_then(|b| b.as_bool()).unwrap_or(false);
+    let whole_token_only = args.get("whole_token_only").and_then(|b| b.as_bool()).unwrap_or(false);
+    let force = args.get("force").and_then(|b| b.as_bool()).unwrap_or(false);
+    let dry_run = args.get("dry_run").and_then(|b| b.as_bool()).unwrap_or(false);
+    let files: Option<Vec<String>> = args.get("files").and_then(|f| f.as_array()).map(|arr| {
+        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+    });
+
+    let db_path = config::db_path(root);
+    let mut conn = db::open(&db_path)?;
+    db::migrate(&conn)?;
+    let result = run_replace(&mut conn, root, &ReplaceArgs {
+        symbol,
+        replacement,
+        search_type,
+        ext_filter: ext,
+        ignore_case,
+        dry_run,
+        whole_token_only,
+        force,
+        files: files.as_deref(),
+    })?;
+    Ok(serde_json::to_string_pretty(&result)?)
+}
+
 fn tool_force_reindex(root: &Path) -> Result<String> {
     let db_path = config::db_path(root);
     let mut conn = db::open(&db_path)?;
@@ -192,10 +257,13 @@ mod tests {
     use serde_json::json;
 
     fn tmp() -> std::path::PathBuf {
-        // Unique-enough temp dir without Date/rand (forbidden in some contexts):
-        // derive from process id + a counter env knob.
+        // Unique temp dir per call without Date/rand (forbidden in some contexts):
+        // process id + a monotonic counter so tests running in parallel never collide.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir();
-        base.join(format!("speedy-text-mcp-test-{}", std::process::id()))
+        base.join(format!("speedy-text-mcp-test-{}-{n}", std::process::id()))
     }
 
     #[test]
@@ -217,6 +285,7 @@ mod tests {
             .collect();
         assert!(tools.contains(&"text_status"));
         assert!(tools.contains(&"text_query"));
+        assert!(tools.contains(&"text_replace"));
         assert!(tools.contains(&"text_force_reindex"));
     }
 
