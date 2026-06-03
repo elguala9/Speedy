@@ -109,6 +109,8 @@ Source: "..\dist\speedy-ai-context-mcp.exe";    DestDir: "{app}"; Flags: ignorev
 Source: "..\dist\speedy-gui.exe";               DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "..\dist\speedy-language-context.exe";      DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "..\dist\speedy-language-context-mcp.exe";  DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-text-context.exe";          DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "..\dist\speedy-text-context-mcp.exe";      DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
 ; Documentazione — copiata nella cartella di installazione
 Source: "..\installer\README.txt";       DestDir: "{app}"; Flags: ignoreversion
@@ -243,6 +245,11 @@ Filename: "{sys}\taskkill.exe"; \
   Parameters: "/F /IM speedy-language-context.exe /T"; \
   Flags: runhidden; \
   RunOnceId: "KillLangCtx"
+
+Filename: "{sys}\taskkill.exe"; \
+  Parameters: "/F /IM speedy-text-context.exe /T"; \
+  Flags: runhidden; \
+  RunOnceId: "KillTextCtx"
 
 ; ============================================================
 [Code]
@@ -385,6 +392,8 @@ begin
       Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-ai-context.exe /T',
            '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-language-context.exe /T',
+           '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-text-context.exe /T',
            '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       Sleep(1200); // attende che il SO rilasci i file lock prima della cancellazione
 

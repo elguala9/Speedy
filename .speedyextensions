@@ -1,0 +1,59 @@
+# speedy-text: file extensions to index.
+# One extension per line, without the leading dot.
+# Lines starting with # are comments.
+#
+# Text / documentation
+md
+txt
+rst
+adoc
+#
+# Data / config
+json
+toml
+yaml
+yml
+xml
+ini
+cfg
+conf
+env
+#
+# Web
+html
+htm
+css
+js
+ts
+jsx
+tsx
+#
+# Systems / backend
+rs
+py
+go
+java
+kt
+swift
+cs
+cpp
+c
+h
+rb
+php
+lua
+r
+scala
+dart
+#
+# Shell
+sh
+bash
+zsh
+fish
+ps1
+#
+# Database / query
+sql
+#
+# Misc dotfiles (no extension needed — add the full filename to .speedyignore to exclude)

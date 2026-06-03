@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use speedy_core::hash_registry::HashRegistry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -84,6 +85,11 @@ impl Indexer {
 }
 
 fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
+    // Wipe the shared hash registry for this context so every file is treated
+    // as new on a full re-index.
+    if let Ok(registry) = HashRegistry::open(root) {
+        let _ = registry.delete_context("language-context");
+    }
     let started = Instant::now();
     let mut files_indexed = 0usize;
     let mut files_skipped = 0usize;
@@ -216,6 +222,17 @@ fn index_files_blocking(root: &Path, store: &GraphStore, files: &[PathBuf]) -> R
 /// unchanged and therefore skipped.
 fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize> {
     let t_total = Instant::now();
+
+    // Fast mtime + hash check via shared registry (adds mtime fast-path that
+    // was missing before; also standardizes to SHA256 instead of blake3).
+    if let Ok(registry) = HashRegistry::open(root) {
+        match registry.needs_reindex(path, "language-context") {
+            Ok(false) => return Ok(usize::MAX),
+            Ok(true) => {}
+            Err(_) => {} // registry error → proceed with indexing
+        }
+    }
+
     let t_read = Instant::now();
     let content = match std::fs::read(path) {
         Ok(c) => c,
@@ -223,18 +240,12 @@ fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize>
     };
     let read_ms = t_read.elapsed().as_millis() as u64;
     let bytes_len = content.len();
-    let hash = blake3::hash(&content).to_hex().to_string();
+    let hash = HashRegistry::hash_bytes(&content);
     let rel = path
         .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-
-    if let Some(prev) = store.get_file_hash(&rel)? {
-        if prev == hash {
-            return Ok(usize::MAX);
-        }
-    }
 
     let mtime = std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -277,6 +288,12 @@ fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize>
         }
     }
     let edges_db_ms = t_edges_db.elapsed().as_millis() as u64;
+
+    // Update shared hash registry so the daemon can skip future spawns.
+    if let Ok(registry) = HashRegistry::open(root) {
+        let mtime_u64 = mtime.max(0) as u64;
+        let _ = registry.set_indexed(path, "language-context", &hash, mtime_u64);
+    }
 
     let total_ms = t_total.elapsed().as_millis() as u64;
     tracing::debug!(

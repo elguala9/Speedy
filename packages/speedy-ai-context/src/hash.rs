@@ -1,3 +1,5 @@
+// Uses the same SHA256 algorithm as speedy_core::hash_registry so hashes are
+// interchangeable across contexts.
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::fs;
@@ -12,9 +14,6 @@ pub fn hash_bytes(data: &[u8]) -> String {
 pub async fn hash_file(path: &Path) -> anyhow::Result<String> {
     use anyhow::Context;
 
-    // Refuse to slurp huge files into memory — bound by the same limit the
-    // indexer uses so callers can't accidentally trigger an OOM abort by
-    // hashing a multi-GB build artifact.
     let meta = fs::metadata(path).await
         .context(format!("failed to stat file for hashing: {}", path.display()))?;
     if meta.len() > crate::MAX_INDEXABLE_FILE_SIZE {

@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, Mutex};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+use speedy_core::hash_registry::HashRegistry;
 use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ToNsName};
 use speedy_core::local_sock::{ListenerTrait as _, Stream as LocalStream, StreamTrait as _};
 use tracing::{info, warn, error};
@@ -411,6 +412,11 @@ fn start_workspace_watcher(
                     let m = metrics.clone();
                     let event_at = event_at_clone.clone();
                     std::thread::spawn(move || {
+                        // Open the registry inside the spawned thread — Connection is !Send
+                        // so it cannot cross the thread boundary. Opening per batch is cheap
+                        // (WAL mode, single row reads).
+                        let registry = HashRegistry::open(Path::new(&p)).ok();
+
                         for event in &events {
                             if should_ignore_watch_path(&event.path) {
                                 continue;
@@ -444,28 +450,50 @@ fn start_workspace_watcher(
                             let features = slc_features::load_features(Some(&p));
 
                             if features.speedy_indexer {
-                                let mut spawn_cmd = std::process::Command::new(&exe);
-                                spawn_cmd
-                                    .args(["-p", &p, "index", &file_path])
-                                    .env("SPEEDY_NO_DAEMON", "1")
-                                    .stdout(Stdio::null())
-                                    .stderr(Stdio::null());
-                                #[cfg(windows)]
-                                {
-                                    use std::os::windows::process::CommandExt;
-                                    spawn_cmd.creation_flags(CREATE_NO_WINDOW);
-                                }
-                                if let Ok(mut child) = spawn_cmd.spawn() {
-                                    let pid = child.id();
-                                    pids.lock().unwrap().insert(pid);
-                                    let _ = child.wait();
-                                    pids.lock().unwrap().remove(&pid);
+                                let skip = registry.as_ref()
+                                    .map(|r| r.mtime_unchanged(&event.path, "ai-context"))
+                                    .unwrap_or(false);
+                                if skip {
+                                    tracing::debug!(
+                                        target: "watcher",
+                                        workspace = %p,
+                                        file = %file_path,
+                                        "ai-context: mtime unchanged, skipping spawn"
+                                    );
+                                } else {
+                                    let mut spawn_cmd = std::process::Command::new(&exe);
+                                    spawn_cmd
+                                        .args(["-p", &p, "index", &file_path])
+                                        .env("SPEEDY_NO_DAEMON", "1")
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null());
+                                    #[cfg(windows)]
+                                    {
+                                        use std::os::windows::process::CommandExt;
+                                        spawn_cmd.creation_flags(CREATE_NO_WINDOW);
+                                    }
+                                    if let Ok(mut child) = spawn_cmd.spawn() {
+                                        let pid = child.id();
+                                        pids.lock().unwrap().insert(pid);
+                                        let _ = child.wait();
+                                        pids.lock().unwrap().remove(&pid);
+                                    }
                                 }
                             }
 
                             // Also update the SLC symbol graph when language_context is enabled.
                             if features.language_context {
-                                if let Some(slc_exe) = slc_features::find_slc_exe() {
+                                let skip = registry.as_ref()
+                                    .map(|r| r.mtime_unchanged(&event.path, "language-context"))
+                                    .unwrap_or(false);
+                                if skip {
+                                    tracing::debug!(
+                                        target: "watcher",
+                                        workspace = %p,
+                                        file = %file_path,
+                                        "language-context: mtime unchanged, skipping spawn"
+                                    );
+                                } else if let Some(slc_exe) = slc_features::find_slc_exe() {
                                     let mut slc_cmd = std::process::Command::new(&slc_exe);
                                     slc_cmd
                                         .arg("--path").arg(&p)
@@ -482,6 +510,39 @@ fn start_workspace_watcher(
                                     match slc_cmd.spawn() {
                                         Ok(_) => tracing::debug!(workspace = %p, file = %file_path, "slc update spawned by watcher"),
                                         Err(e) => tracing::warn!(workspace = %p, error = %e, "failed to spawn slc update from watcher"),
+                                    }
+                                }
+                            }
+
+                            // Also update the text-symbol index when text_context is enabled.
+                            if features.text_context {
+                                let skip = registry.as_ref()
+                                    .map(|r| r.mtime_unchanged(&event.path, "text"))
+                                    .unwrap_or(false);
+                                if skip {
+                                    tracing::debug!(
+                                        target: "watcher",
+                                        workspace = %p,
+                                        file = %file_path,
+                                        "text-context: mtime unchanged, skipping spawn"
+                                    );
+                                } else if let Some(text_exe) = slc_features::find_text_exe() {
+                                    let mut text_cmd = std::process::Command::new(&text_exe);
+                                    text_cmd
+                                        .arg("update")
+                                        .arg(&p)
+                                        .arg(&file_path)
+                                        .stdin(Stdio::null())
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null());
+                                    #[cfg(windows)]
+                                    {
+                                        use std::os::windows::process::CommandExt;
+                                        text_cmd.creation_flags(CREATE_NO_WINDOW);
+                                    }
+                                    match text_cmd.spawn() {
+                                        Ok(_) => tracing::debug!(workspace = %p, file = %file_path, "text update spawned by watcher"),
+                                        Err(e) => tracing::warn!(workspace = %p, error = %e, "failed to spawn text update from watcher"),
                                     }
                                 }
                             }
@@ -1530,6 +1591,64 @@ async fn handle_reindex(raw_path: &str) -> Result<String> {
         info!(target: "index", workspace = %path_str, "SLC index skipped (language_context feature disabled)");
     }
 
+    // Text-symbol index — its `index` command clears and rebuilds on its own,
+    // so no separate clear step is needed.
+    let mut text_ok: Option<bool> = None;
+    let mut text_err: Option<String> = None;
+    if features.text_context {
+        match slc_features::find_text_exe() {
+            Some(text_exe) => {
+                info!(target: "index", workspace = %path_str, exe = %text_exe.display(), "text index starting");
+                let text_started = Instant::now();
+                let mut text_cmd = tokio::process::Command::new(&text_exe);
+                text_cmd
+                    .arg("index")
+                    .arg(&path_str)
+                    .env("SPEEDY_NO_DAEMON", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                #[cfg(windows)]
+                text_cmd.creation_flags(CREATE_NO_WINDOW);
+                match text_cmd.output().await {
+                    Ok(o) => {
+                        let text_ms = text_started.elapsed().as_millis() as u64;
+                        let se = String::from_utf8_lossy(&o.stderr);
+                        if o.status.success() {
+                            info!(target: "index", workspace = %path_str, ms = text_ms, "text index done");
+                            text_ok = Some(true);
+                        } else {
+                            error!(
+                                target: "index",
+                                workspace = %path_str,
+                                ms = text_ms,
+                                exit_code = ?o.status.code(),
+                                stderr = %se.trim(),
+                                "text index failed"
+                            );
+                            text_ok = Some(false);
+                            text_err = Some(se.trim().to_string());
+                        }
+                    }
+                    Err(e) => {
+                        error!(target: "index", workspace = %path_str, error = %e, "failed to spawn text index");
+                        text_ok = Some(false);
+                        text_err = Some(e.to_string());
+                    }
+                }
+            }
+            None => {
+                warn!(
+                    target: "index",
+                    workspace = %path_str,
+                    "speedy-text-context executable not found next to daemon or in PATH — skipping text index"
+                );
+            }
+        }
+    } else {
+        info!(target: "index", workspace = %path_str, "text index skipped (text_context feature disabled)");
+    }
+
     // Decide overall result. If AI-context failed AND SLC didn't succeed,
     // surface an error to the caller. Otherwise return a summary so the GUI
     // toast tells the user which half ran.
@@ -1543,12 +1662,17 @@ async fn handle_reindex(raw_path: &str) -> Result<String> {
         "failed"
     };
     let summary = format!(
-        "ai-context: {} | slc: {}",
+        "ai-context: {} | slc: {} | text: {}",
         ai_status,
         match slc_ok {
             Some(true) => "ok".to_string(),
             Some(false) => format!("failed ({})", slc_err.as_deref().unwrap_or("see logs")),
             None => if features.language_context { "not-found".to_string() } else { "disabled".to_string() },
+        },
+        match text_ok {
+            Some(true) => "ok".to_string(),
+            Some(false) => format!("failed ({})", text_err.as_deref().unwrap_or("see logs")),
+            None => if features.text_context { "not-found".to_string() } else { "disabled".to_string() },
         }
     );
 
@@ -1580,7 +1704,7 @@ async fn handle_workspace_status(
         }
     };
 
-    let db_path = Path::new(&path_str).join(".speedy").join("sac.sqlite");
+    let db_path = speedy_core::daemon_util::workspace_data_dir(Path::new(&path_str)).join("sac.sqlite");
     let index_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
     let chunk_count = if db_path.exists() {
@@ -1613,8 +1737,8 @@ async fn handle_workspace_status(
     })
 }
 
-/// Parse `[\t<root>[\t<max_depth>]]` and walk the filesystem reporting every
-/// directory that contains `.speedy/sac.sqlite`. Skips common build dirs.
+/// Parse `[\t<root>[\t<max_depth>]]` and scan AppData workspaces directory
+/// reporting every workspace that has been indexed.
 async fn handle_scan(args: &str) -> String {
     let trimmed = args.trim_start_matches(['\t', ' ']);
     let mut parts = trimmed.split(['\t', '\n']);
@@ -1635,42 +1759,61 @@ async fn handle_scan(args: &str) -> String {
     serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
+fn scan_speedy_dirs(root: &Path, _max_depth: usize) -> Vec<ScanResult> {
     let registered: std::collections::HashSet<String> = workspace::list()
         .unwrap_or_default()
         .into_iter()
         .map(|e| e.path)
         .collect();
 
-    let skip = speedy_core::default_ignores::watch_dirs();
+    // Base dir is the same as workspace_data_dir uses
+    let base = if let Ok(r) = std::env::var("SPEEDY_WORKSPACE_DATA_ROOT") {
+        std::path::PathBuf::from(r)
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    };
+    let workspaces_dir = base.join("workspaces");
+
+    let Ok(entries) = std::fs::read_dir(&workspaces_dir) else {
+        return Vec::new();
+    };
 
     let mut out = Vec::new();
-    let walker = walkdir::WalkDir::new(root)
-        .max_depth(max_depth)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !skip.iter().any(|d| *d == name.as_ref())
-        });
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let ws_txt = entry.path().join("workspace.txt");
+        let Ok(ws_path) = std::fs::read_to_string(&ws_txt) else { continue };
+        let ws_path = ws_path.trim().to_string();
+        if ws_path.is_empty() { continue }
 
-    for entry in walker.flatten() {
-        if !entry.file_type().is_dir() {
-            continue;
+        // Filter by root prefix if provided. Both sides are normalized first:
+        // `ws_path` is a canonical path (which on Windows carries a `\\?\`
+        // verbatim prefix), while the scan `root` is whatever the caller sent
+        // (usually non-canonical). Without stripping that prefix the
+        // `starts_with` check would never match on Windows.
+        let root_canon = root
+            .canonicalize()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| root.to_string_lossy().into_owned());
+        let root_norm = root_canon.strip_prefix(r"\\?\").unwrap_or(&root_canon);
+        let ws_norm = ws_path.strip_prefix(r"\\?\").unwrap_or(&ws_path);
+        if root_norm != "/" && root_norm != "\\" && root_norm.len() > 3 {
+            if !ws_norm.starts_with(root_norm) {
+                continue;
+            }
         }
-        let path = entry.path();
-        let db = path.join(".speedy").join("sac.sqlite");
-        if !db.exists() {
-            continue;
-        }
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let path_str = canonical.to_string_lossy().to_string();
-        let registered = registered.contains(&path_str);
+
+        if !Path::new(&ws_path).exists() { continue }
+
+        let db = entry.path().join("sac.sqlite");
         let (last_modified, db_size_bytes) = match std::fs::metadata(&db) {
             Ok(m) => {
-                let ts = m
-                    .modified()
-                    .ok()
+                let ts = m.modified().ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| {
                         let secs = d.as_secs() as i64;
@@ -1682,7 +1825,9 @@ fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
             }
             Err(_) => (None, 0),
         };
-        out.push(ScanResult { path: path_str, registered, last_modified, db_size_bytes });
+
+        let registered = registered.contains(&ws_path);
+        out.push(ScanResult { path: ws_path, registered, last_modified, db_size_bytes });
     }
     out
 }
@@ -1878,6 +2023,8 @@ mod slc_features {
         pub speedy_indexer: bool,
         #[serde(default = "default_true")]
         pub language_context: bool,
+        #[serde(default = "default_true")]
+        pub text_context: bool,
     }
 
     impl Features {
@@ -1885,6 +2032,7 @@ mod slc_features {
             Self {
                 speedy_indexer: true,
                 language_context: true,
+                text_context: true,
             }
         }
     }
@@ -1941,6 +2089,7 @@ mod slc_features {
         match name {
             "speedy_indexer" | "speedy-indexer" => f.speedy_indexer = enabled,
             "language_context" | "language-context" => f.language_context = enabled,
+            "text_context" | "text-context" => f.text_context = enabled,
             other => anyhow::bail!("unknown feature: {other}"),
         }
 
@@ -1977,12 +2126,24 @@ mod slc_features {
     /// Locate the `speedy-language-context` executable: same directory as this
     /// daemon binary first, then PATH. Returns `None` if not found.
     pub fn find_slc_exe() -> Option<PathBuf> {
-        let exe_name = if cfg!(windows) {
+        find_exe_near_daemon(if cfg!(windows) {
             "speedy-language-context.exe"
         } else {
             "speedy-language-context"
-        };
-        // Same dir as the running daemon
+        })
+    }
+
+    /// Locate the `speedy-text-context` executable (same strategy as `find_slc_exe`).
+    pub fn find_text_exe() -> Option<PathBuf> {
+        find_exe_near_daemon(if cfg!(windows) {
+            "speedy-text-context.exe"
+        } else {
+            "speedy-text-context"
+        })
+    }
+
+    /// Find an executable next to the running daemon binary first, then on PATH.
+    fn find_exe_near_daemon(exe_name: &str) -> Option<PathBuf> {
         if let Ok(self_exe) = std::env::current_exe() {
             if let Some(dir) = self_exe.parent() {
                 let candidate = dir.join(exe_name);
@@ -1991,7 +2152,6 @@ mod slc_features {
                 }
             }
         }
-        // Fallback: search PATH
         std::env::var_os("PATH").and_then(|path_var| {
             std::env::split_paths(&path_var)
                 .map(|dir| dir.join(exe_name))
@@ -3109,7 +3269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_finds_directory_with_sac_sqlite() {
-        // Create a root with one .speedy/sac.sqlite inside.
+        // Create a workspace data root and register proj-a inside it.
         let root = std::env::temp_dir().join(format!(
             "speedy_d_scan_{}",
             std::time::SystemTime::now()
@@ -3118,9 +3278,12 @@ mod tests {
                 .as_nanos()
         ));
         let project = root.join("proj-a");
-        let speedy_dir = project.join(".speedy");
-        std::fs::create_dir_all(&speedy_dir).unwrap();
-        std::fs::write(speedy_dir.join("sac.sqlite"), b"fake db content").unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Use root as the workspace data root so scan_speedy_dirs finds the entry.
+        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", root.to_str().unwrap());
+        let data_dir = speedy_core::daemon_util::workspace_data_dir(&project);
+        std::fs::write(data_dir.join("sac.sqlite"), b"fake db content").unwrap();
 
         let watchers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let active_pids = Arc::new(StdMutex::new(HashSet::new()));
@@ -3387,9 +3550,9 @@ not-json-line\n\
                 .unwrap()
                 .as_nanos()
         ));
-        let speedy_dir = dir.join(".speedy");
-        std::fs::create_dir_all(&speedy_dir).unwrap();
-        let db_path = speedy_dir.join("sac.sqlite");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", dir.to_str().unwrap());
+        let db_path = speedy_core::daemon_util::workspace_data_dir(&dir).join("sac.sqlite");
 
         // Create a minimal chunks table and insert 3 rows.
         {

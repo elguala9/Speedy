@@ -1,6 +1,6 @@
 //! SQLite-backed store for the symbol graph.
 //!
-//! Schema lives in `.speedy/slc.sqlite` (shared with `memory.rs`).
+//! Schema lives in AppData next to the executable (`workspaces/<hash>/slc.sqlite`).
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -64,12 +64,8 @@ pub struct GraphStore {
 
 impl GraphStore {
     pub fn open(workspace_root: &Path) -> Result<Self> {
-        let speedy_dir = workspace_root.join(".speedy");
-        if !speedy_dir.exists() {
-            std::fs::create_dir_all(&speedy_dir)
-                .with_context(|| format!("creating .speedy/ at {}", speedy_dir.display()))?;
-        }
-        let db_path = speedy_dir.join("slc.sqlite");
+        let data_dir = speedy_core::daemon_util::workspace_data_dir(workspace_root);
+        let db_path = data_dir.join("slc.sqlite");
         let conn = Connection::open(&db_path)
             .with_context(|| format!("opening {}", db_path.display()))?;
         conn.execute_batch(
