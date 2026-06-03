@@ -1,7 +1,9 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -24,10 +26,16 @@ fn quiet_command(exe: &Path) -> Command {
 
 struct McpClient {
     process: Child,
-    reader: BufReader<std::process::ChildStdout>,
+    rx: Receiver<String>,
 }
 
 impl McpClient {
+    /// Upper bound for a single response line. Generous for protocol calls,
+    /// but short enough that a wedged server fails the offending test fast
+    /// instead of hanging the whole test binary forever (a hung read here
+    /// also holds the cargo build lock and blocks every other run).
+    const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
     fn start(workdir: &PathBuf) -> Self {
         let mut process = quiet_command(mcp_bin())
             .env("SPEEDY_BIN", speedy_bin().to_str().unwrap())
@@ -38,8 +46,31 @@ impl McpClient {
             .spawn()
             .expect("failed to start speedy-ai-context-mcp");
 
-        let reader = BufReader::new(process.stdout.take().unwrap());
-        Self { process, reader }
+        Self::attach(process)
+    }
+
+    /// Wrap an already-spawned MCP process, draining its stdout on a dedicated
+    /// thread so `send` can wait on a channel with a timeout — a plain blocking
+    /// `read_line` has no escape hatch.
+    fn attach(mut process: Child) -> Self {
+        let stdout = process.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF: child closed stdout
+                    Ok(_) => {
+                        if tx.send(line).is_err() {
+                            break; // McpClient dropped
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self { process, rx }
     }
 
     fn send(&mut self, json: &str) -> String {
@@ -47,9 +78,16 @@ impl McpClient {
         writeln!(stdin, "{json}").expect("failed to write to stdin");
         stdin.flush().ok();
 
-        let mut line = String::new();
-        self.reader.read_line(&mut line).expect("failed to read stdout");
-        line.trim().to_string()
+        match self.rx.recv_timeout(Self::READ_TIMEOUT) {
+            Ok(line) => line.trim().to_string(),
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = self.process.kill();
+                panic!("MCP server did not respond within {:?} to: {json}", Self::READ_TIMEOUT);
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("MCP server closed stdout without responding to: {json}");
+            }
+        }
     }
 
     fn stop(&mut self) {
@@ -610,7 +648,7 @@ impl Drop for TestDaemon {
 }
 
 fn start_mcp_with_daemon(workdir: &PathBuf, daemon: &TestDaemon) -> McpClient {
-    let mut process = quiet_command(mcp_bin())
+    let process = quiet_command(mcp_bin())
         .env("SPEEDY_BIN", speedy_bin().to_str().unwrap())
         .env("SPEEDY_DEFAULT_SOCKET", &daemon.socket)
         .env("SPEEDY_DAEMON_DIR", &daemon.daemon_dir)
@@ -621,8 +659,7 @@ fn start_mcp_with_daemon(workdir: &PathBuf, daemon: &TestDaemon) -> McpClient {
         .spawn()
         .expect("failed to start speedy-ai-context-mcp");
 
-    let reader = BufReader::new(process.stdout.take().unwrap());
-    McpClient { process, reader }
+    McpClient::attach(process)
 }
 
 #[test]
@@ -984,7 +1021,14 @@ fn test_workspace_remove_via_real_binary() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
+// Ignored by default: `speedy force` triggers a full synchronous reindex
+// through the daemon (`sync <path>`), which only returns once the embedding
+// pipeline finishes — it requires a running daemon plus a reachable embedding
+// backend. Without them the daemon never closes the connection and the call
+// blocks. Run explicitly with `cargo test -- --ignored` in an environment that
+// has both. See `test_mcp_force_reindex_with_daemon` for the daemon-backed path.
 #[test]
+#[ignore = "requires a running daemon + embedding backend; force reindex blocks until full sync completes"]
 fn test_force_reindex_via_real_binary() {
     let workdir = temp_project();
     let mut client = McpClient::start(&workdir);
