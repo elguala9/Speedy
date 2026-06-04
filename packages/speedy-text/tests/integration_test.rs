@@ -99,8 +99,8 @@ fn test_index_creates_db() {
     let dir = make_workspace();
     index(&dir);
     assert!(
-        dir.join(".speedy-text").join("index.db").exists(),
-        ".speedy-text/index.db not created"
+        dir.join(".speedy").join("index.db").exists(),
+        ".speedy/index.db not created"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -287,19 +287,19 @@ fn test_sync_unchanged_file_skipped() {
 }
 
 #[test]
-fn test_index_does_not_index_speedy_text_dir() {
+fn test_index_does_not_index_speedy_dir() {
     let dir = make_workspace();
     index(&dir);
 
-    // Write a file with a unique symbol inside .speedy-text/ (where the DB lives)
-    let internal = dir.join(".speedy-text").join("internal.txt");
+    // Write a file with a unique symbol inside .speedy/ (where the DB lives)
+    let internal = dir.join(".speedy").join("internal.txt");
     std::fs::write(&internal, "UniqueInternalSymbol123\n").unwrap();
 
     // Re-index (index always clears first)
     index(&dir);
 
     let v = query_json(&dir, &["UniqueInternalSymbol123"]);
-    assert_eq!(count(&v), 0, ".speedy-text/ must not be indexed: {v}");
+    assert_eq!(count(&v), 0, ".speedy/ must not be indexed: {v}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

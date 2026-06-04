@@ -1,5 +1,5 @@
 //! Free-form notes that the AI can save and retrieve via the MCP server.
-//! Backed by SQLite + FTS5 in the shared AppData `workspaces/<hash>/slc.sqlite`.
+//! Backed by SQLite + FTS5 in the per-workspace `<workspace>/.speedy/slc.sqlite`.
 
 use anyhow::Result;
 use rusqlite::{params, Connection};

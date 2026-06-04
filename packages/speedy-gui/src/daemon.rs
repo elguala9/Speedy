@@ -295,7 +295,16 @@ impl DaemonBridge {
                 s.indexing.remove(&path);
                 s.index_progress.remove(&path);
                 match r {
-                    Ok(_) => s.set_toast(format!("Reindex done: {path}"), true),
+                    Ok(out) => {
+                        // Show the worker summary (e.g. "ai-context: ok | slc: ok
+                        // | text: ok" or "Indexed N files…") so a no-op reindex is
+                        // never reported as a plain success.
+                        let summary = out.lines().last().map(str::trim).filter(|s| !s.is_empty());
+                        match summary {
+                            Some(s_txt) => s.set_toast(format!("Reindex: {s_txt}"), true),
+                            None => s.set_toast(format!("Reindex done: {path}"), true),
+                        }
+                    }
                     Err(e) => {
                         s.last_error = Some(format!("reindex {path}: {e}"));
                         s.set_toast(format!("Reindex failed: {e}"), false);

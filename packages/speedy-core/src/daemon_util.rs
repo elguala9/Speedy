@@ -19,33 +19,20 @@ pub fn exe_log_dir() -> PathBuf {
     logs
 }
 
-/// Returns `<exe_dir>/workspaces/<16-hex>/` for a workspace path.
-/// On first call for a workspace, writes `workspace.txt` with the canonical path.
-/// `SPEEDY_WORKSPACE_DATA_ROOT` overrides the base directory (for tests).
+/// Returns the per-workspace data directory `<workspace>/.speedy/`, creating it
+/// if necessary. Every workspace-scoped SQLite database lives here so the index
+/// travels with the project rather than sitting in a hashed folder next to the
+/// executable:
+///   - `sac.sqlite`    — speedy-ai-context vector index
+///   - `slc.sqlite`    — speedy-language-context graph
+///   - `hashes.sqlite` — shared content-hash registry
+///   - `index.db`      — speedy-text-context symbol index
+///
+/// `.speedy/` is in the default ignore list (`default_ignores.txt`) and the
+/// daemon watcher skips it, so these DBs are never themselves indexed/watched.
 pub fn workspace_data_dir(workspace: &Path) -> PathBuf {
-    use sha2::{Sha256, Digest};
-
-    let canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let hash = hasher.finalize();
-    let hex: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
-
-    let base = if let Ok(root) = std::env::var("SPEEDY_WORKSPACE_DATA_ROOT") {
-        PathBuf::from(root)
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-    };
-
-    let dir = base.join("workspaces").join(&hex);
-    if !dir.exists() {
-        if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = std::fs::write(dir.join("workspace.txt"), canonical.to_string_lossy().as_bytes());
-        }
-    }
+    let dir = workspace.join(".speedy");
+    let _ = std::fs::create_dir_all(&dir);
     dir
 }
 

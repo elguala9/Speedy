@@ -93,6 +93,11 @@ async fn async_main(cli: Cli, root: PathBuf) -> Result<()> {
 /// this workspace. Defaults to `false` (opt-in) — the index/update write paths
 /// no-op when disabled so a fresh workspace or a git hook does no work.
 fn language_context_enabled(root: &Path) -> bool {
+    // An explicit user action (CLI / GUI button) sets SPEEDY_FORCE to bypass the
+    // opt-in gate — an explicit index must always run.
+    if std::env::var("SPEEDY_FORCE").map(|v| { let v = v.trim(); v == "1" || v.eq_ignore_ascii_case("true") }).unwrap_or(false) {
+        return true;
+    }
     Features::load(root).language_context
 }
 

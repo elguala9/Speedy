@@ -7,7 +7,8 @@ pub fn find_root(start: &Path) -> PathBuf {
 }
 
 pub fn db_path(root: &Path) -> PathBuf {
-    root.join(".speedy-text").join("index.db")
+    // Shares the per-workspace `.speedy/` dir with the other contexts.
+    root.join(".speedy").join("index.db")
 }
 
 pub fn extensions_path(root: &Path) -> PathBuf {

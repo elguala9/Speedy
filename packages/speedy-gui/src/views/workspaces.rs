@@ -78,9 +78,18 @@ impl WorkspacesView {
 
         ui.add_space(6.0);
 
-        if !state.alive {
-            ui.colored_label(Color32::from_rgb(220, 80, 80), "Daemon unreachable.");
-            return;
+        // No daemon is the normal standalone case (`standalone == !alive`):
+        // `refresh_all` still loads the workspace list via `speedy-cli`, and
+        // add/remove/sync/reindex all route through the CLI. So we keep
+        // rendering the list instead of bailing out — only show a hint.
+        if !state.alive && state.probed {
+            ui.label(
+                RichText::new(
+                    "Standalone mode: no daemon running. Workspace operations run via speedy-cli.",
+                )
+                .weak(),
+            );
+            ui.add_space(4.0);
         }
 
         if state.workspaces.is_empty() {
@@ -105,11 +114,17 @@ impl WorkspacesView {
     fn row(&mut self, ui: &mut Ui, bridge: &DaemonBridge, state: &DaemonState, path: &str) {
         ui.horizontal(|ui| {
             let ws_status = state.workspace_status.get(path);
-            let alive = ws_status.map(|w| w.watcher_alive).unwrap_or(state.alive);
-            let dot_color = if alive {
-                Color32::from_rgb(80, 200, 80)
+            let dot_color = if state.standalone {
+                // No daemon → no watcher to report on; show a neutral dot
+                // rather than implying the workspace is broken.
+                Color32::from_rgb(150, 150, 150)
             } else {
-                Color32::from_rgb(220, 80, 80)
+                let alive = ws_status.map(|w| w.watcher_alive).unwrap_or(state.alive);
+                if alive {
+                    Color32::from_rgb(80, 200, 80)
+                } else {
+                    Color32::from_rgb(220, 80, 80)
+                }
             };
             ui.colored_label(dot_color, "●");
             ui.monospace(path);
@@ -180,14 +195,17 @@ impl WorkspacesView {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!is_indexing, egui::Button::new("Index"))
-                .on_hover_text("Re-index this workspace")
+                .on_hover_text(
+                    "Re-index this workspace now (runs the enabled contexts; \
+                     if none are enabled it indexes all of them).",
+                )
                 .clicked()
             {
                 bridge.reindex_workspace(path.to_string());
             }
             if ui
                 .add_enabled(!is_syncing, egui::Button::new("Sync"))
-                .on_hover_text("Sync this workspace")
+                .on_hover_text("Sync this workspace now")
                 .clicked()
             {
                 bridge.sync_workspace(path.to_string());

@@ -136,6 +136,10 @@ async fn run_ai_context_standalone(cwd: &str, json: bool, args: &[&str]) -> Resu
         cmd.arg(a);
     }
     cmd.env("SPEEDY_NO_DAEMON", "1");
+    // The CLI is only ever invoked by an explicit user action (terminal or the
+    // GUI buttons), so bypass the worker's opt-in gate: an explicit `sync`/
+    // `index`/`reembed` must actually run. Read-only commands ignore this.
+    cmd.env("SPEEDY_FORCE", "1");
     let status = cmd
         .status()
         .await

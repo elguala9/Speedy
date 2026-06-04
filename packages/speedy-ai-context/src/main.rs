@@ -176,8 +176,23 @@ fn set_feature_value(f: &mut WorkspaceFeatures, key: &str, value: bool) {
 /// that a fresh workspace — or a git hook firing on a workspace where the user
 /// has not opted in — does no work.
 fn speedy_indexer_enabled() -> bool {
+    // An explicit user action (CLI command / GUI button) sets SPEEDY_FORCE to
+    // bypass the opt-in gate — pressing a button must always do the work.
+    if env_flag("SPEEDY_FORCE") {
+        return true;
+    }
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     load_workspace_features(&root).speedy_indexer
+}
+
+/// True when an env var is set to a truthy value (`1`/`true`, case-insensitive).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
 }
 
 /// Print the "feature disabled" notice and signal the caller to stop.
