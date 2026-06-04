@@ -4,24 +4,24 @@ $root = Split-Path $PSScriptRoot -Parent
 $dist = Join-Path $root 'dist'
 $target = Join-Path (Join-Path $root 'target') 'release'
 
-# Pulizia
+# Cleanup
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-Write-Host '==> Build release dei 7 binari...' -ForegroundColor Yellow
+Write-Host '==> Building release of the 7 binaries...' -ForegroundColor Yellow
 cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-gui -p speedy-language-context
-if ($LASTEXITCODE -ne 0) { throw 'Build fallito' }
+if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 
-# Copia in dist/
+# Copy to dist/
 @('speedy-ai-context.exe', 'speedy-daemon.exe', 'speedy-cli.exe', 'speedy-ai-context-mcp.exe', 'speedy-gui.exe', 'speedy-language-context.exe', 'speedy-language-context-mcp.exe') | ForEach-Object {
     $src = Join-Path $target $_
     if (Test-Path $src) {
         Copy-Item $src $dist
-        Write-Host "  Copiato $_" -ForegroundColor Green
+        Write-Host "  Copied $_" -ForegroundColor Green
     } else {
-        Write-Host "  NON TROVATO: $_" -ForegroundColor Red
+        Write-Host "  NOT FOUND: $_" -ForegroundColor Red
     }
 }
 
-Write-Host "`nBinari pronti in: $dist" -ForegroundColor Green
+Write-Host "`nBinaries ready in: $dist" -ForegroundColor Green
 Get-ChildItem $dist | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB)) KB)" }

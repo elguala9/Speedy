@@ -1,19 +1,19 @@
 <#
 .SYNOPSIS
-    Builda i binari Speedy e produce l'installer e l'uninstaller Windows (.exe) con Inno Setup.
+    Builds the Speedy binaries and produces the Windows installer and uninstaller (.exe) with Inno Setup.
 
 .DESCRIPTION
-    Sequenza completa:
-      1. Legge la versione da Cargo.toml (workspace root)
-      2. Esegue build-release.ps1 → dist\*.exe  (saltato con -SkipBuild)
-      3. Genera installer\assets\speedy.ico se non esiste (via make-icon.ps1)
-      4. Cerca iscc.exe (PATH, percorsi standard, winget/choco)
-      5. Compila installer\speedy.iss → dist\speedy-setup-<version>.exe
-      6. Compila installer\speedy-uninstall.iss → dist\speedy-uninstall-<version>.exe
+    Full sequence:
+      1. Reads the version from Cargo.toml (workspace root)
+      2. Runs build-release.ps1 → dist\*.exe  (skipped with -SkipBuild)
+      3. Generates installer\assets\speedy.ico if it does not exist (via make-icon.ps1)
+      4. Looks for iscc.exe (PATH, standard paths, winget/choco)
+      5. Compiles installer\speedy.iss → dist\speedy-setup-<version>.exe
+      6. Compiles installer\speedy-uninstall.iss → dist\speedy-uninstall-<version>.exe
 
 .PARAMETER SkipBuild
-    Salta la build dei binari (usa i .exe già presenti in dist\).
-    Usato da cargo xtask dist che ha già compilato i binari.
+    Skips building the binaries (uses the .exe files already present in dist\).
+    Used by cargo xtask dist which has already compiled the binaries.
 
 .OUTPUTS
     dist\speedy-setup-<version>.exe
@@ -37,26 +37,26 @@ $iconPath   = Join-Path $assetsDir 'speedy.ico'
 $issPath    = Join-Path $root 'installer\speedy.iss'
 
 # ------------------------------------------------------------------
-# 1. Leggi versione da Cargo.toml
+# 1. Read version from Cargo.toml
 # ------------------------------------------------------------------
 $cargoToml = Join-Path $root 'Cargo.toml'
-if (-not (Test-Path $cargoToml)) { throw "Cargo.toml non trovato in $root" }
+if (-not (Test-Path $cargoToml)) { throw "Cargo.toml not found in $root" }
 
 $match = Select-String -Path $cargoToml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-if (-not $match) { throw "Campo 'version' non trovato in $cargoToml" }
+if (-not $match) { throw "'version' field not found in $cargoToml" }
 $version = $match.Matches[0].Groups[1].Value
 
 Write-Host ''
-Write-Host "==> Speedy installer build - versione $version" -ForegroundColor Cyan
+Write-Host "==> Speedy installer build - version $version" -ForegroundColor Cyan
 Write-Host ''
 
 # ------------------------------------------------------------------
-# 2. Build binari (saltato se -SkipBuild)
+# 2. Build binaries (skipped if -SkipBuild)
 # ------------------------------------------------------------------
 if ($SkipBuild) {
-    Write-Host '==> [1/3] Build binari skippata (-SkipBuild).' -ForegroundColor DarkGray
+    Write-Host '==> [1/3] Binary build skipped (-SkipBuild).' -ForegroundColor DarkGray
 } else {
-    Write-Host '==> [1/3] Build binari release...' -ForegroundColor Yellow
+    Write-Host '==> [1/3] Building release binaries...' -ForegroundColor Yellow
     $buildScript = Join-Path $PSScriptRoot 'build-release.ps1'
     & $buildScript
 }
@@ -64,40 +64,40 @@ if ($SkipBuild) {
 Write-Host ''
 
 # ------------------------------------------------------------------
-# 3. Icona: genera se mancante
+# 3. Icon: generate if missing
 # ------------------------------------------------------------------
-Write-Host '==> [2/3] Verifica icona...' -ForegroundColor Yellow
+Write-Host '==> [2/3] Checking icon...' -ForegroundColor Yellow
 
 if (Test-Path $iconPath) {
     $iconSizeKB = [Math]::Round((Get-Item $iconPath).Length / 1KB, 1)
-    Write-Host "    speedy.ico gia' presente ($iconSizeKB KB)" -ForegroundColor DarkGray
+    Write-Host "    speedy.ico already present ($iconSizeKB KB)" -ForegroundColor DarkGray
 } else {
     $makeIconScript = Join-Path $assetsDir 'make-icon.ps1'
     if (Test-Path $makeIconScript) {
-        Write-Host '    Generazione icona con make-icon.ps1...' -ForegroundColor DarkGray
+        Write-Host '    Generating icon with make-icon.ps1...' -ForegroundColor DarkGray
         & $makeIconScript
     } else {
-        Write-Warning "make-icon.ps1 non trovato - l'installer usera' l'icona di default di Inno Setup"
+        Write-Warning "make-icon.ps1 not found - the installer will use the default Inno Setup icon"
     }
 }
 
 Write-Host ''
 
 # ------------------------------------------------------------------
-# 4. Cerca iscc.exe (Inno Setup 6 compiler)
+# 4. Look for iscc.exe (Inno Setup 6 compiler)
 # ------------------------------------------------------------------
-Write-Host '==> [3/4] Ricerca iscc.exe...' -ForegroundColor Yellow
+Write-Host '==> [3/4] Searching for iscc.exe...' -ForegroundColor Yellow
 
 $isccExe = $null
 
-# Prova nel PATH di sistema
+# Try the system PATH
 $cmd = Get-Command 'iscc.exe' -ErrorAction SilentlyContinue
 if ($cmd) {
     $isccExe = $cmd.Source
-    Write-Host "    Trovato nel PATH: $isccExe" -ForegroundColor DarkGray
+    Write-Host "    Found in PATH: $isccExe" -ForegroundColor DarkGray
 }
 
-# Prova nei percorsi standard di installazione
+# Try the standard installation paths
 if (-not $isccExe) {
     $candidates = @(
         "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe",
@@ -107,7 +107,7 @@ if (-not $isccExe) {
     foreach ($c in $candidates) {
         if (Test-Path $c) {
             $isccExe = $c
-            Write-Host "    Trovato: $isccExe" -ForegroundColor DarkGray
+            Write-Host "    Found: $isccExe" -ForegroundColor DarkGray
             break
         }
     }
@@ -115,21 +115,21 @@ if (-not $isccExe) {
 
 if (-not $isccExe) {
     Write-Host ''
-    Write-Host 'ERRORE: iscc.exe non trovato.' -ForegroundColor Red
+    Write-Host 'ERROR: iscc.exe not found.' -ForegroundColor Red
     Write-Host ''
-    Write-Host 'Installa Inno Setup 6 con uno di questi comandi:' -ForegroundColor Yellow
+    Write-Host 'Install Inno Setup 6 with one of these commands:' -ForegroundColor Yellow
     Write-Host '  winget install JRSoftware.InnoSetup'
     Write-Host '  choco install innosetup -y'
-    Write-Host '  oppure scarica da: https://jrsoftware.org/isdl.php'
+    Write-Host '  or download from: https://jrsoftware.org/isdl.php'
     Write-Host ''
     exit 1
 }
 
 # ------------------------------------------------------------------
-# 5. Compila l'installer
+# 5. Compile the installer
 # ------------------------------------------------------------------
 Write-Host ''
-Write-Host '==> [4/4] Compilazione installer e uninstaller...' -ForegroundColor Yellow
+Write-Host '==> [4/4] Compiling installer and uninstaller...' -ForegroundColor Yellow
 Write-Host "    Installer v$version..." -ForegroundColor DarkGray
 
 $isccArgs = [System.Collections.Generic.List[string]]::new()
@@ -139,19 +139,19 @@ $isccArgs.Add("/O$dist")
 
 if (Test-Path $iconPath) {
     $isccArgs.Add("/DMySetupIcon=$iconPath")
-    Write-Host "    Con icona: $iconPath" -ForegroundColor DarkGray
+    Write-Host "    With icon: $iconPath" -ForegroundColor DarkGray
 } else {
-    Write-Host "    Senza icona custom (usa quella di default di Inno Setup)" -ForegroundColor DarkGray
+    Write-Host "    Without custom icon (uses the default Inno Setup one)" -ForegroundColor DarkGray
 }
 
 & $isccExe @isccArgs
 
 if ($LASTEXITCODE -ne 0) {
-    throw "iscc.exe ha restituito exit code $LASTEXITCODE - build installer fallita"
+    throw "iscc.exe returned exit code $LASTEXITCODE - installer build failed"
 }
 
 # ------------------------------------------------------------------
-# 6. Compila l'uninstaller runner
+# 6. Compile the uninstaller runner
 # ------------------------------------------------------------------
 Write-Host "    Uninstaller runner v$version..." -ForegroundColor DarkGray
 
@@ -169,11 +169,11 @@ if (Test-Path $iconPath) {
 & $isccExe @isccUninstArgs
 
 if ($LASTEXITCODE -ne 0) {
-    throw "iscc.exe ha restituito exit code $LASTEXITCODE - build uninstaller fallita"
+    throw "iscc.exe returned exit code $LASTEXITCODE - uninstaller build failed"
 }
 
 # ------------------------------------------------------------------
-# Output finale
+# Final output
 # ------------------------------------------------------------------
 Write-Host ''
 
@@ -186,13 +186,13 @@ if ($allOk) {
     $sizeMB        = [Math]::Round((Get-Item $outFile).Length / 1MB, 1)
     $uninstSizeKB  = [Math]::Round((Get-Item $outUninstFile).Length / 1KB, 1)
     Write-Host "========================================" -ForegroundColor Green
-    Write-Host " Build completata!" -ForegroundColor Green
+    Write-Host " Build complete!" -ForegroundColor Green
     Write-Host " Installer:    $outFile ($sizeMB MB)" -ForegroundColor Green
     Write-Host " Uninstaller:  $outUninstFile ($uninstSizeKB KB)" -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
 } else {
-    Write-Host "Attenzione: uno o piu' file di output mancanti." -ForegroundColor Yellow
-    Write-Host 'File presenti in dist\:' -ForegroundColor Yellow
+    Write-Host "Warning: one or more output files are missing." -ForegroundColor Yellow
+    Write-Host 'Files present in dist\:' -ForegroundColor Yellow
     Get-ChildItem $dist | ForEach-Object {
         Write-Host "  $($_.Name)  ($([Math]::Round($_.Length/1KB)) KB)"
     }

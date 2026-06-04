@@ -569,17 +569,22 @@ mod tests {
     }
 
     #[test]
-    fn test_post_commit_daemon_path_uses_exec_index() {
-        // When daemon is up, post-commit should use `daemon exec -- index`
-        assert!(tpl("post-commit").contains("daemon exec -- index"));
-    }
-
-    #[test]
-    fn test_post_commit_nodaemon_path_uses_index() {
-        // When daemon is down, post-commit should use `SPEEDY_NO_DAEMON=1 ... index`
+    fn test_post_commit_runs_standalone_index() {
+        // No daemon by default: post-commit indexes changed files via the
+        // standalone worker (SPEEDY_NO_DAEMON=1 ... index).
         let t = tpl("post-commit");
         assert!(t.contains("SPEEDY_NO_DAEMON=1"));
         assert!(t.contains("index"));
+    }
+
+    #[test]
+    fn test_no_template_routes_through_daemon() {
+        // The daemon is opt-in and never auto-started; hooks must not ping it
+        // or route work through it.
+        for (name, t) in TEMPLATES {
+            assert!(!t.contains("ping"), "{name}: must not ping the daemon");
+            assert!(!t.contains("daemon "), "{name}: must not route through the daemon");
+        }
     }
 
     #[test]
@@ -589,29 +594,26 @@ mod tests {
     }
 
     #[test]
-    fn test_post_checkout_daemon_path_uses_sync() {
-        assert!(tpl("post-checkout").contains("daemon sync"));
+    fn test_post_checkout_runs_standalone_sync() {
+        let t = tpl("post-checkout");
+        assert!(t.contains("SPEEDY_NO_DAEMON=1"));
+        assert!(t.contains("sync"));
     }
 
     #[test]
-    fn test_post_merge_daemon_path_uses_sync() {
-        assert!(tpl("post-merge").contains("daemon sync"));
+    fn test_post_merge_runs_standalone_sync() {
+        let t = tpl("post-merge");
+        assert!(t.contains("SPEEDY_NO_DAEMON=1"));
+        assert!(t.contains("sync"));
     }
 
     #[test]
-    fn test_post_rewrite_daemon_path_uses_reindex() {
-        // rebase/amend touch many files; must use `reindex`, not `sync`
-        assert!(tpl("post-rewrite").contains("daemon reindex"));
-    }
-
-    #[test]
-    fn test_post_rewrite_does_not_use_sync() {
-        assert!(!tpl("post-rewrite").contains("daemon sync"));
-    }
-
-    #[test]
-    fn test_post_merge_does_not_use_reindex() {
-        assert!(!tpl("post-merge").contains("daemon reindex"));
+    fn test_post_rewrite_runs_standalone_full_index() {
+        // rebase/amend touch many files; must do a full `index .`, not a sync.
+        let t = tpl("post-rewrite");
+        assert!(t.contains("SPEEDY_NO_DAEMON=1"));
+        assert!(t.contains("index ."));
+        assert!(!t.contains(" sync"));
     }
 
     // ── search_in_paths ───────────────────────────────────────────────────────
@@ -777,14 +779,15 @@ mod tests {
     }
 
     #[test]
-    fn test_installed_hook_contains_daemon_fallback_lines() {
-        // Every installed hook must contain both the daemon-up and daemon-down branches.
+    fn test_installed_hook_runs_standalone() {
+        // Every installed hook must run the worker standalone and never touch
+        // the daemon.
         let repo = git_repo();
         install_hooks_with_exe(repo.path(), false, &fake_exe()).unwrap();
         for name in HOOK_NAMES {
             let content = fs::read_to_string(hooks_dir(&repo).join(name)).unwrap();
-            assert!(content.contains("ping"), "{name}: missing daemon ping check");
-            assert!(content.contains("SPEEDY_NO_DAEMON=1"), "{name}: missing SPEEDY_NO_DAEMON fallback");
+            assert!(content.contains("SPEEDY_NO_DAEMON=1"), "{name}: missing SPEEDY_NO_DAEMON standalone run");
+            assert!(!content.contains("ping"), "{name}: must not ping the daemon");
         }
     }
 

@@ -1,79 +1,79 @@
 # TODO — Platform / Hardware
 
-Items che richiedono una macchina fisica o un OS specifico per essere verificati.
-Non bloccano il build/CI; vanno fatti manualmente su ogni piattaforma target.
+Items that require a physical machine or a specific OS to be verified.
+They don't block the build/CI; they must be done manually on each target platform.
 
 ---
 
 ## GUI smoke E2E — Windows
 
-`cargo run --release -p speedy-gui` con daemon vivo. Mai eseguito
-interattivamente dalla parte 3 del 2026-05-15 in poi.
+`cargo run --release -p speedy-gui` with a live daemon. Never run
+interactively since part 3 of 2026-05-15 onward.
 
-- [ ] Tray icon appare verde; click destro → Open / Restart / Quit OK.
-- [ ] Dashboard: PID/uptime/version visibili; metrics si aggiornano
-      dopo un `speedy-cli index` su un workspace di test.
-- [ ] Auto-refresh interval DragValue (1–60 s) modifica effettivamente
-      la frequenza di poll e persiste dopo restart GUI.
-- [ ] Override "Eseguibile daemon": `Sfoglia…` apre file picker;
-      `Applica` aggiorna il path; `Ripristina automatico` torna
-      all'auto-detect; persistenza dopo restart GUI.
-- [ ] Workspaces: add via picker; "Pulisci orfani" rimuove workspace
-      il cui path è stato cancellato; badge "⚠ temp" / "⚠ mancante"
-      coerenti.
-- [ ] Logs: stream `subscribe-log` riceve eventi; switch "File storico"
-      carica `daemon.log.YYYY-MM-DD`; export `.json` / `.jsonl` apre
-      save-dialog.
-- [ ] Notifiche di sistema su `error`: `RUST_LOG=error cargo run …`
-      triggera notifica di sistema.
+- [ ] Tray icon appears green; right click → Open / Restart / Quit OK.
+- [ ] Dashboard: PID/uptime/version visible; metrics update
+      after a `speedy-cli index` on a test workspace.
+- [ ] Auto-refresh interval DragValue (1–60 s) actually changes
+      the poll frequency and persists after a GUI restart.
+- [ ] "Daemon executable" override: `Browse…` opens a file picker;
+      `Apply` updates the path; `Reset to automatic` returns
+      to auto-detect; persistence after a GUI restart.
+- [ ] Workspaces: add via picker; "Clean orphans" removes workspaces
+      whose path has been deleted; "⚠ temp" / "⚠ missing" badges
+      consistent.
+- [ ] Logs: `subscribe-log` stream receives events; "Historical file" switch
+      loads `daemon.log.YYYY-MM-DD`; `.json` / `.jsonl` export opens a
+      save dialog.
+- [ ] System notifications on `error`: `RUST_LOG=error cargo run …`
+      triggers a system notification.
 
 ---
 
 ## GUI smoke E2E — macOS
 
-Stesso giro della sezione Windows. Mai testato.
+Same round as the Windows section. Never tested.
 
 - [ ] Build: `cargo build --release -p speedy-gui` (deps: `brew install`
-      se serve libxkbcommon o simili — verificare).
-- [ ] Tray icon appare (macOS usa `NSStatusItem`; `tray-icon` 0.19
-      dovrebbe supportarlo — da confermare).
-- [ ] Tutti i punti della checklist Windows ripetuti su macOS.
-- [ ] Autostart: shortcut in `~/Library/LaunchAgents/` oppure
-      `Login Items` — documentare il metodo consigliato.
+      if libxkbcommon or similar is needed — verify).
+- [ ] Tray icon appears (macOS uses `NSStatusItem`; `tray-icon` 0.19
+      should support it — to be confirmed).
+- [ ] All the Windows checklist points repeated on macOS.
+- [ ] Autostart: shortcut in `~/Library/LaunchAgents/` or
+      `Login Items` — document the recommended method.
 
 ---
 
 ## GUI smoke E2E — Linux GNOME / KDE
 
-Vedi anche `todo-fedora.md` §1.
+See also `todo-fedora.md` §1.
 
-- [ ] Build su Fedora 41+: confermare che i pacchetti `dnf` installati
-      in CI (`apt-get` è Ubuntu — su Fedora servono nomi diversi, es.
+- [ ] Build on Fedora 41+: confirm that the `dnf` packages installed
+      in CI (`apt-get` is Ubuntu — on Fedora different names are needed, e.g.
       `gtk3-devel`, `glib2-devel` …).
-- [ ] `cargo build --release -p speedy-gui` verde su Fedora 41.
-- [ ] Tray icon su GNOME: richiede estensione AppIndicator o
-      `libayatana-appindicator` — verificare se `tray-icon` 0.19 la
-      usa o se serve workaround.
-- [ ] Tray icon su KDE Plasma: dovrebbe funzionare out-of-the-box.
-- [ ] File picker (`rfd` 0.14) via GTK — testare.
-- [ ] Notifiche (`notify-rust` 4.11) via D-Bus — testare.
-- [ ] Tutti i punti della checklist Windows ripetuti.
-- [ ] Autostart: una volta creato `speedy-daemon.service` (vedi
-      `todo-fedora.md` §4), abilitarlo con
-      `systemctl --user enable --now speedy-daemon` e verificare al login.
-- [ ] `.desktop` GUI: una volta creato `speedy-gui.desktop` (vedi
-      `todo-fedora.md` §5), copiarlo in `~/.local/share/applications/`
-      e verificare che appaia nel menu.
+- [ ] `cargo build --release -p speedy-gui` green on Fedora 41.
+- [ ] Tray icon on GNOME: requires the AppIndicator extension or
+      `libayatana-appindicator` — verify whether `tray-icon` 0.19 uses
+      it or whether a workaround is needed.
+- [ ] Tray icon on KDE Plasma: should work out-of-the-box.
+- [ ] File picker (`rfd` 0.14) via GTK — test.
+- [ ] Notifications (`notify-rust` 4.11) via D-Bus — test.
+- [ ] All the Windows checklist points repeated.
+- [ ] Autostart: once `speedy-daemon.service` is created (see
+      `todo-fedora.md` §4), enable it with
+      `systemctl --user enable --now speedy-daemon` and verify at login.
+- [ ] `.desktop` GUI: once `speedy-gui.desktop` is created (see
+      `todo-fedora.md` §5), copy it into `~/.local/share/applications/`
+      and verify that it appears in the menu.
 
 ---
 
-## Fedora / Linux packaging — build reale
+## Fedora / Linux packaging — real build
 
-- [ ] Installare le dipendenze via `dnf` (nomi corretti) e verificare
-      `cargo build --release --workspace` verde su Fedora 41+.
-      I pacchetti Ubuntu in `ci.yml` sono un'ipotesi — aggiornare il
-      job CI Linux con i nomi `dnf` equivalenti se serve una Fedora runner.
-- [ ] Icona PNG/SVG per `speedy-gui`: creare e installare in
-      `packaging/linux/icons/hicolor/256x256/apps/speedy.png` (e
-      scalable). Aggiornare `speedy-gui.desktop` con il path icona
-      assoluto o con il nome simbolico `speedy`.
+- [ ] Install the dependencies via `dnf` (correct names) and verify
+      `cargo build --release --workspace` is green on Fedora 41+.
+      The Ubuntu packages in `ci.yml` are a guess — update the
+      Linux CI job with the equivalent `dnf` names if a Fedora runner is needed.
+- [ ] PNG/SVG icon for `speedy-gui`: create and install in
+      `packaging/linux/icons/hicolor/256x256/apps/speedy.png` (and
+      scalable). Update `speedy-gui.desktop` with the absolute icon path
+      or with the symbolic name `speedy`.

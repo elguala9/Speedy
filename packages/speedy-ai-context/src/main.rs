@@ -5,7 +5,7 @@ use speedy_core::workspace;
 use speedy_ai_context::cli::{Cli, Commands, WorkspaceAction};
 use speedy_ai_context::hooks;
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::info;
 
 #[cfg(test)]
 fn resolve_path(path: &Option<String>) -> Result<std::path::PathBuf> {
@@ -85,6 +85,9 @@ async fn ensure_daemon(cli: &Cli) -> Result<()> {
     let socket = resolve_socket_name(cli);
     let client = DaemonClient::new(&socket);
 
+    // The daemon is opt-in and never auto-started. If one happens to be
+    // running we register this workspace with it; if not, we simply proceed —
+    // the command runs in-process (standalone) without spawning a daemon.
     if client.is_alive().await {
         let workspaces = client.get_all_workspaces().await?;
         if workspaces.iter().any(|w| {
@@ -98,22 +101,8 @@ async fn ensure_daemon(cli: &Cli) -> Result<()> {
         }
         client.add_workspace(&cwd_str).await?;
         info!("Workspace aggiunto al daemon: {cwd_str}");
-        return Ok(());
     }
 
-    warn!("Daemon non risponde. Avvio...");
-    let daemon_dir = daemon_util::daemon_dir_path()?;
-    daemon_util::kill_existing_daemon(&daemon_dir);
-    daemon_util::spawn_daemon_process(&socket)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    if !workspace::is_registered(&cwd_str) {
-        workspace::add(&cwd_str)?;
-    }
-
-    let client = DaemonClient::new(&socket);
-    client.add_workspace(&cwd_str).await?;
-    info!("Daemon avviato, workspace monitorato e indicizzato: {cwd_str}");
     Ok(())
 }
 
@@ -132,7 +121,7 @@ fn load_workspace_features(root: &std::path::Path) -> WorkspaceFeatures {
                 doc.get("features")
                     .and_then(|f| f.get(key))
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(true)
+                    .unwrap_or(false)
             };
             return WorkspaceFeatures {
                 speedy_indexer: get("speedy_indexer"),
@@ -140,7 +129,8 @@ fn load_workspace_features(root: &std::path::Path) -> WorkspaceFeatures {
             };
         }
     }
-    WorkspaceFeatures { speedy_indexer: true, language_context: true }
+    // Opt-in by default: nothing runs until the user enables a feature.
+    WorkspaceFeatures { speedy_indexer: false, language_context: false }
 }
 
 fn save_workspace_features(root: &std::path::Path, f: &WorkspaceFeatures) -> anyhow::Result<()> {
@@ -177,6 +167,29 @@ fn set_feature_value(f: &mut WorkspaceFeatures, key: &str, value: bool) {
         "speedy_indexer" => f.speedy_indexer = value,
         "language_context" => f.language_context = value,
         _ => {}
+    }
+}
+
+/// Whether the file indexer is enabled for the current workspace.
+/// Reads `[features].speedy_indexer` from `.speedy/config.toml`; defaults to
+/// `false` (opt-in). The index/sync/reembed write paths no-op when disabled so
+/// that a fresh workspace — or a git hook firing on a workspace where the user
+/// has not opted in — does no work.
+fn speedy_indexer_enabled() -> bool {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    load_workspace_features(&root).speedy_indexer
+}
+
+/// Print the "feature disabled" notice and signal the caller to stop.
+fn report_indexer_disabled(command: &str, json: bool) {
+    info!(target: "ai-context", command, "skipped (speedy_indexer disabled)");
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "skipped": true, "reason": "speedy_indexer disabled" })
+        );
+    } else {
+        println!("speedy_indexer disabled — skipping {command}. Enable with: speedy enable speedy");
     }
 }
 
@@ -289,6 +302,10 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Some(Commands::Index { subdir, clear }) => {
+            if !speedy_indexer_enabled() {
+                report_indexer_disabled("index", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             if *clear {
@@ -359,6 +376,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Sync) => {
+            if !speedy_indexer_enabled() {
+                report_indexer_disabled("sync", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.sync_all().await?;
@@ -382,6 +403,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Reembed) => {
+            if !speedy_indexer_enabled() {
+                report_indexer_disabled("reembed", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.reembed().await?;

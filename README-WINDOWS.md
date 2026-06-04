@@ -9,8 +9,7 @@ Download `speedy-setup-<version>.exe` from the [Releases page](https://github.co
 The installer:
 - Copies the 5 binaries to `%LOCALAPPDATA%\Programs\Speedy\` (no admin required)
 - Adds the folder to the user PATH
-- Creates a shortcut in the Startup folder to launch the daemon automatically at every login
-- Starts the daemon immediately when done
+- Does **not** start the daemon or register it for login — by default Speedy syncs via git hooks. Enable launch-at-login from the GUI (Dashboard → "Avvio al login") if you want live file-watching.
 
 **Full uninstall:** Control Panel → Programs → *Speedy* → Uninstall.
 The wizard will ask whether to also delete user data (registered workspaces, logs, configuration).
@@ -99,9 +98,9 @@ Open a new terminal afterwards.
 
 ---
 
-## Step 3 — Autostart the daemon at login
+## Step 3 — (Optional) Autostart the daemon at login
 
-`speedy-daemon.exe` must start automatically at every login. The simplest way is to create a **shortcut in the user's Startup folder**.
+The daemon is **optional** — by default Speedy syncs via git hooks and needs no daemon. Set this up only if you want live file-watching (auto-reindex on save). The easiest way is the GUI (Dashboard → "Avvio al login"); to do it by hand, create a **shortcut in the user's Startup folder**.
 
 Open the Startup folder: `Win + R` → type `shell:startup` → Enter.
 

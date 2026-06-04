@@ -6,6 +6,7 @@ use tracing::info;
 use tracing_subscriber::prelude::*;
 
 use speedy_language_context::cli::{Cli, Commands};
+use speedy_language_context::features::Features;
 use speedy_language_context::graph::GraphStore;
 use speedy_language_context::indexer::Indexer;
 use speedy_language_context::{mcp, search, skeleton};
@@ -88,7 +89,32 @@ async fn async_main(cli: Cli, root: PathBuf) -> Result<()> {
     }
 }
 
+/// Whether the code-intelligence (language_context) feature is enabled for
+/// this workspace. Defaults to `false` (opt-in) — the index/update write paths
+/// no-op when disabled so a fresh workspace or a git hook does no work.
+fn language_context_enabled(root: &Path) -> bool {
+    Features::load(root).language_context
+}
+
+fn report_language_context_disabled(command: &str, as_json: bool) {
+    info!(target: "language-context", command, "skipped (language_context disabled)");
+    if as_json {
+        println!(
+            "{}",
+            serde_json::json!({ "skipped": true, "reason": "language_context disabled" })
+        );
+    } else {
+        println!(
+            "language_context disabled — skipping {command}. Enable with: speedy enable slc"
+        );
+    }
+}
+
 async fn cmd_index(root: &Path, as_json: bool) -> Result<()> {
+    if !language_context_enabled(root) {
+        report_language_context_disabled("index", as_json);
+        return Ok(());
+    }
     let started = Instant::now();
     let indexer = Indexer::new(root)?;
     let stats = indexer.full_index().await?;
@@ -115,6 +141,10 @@ async fn cmd_index(root: &Path, as_json: bool) -> Result<()> {
 }
 
 async fn cmd_update(root: &Path, files: &[PathBuf], as_json: bool) -> Result<()> {
+    if !language_context_enabled(root) {
+        report_language_context_disabled("update", as_json);
+        return Ok(());
+    }
     let started = Instant::now();
     let indexer = Indexer::new(root)?;
     let stats = indexer.index_files(files).await?;

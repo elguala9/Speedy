@@ -5,24 +5,27 @@ use std::path::Path;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Features {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub speedy_indexer: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub language_context: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub text_context: bool,
 }
 
-fn default_true() -> bool {
-    true
+fn default_false() -> bool {
+    false
 }
 
 impl Default for Features {
     fn default() -> Self {
+        // Every context is opt-in: a fresh/unconfigured workspace does nothing
+        // until the user explicitly enables a feature. Speedy relies on git
+        // hooks (not a live daemon) to drive indexing once a feature is on.
         Self {
-            speedy_indexer: true,
-            language_context: true,
-            text_context: true,
+            speedy_indexer: false,
+            language_context: false,
+            text_context: false,
         }
     }
 }

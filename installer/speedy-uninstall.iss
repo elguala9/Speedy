@@ -1,12 +1,12 @@
 ; ============================================================
 ;  Speedy — Uninstaller runner
 ;
-;  Non installa nulla. Quando eseguito, cerca il vero uninstaller
-;  di Speedy in %LOCALAPPDATA%\Programs\Speedy\ e lo lancia.
+;  Installs nothing. When run, it looks for Speedy's real uninstaller
+;  in %LOCALAPPDATA%\Programs\Speedy\ and launches it.
 ;
 ;  Build:
 ;    iscc /DMyAppVersion=0.1.0 installer\speedy-uninstall.iss
-;  oppure usa scripts\build-installer.ps1 (lo compila automaticamente).
+;  or use scripts\build-installer.ps1 (which compiles it automatically).
 ; ============================================================
 
 #ifndef MyAppVersion
@@ -14,16 +14,16 @@
 #endif
 
 #define MyAppName "Speedy"
-; Percorso fisso di installazione (coincide con DefaultDirName in speedy.iss)
+; Fixed installation path (matches DefaultDirName in speedy.iss)
 #define MyInstallDir "{localappdata}\Programs\Speedy"
 
 [Setup]
 AppName={#MyAppName} Uninstaller
 AppVersion={#MyAppVersion}
-; Non registra nulla nel sistema
+; Registers nothing in the system
 CreateUninstallRegKey=no
 Uninstallable=no
-; Directory fittizia — nessun file viene installato
+; Dummy directory — no files are installed
 DefaultDirName={tmp}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
@@ -48,9 +48,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Code]
 
 { ----------------------------------------------------------------
-  InitializeSetup è chiamata prima di mostrare qualsiasi pagina.
-  Restituendo False abbandoniamo subito il wizard (nessuna pagina
-  viene visualizzata), quindi questo exe non "installa" nulla.
+  InitializeSetup is called before any page is shown.
+  By returning False we abort the wizard immediately (no page is
+  displayed), so this exe does not "install" anything.
   ---------------------------------------------------------------- }
 function InitializeSetup(): Boolean;
 var
@@ -58,7 +58,7 @@ var
   Params: string;
   ResultCode: Integer;
 begin
-  Result := False; { Non procedere mai con l'installazione }
+  Result := False; { Never proceed with the installation }
 
   UninstExe := ExpandConstant('{localappdata}\Programs\Speedy\unins000.exe');
 
@@ -66,13 +66,13 @@ begin
   begin
     if not WizardSilent() then
       MsgBox(
-        'Speedy non risulta installato su questo sistema.' + #13#10 +
-        'File non trovato: ' + UninstExe,
+        'Speedy does not appear to be installed on this system.' + #13#10 +
+        'File not found: ' + UninstExe,
         mbError, MB_OK);
     Exit;
   end;
 
-  { Propaga la modalità silenziosa al vero uninstaller }
+  { Propagate silent mode to the real uninstaller }
   Params := '';
   if WizardSilent() then
     Params := '/SILENT /SUPPRESSMSGBOXES';
@@ -81,9 +81,9 @@ begin
   begin
     if not WizardSilent() then
       MsgBox(
-        'Impossibile avviare il programma di disinstallazione.' + #13#10 +
-        'Percorso: ' + UninstExe + #13#10 +
-        'Codice errore: ' + IntToStr(ResultCode),
+        'Unable to start the uninstall program.' + #13#10 +
+        'Path: ' + UninstExe + #13#10 +
+        'Error code: ' + IntToStr(ResultCode),
         mbError, MB_OK);
   end;
 end;

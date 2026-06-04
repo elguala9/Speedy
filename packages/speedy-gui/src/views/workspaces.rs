@@ -11,55 +11,35 @@ struct WorkspaceFeatures {
 
 impl Default for WorkspaceFeatures {
     fn default() -> Self {
-        Self { speedy_indexer: true, language_context: true, text_context: true }
+        // Opt-in by default — matches speedy-language-context::features::Features.
+        Self { speedy_indexer: false, language_context: false, text_context: false }
     }
 }
 
 fn load_features(workspace_path: &str) -> WorkspaceFeatures {
-    let config = std::path::Path::new(workspace_path)
-        .join(".speedy")
-        .join("config.toml");
-    if let Ok(raw) = std::fs::read_to_string(&config) {
-        if let Ok(doc) = toml::from_str::<toml::Value>(&raw) {
-            let get_bool = |key: &str| {
-                doc.get("features")
-                    .and_then(|f| f.get(key))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true)
-            };
-            return WorkspaceFeatures {
-                speedy_indexer: get_bool("speedy_indexer"),
-                language_context: get_bool("language_context"),
-                text_context: get_bool("text_context"),
-            };
-        }
+    // Single source of truth for the on-disk `[features]` schema.
+    let f = speedy_core::contexts::load_features(Some(workspace_path));
+    WorkspaceFeatures {
+        speedy_indexer: f.speedy_indexer,
+        language_context: f.language_context,
+        text_context: f.text_context,
     }
-    WorkspaceFeatures::default()
 }
 
 fn save_features(workspace_path: &str, f: &WorkspaceFeatures) {
-    let dir = std::path::Path::new(workspace_path).join(".speedy");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let config_path = dir.join("config.toml");
-    let mut doc: toml::Value = if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
-        toml::from_str(&raw)
-            .unwrap_or_else(|_| toml::Value::Table(toml::value::Table::new()))
-    } else {
-        toml::Value::Table(toml::value::Table::new())
-    };
-    let mut section = toml::value::Table::new();
-    section.insert("speedy_indexer".to_string(), toml::Value::Boolean(f.speedy_indexer));
-    section.insert("language_context".to_string(), toml::Value::Boolean(f.language_context));
-    section.insert("text_context".to_string(), toml::Value::Boolean(f.text_context));
-    if let toml::Value::Table(table) = &mut doc {
-        table.insert("features".to_string(), toml::Value::Table(section));
-    }
-    if let Ok(s) = toml::to_string_pretty(&doc) {
-        let _ = std::fs::write(&config_path, s);
-    }
+    // Each toggle is persisted via the shared helper, which merges into the
+    // existing `.speedy/config.toml` and preserves other sections.
+    let _ = speedy_core::contexts::set_feature(
+        Some(workspace_path),
+        "speedy_indexer",
+        f.speedy_indexer,
+    );
+    let _ = speedy_core::contexts::set_feature(
+        Some(workspace_path),
+        "language_context",
+        f.language_context,
+    );
+    let _ = speedy_core::contexts::set_feature(Some(workspace_path), "text_context", f.text_context);
 }
 
 #[derive(Default)]
@@ -74,7 +54,7 @@ impl WorkspacesView {
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {
-            if ui.button("➕ Aggiungi workspace…").clicked() {
+            if ui.button("➕ Add workspace…").clicked() {
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                     bridge.add_workspace(folder.to_string_lossy().to_string());
                 }
@@ -86,9 +66,9 @@ impl WorkspacesView {
                 }
             }
             if ui
-                .button("🧹 Pulisci orfani")
+                .button("🧹 Prune orphans")
                 .on_hover_text(
-                    "Rimuove le entry il cui path non esiste più sul disco",
+                    "Removes entries whose path no longer exists on disk",
                 )
                 .clicked()
             {
@@ -99,12 +79,12 @@ impl WorkspacesView {
         ui.add_space(6.0);
 
         if !state.alive {
-            ui.colored_label(Color32::from_rgb(220, 80, 80), "Daemon non raggiungibile.");
+            ui.colored_label(Color32::from_rgb(220, 80, 80), "Daemon unreachable.");
             return;
         }
 
         if state.workspaces.is_empty() {
-            ui.label("Nessun workspace registrato.");
+            ui.label("No registered workspaces.");
             return;
         }
 
@@ -136,14 +116,14 @@ impl WorkspacesView {
             if is_under_system_temp(path) {
                 ui.colored_label(Color32::from_rgb(220, 180, 80), "⚠ temp")
                     .on_hover_text(
-                        "Path sotto la directory temporanea di sistema — probabilmente \
-                         un residuo di test. Usalo solo se hai davvero un progetto in TEMP.",
+                        "Path under the system temp directory — probably a test \
+                         leftover. Use it only if you really have a project in TEMP.",
                     );
             }
             if !std::path::Path::new(path).exists() {
-                ui.colored_label(Color32::from_rgb(220, 100, 100), "⚠ mancante")
+                ui.colored_label(Color32::from_rgb(220, 100, 100), "⚠ missing")
                     .on_hover_text(
-                        "La cartella non esiste sul disco. Premi \"Pulisci orfani\" per rimuoverla.",
+                        "The folder does not exist on disk. Press \"Prune orphans\" to remove it.",
                     );
             }
         });
@@ -157,7 +137,7 @@ impl WorkspacesView {
                 if let Some(t) = ws.last_sync_at {
                     ui.label(RichText::new(format!("sync: {}", fmt_ago(t))).weak());
                 }
-            } else if ui.button("Carica stato").clicked() {
+            } else if ui.button("Load status").clicked() {
                 bridge.refresh_workspace_status(path.to_string());
             }
         });
@@ -178,13 +158,13 @@ impl WorkspacesView {
                     } else {
                         ui.spinner();
                         ui.label(
-                            RichText::new("Indicizzando…").color(Color32::from_rgb(180, 180, 80)),
+                            RichText::new("Indexing…").color(Color32::from_rgb(180, 180, 80)),
                         );
                     }
                 } else {
                     ui.spinner();
                     ui.label(
-                        RichText::new("Indicizzando…").color(Color32::from_rgb(180, 180, 80)),
+                        RichText::new("Indexing…").color(Color32::from_rgb(180, 180, 80)),
                     );
                 }
             });
@@ -193,21 +173,21 @@ impl WorkspacesView {
         if is_syncing {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new("Sincronizzando…").color(Color32::from_rgb(180, 180, 80)));
+                ui.label(RichText::new("Syncing…").color(Color32::from_rgb(180, 180, 80)));
             });
         }
 
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!is_indexing, egui::Button::new("Index"))
-                .on_hover_text("Re-indicizza questo workspace")
+                .on_hover_text("Re-index this workspace")
                 .clicked()
             {
                 bridge.reindex_workspace(path.to_string());
             }
             if ui
                 .add_enabled(!is_syncing, egui::Button::new("Sync"))
-                .on_hover_text("Sincronizza questo workspace")
+                .on_hover_text("Sync this workspace")
                 .clicked()
             {
                 bridge.sync_workspace(path.to_string());
@@ -216,7 +196,7 @@ impl WorkspacesView {
                 open_folder(path);
             }
             if ui
-                .button(RichText::new("Rimuovi").color(Color32::from_rgb(220, 120, 120)))
+                .button(RichText::new("Remove").color(Color32::from_rgb(220, 120, 120)))
                 .clicked()
             {
                 self.pending_remove = Some(path.to_string());
@@ -256,7 +236,7 @@ impl WorkspacesView {
             let snapshot = features.clone();
             save_features(path, &snapshot);
             if let Ok(mut s) = bridge.state.lock() {
-                s.set_toast("Features aggiornate", true);
+                s.set_toast("Features updated", true);
             }
         }
     }
@@ -264,23 +244,23 @@ impl WorkspacesView {
     fn confirm_remove(&mut self, ctx: &egui::Context, bridge: &DaemonBridge, target: String) {
         let mut close = false;
         let mut confirm = false;
-        egui::Window::new("Conferma rimozione")
+        egui::Window::new("Confirm removal")
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!("Rimuovere il workspace?\n\n{target}"));
+                ui.label(format!("Remove the workspace?\n\n{target}"));
                 ui.label(
                     RichText::new(
-                        "Il database .speedy/ sul disco resta intatto. Puoi cancellarlo a mano.",
+                        "The .speedy/ database on disk stays intact. You can delete it manually.",
                     )
                     .weak(),
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Annulla").clicked() {
+                    if ui.button("Cancel").clicked() {
                         close = true;
                     }
                     if ui
-                        .button(RichText::new("Rimuovi").color(Color32::from_rgb(220, 100, 100)))
+                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 100, 100)))
                         .clicked()
                     {
                         confirm = true;

@@ -1,5 +1,7 @@
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy install-hooks)
+# Runs the worker standalone (no daemon). Indexing is opt-in: the worker
+# no-ops unless the workspace has enabled the relevant feature.
 SPEEDY="{{SPEEDY_EXE}}"
 # Robustness: fall back to PATH if the hardcoded path is missing or moved
 [ -x "$SPEEDY" ] || SPEEDY=$(command -v speedy 2>/dev/null)
@@ -10,17 +12,12 @@ CHANGED=$(git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null)
 [ -z "$CHANGED" ] && exit 0
 ROOT=$(git rev-parse --show-toplevel)
 
-if "$SPEEDY" ping 2>/dev/null | grep -q "pong"; then
-    for f in $CHANGED; do
-        [ -f "$ROOT/$f" ] && "$SPEEDY" daemon exec -- index "$f"
-    done
-else
-    for f in $CHANGED; do
-        [ -f "$ROOT/$f" ] && SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" index "$f"
-    done
-fi
+# speedy-ai-context: incremental semantic re-index of changed files
+for f in $CHANGED; do
+    [ -f "$ROOT/$f" ] && SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" index "$f"
+done
 
-# speedy-language-context: incremental symbol-graph update (optional)
+# speedy-language-context: incremental symbol-graph update
 SLC="{{SLC_EXE}}"
 [ -x "$SLC" ] || SLC=$(command -v speedy-language-context 2>/dev/null)
 if [ -n "$SLC" ]; then
