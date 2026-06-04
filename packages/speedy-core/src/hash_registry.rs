@@ -10,8 +10,8 @@ pub struct FileHashEntry {
     pub mtime_secs: u64,
 }
 
-/// Shared hash registry stored in AppData next to the executable
-/// (`workspaces/<hash>/hashes.sqlite`).
+/// Shared hash registry stored in the per-workspace data dir
+/// (`<workspace>/.speedy/hashes.sqlite`).
 ///
 /// Each context (ai-context, language-context, text, …) writes its own rows —
 /// `(file_path, context)` is the primary key. Adding a new tool requires only
@@ -229,7 +229,6 @@ mod tests {
     #[test]
     fn test_new_file_needs_reindex() {
         let ws = tmp_workspace();
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", ws.path().to_str().unwrap());
         let file = ws.path().join("foo.rs");
         std::fs::write(&file, b"fn main() {}").unwrap();
         let reg = HashRegistry::open(ws.path()).unwrap();
@@ -239,7 +238,6 @@ mod tests {
     #[test]
     fn test_set_then_no_reindex() {
         let ws = tmp_workspace();
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", ws.path().to_str().unwrap());
         let file = ws.path().join("bar.rs");
         std::fs::write(&file, b"fn foo() {}").unwrap();
         let reg = HashRegistry::open(ws.path()).unwrap();
@@ -251,7 +249,6 @@ mod tests {
     #[test]
     fn test_content_change_triggers_reindex() {
         let ws = tmp_workspace();
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", ws.path().to_str().unwrap());
         let file = ws.path().join("baz.rs");
         std::fs::write(&file, b"v1").unwrap();
         let reg = HashRegistry::open(ws.path()).unwrap();
@@ -269,7 +266,6 @@ mod tests {
     #[test]
     fn test_mtime_unchanged() {
         let ws = tmp_workspace();
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", ws.path().to_str().unwrap());
         let file = ws.path().join("x.rs");
         std::fs::write(&file, b"hello").unwrap();
         let reg = HashRegistry::open(ws.path()).unwrap();
@@ -282,7 +278,6 @@ mod tests {
     #[test]
     fn test_delete_context() {
         let ws = tmp_workspace();
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", ws.path().to_str().unwrap());
         let file = ws.path().join("y.rs");
         std::fs::write(&file, b"data").unwrap();
         let reg = HashRegistry::open(ws.path()).unwrap();
@@ -297,7 +292,6 @@ mod tests {
     #[test]
     fn test_contexts_are_independent() {
         let ws = tmp_workspace();
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", ws.path().to_str().unwrap());
         let file = ws.path().join("z.rs");
         std::fs::write(&file, b"shared").unwrap();
         let reg = HashRegistry::open(ws.path()).unwrap();

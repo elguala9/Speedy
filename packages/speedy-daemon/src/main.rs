@@ -1054,7 +1054,8 @@ async fn dispatch_command(
         _ if line.starts_with("sync ") => {
             let raw_path = line.trim_start_matches("sync ").trim();
             metrics.syncs.fetch_add(1, Ordering::Relaxed);
-            match handle_sync(raw_path, watchers).await {
+            // Explicit `sync` command → force (bypass opt-in).
+            match handle_sync(raw_path, watchers, true).await {
                 Ok(()) => "ok\n".to_string(),
                 Err(e) => format!("error: {e}\n"),
             }
@@ -1238,7 +1239,8 @@ async fn handle_add(
         let watchers_clone = watchers.clone();
         tokio::spawn(async move {
             metrics_clone.syncs.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = handle_sync(&path_for_sync, &watchers_clone).await {
+            // Automatic initial sync → respect the opt-in flag (force = false).
+            if let Err(e) = handle_sync(&path_for_sync, &watchers_clone, false).await {
                 warn!("Initial sync failed for {path_for_sync}: {e}");
             }
         });
@@ -1344,10 +1346,13 @@ async fn handle_query_all(
 async fn handle_sync(
     raw_path: &str,
     watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
+    force: bool,
 ) -> Result<()> {
     // Orchestration lives in speedy-core so the CLI/GUI can run it without a
-    // daemon; the daemon adds the watcher bookkeeping on success.
-    let ran = contexts::sync_workspace(raw_path).await?;
+    // daemon; the daemon adds the watcher bookkeeping on success. `force` is
+    // set for the explicit `sync` command, cleared for the automatic initial
+    // sync so opt-in is still respected there.
+    let ran = contexts::sync_workspace(raw_path, force).await?;
     if ran {
         if let Ok(canonical) = Path::new(raw_path).canonicalize() {
             let path_str = canonical.to_string_lossy().to_string();
@@ -1442,75 +1447,66 @@ async fn handle_scan(args: &str) -> String {
     serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn scan_speedy_dirs(root: &Path, _max_depth: usize) -> Vec<ScanResult> {
+fn scan_speedy_dirs(root: &Path, max_depth: usize) -> Vec<ScanResult> {
     let registered: std::collections::HashSet<String> = workspace::list()
         .unwrap_or_default()
         .into_iter()
         .map(|e| e.path)
         .collect();
 
-    // Base dir is the same as workspace_data_dir uses
-    let base = if let Ok(r) = std::env::var("SPEEDY_WORKSPACE_DATA_ROOT") {
-        std::path::PathBuf::from(r)
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-    };
-    let workspaces_dir = base.join("workspaces");
-
-    let Ok(entries) = std::fs::read_dir(&workspaces_dir) else {
-        return Vec::new();
-    };
-
+    // Per-workspace data now lives in `<workspace>/.speedy/`, so there is no
+    // central directory to enumerate: walk the filesystem from `root` (bounded
+    // by `max_depth`) and report every folder that holds a `.speedy/sac.sqlite`.
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let db = dir.join(".speedy").join("sac.sqlite");
+        if let Ok(m) = std::fs::metadata(&db) {
+            // Canonicalize so the path matches the registry (which stores
+            // canonical paths — carrying a `\\?\` verbatim prefix on Windows).
+            let ws_path = dir
+                .canonicalize()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| dir.to_string_lossy().into_owned());
+            let last_modified = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| {
+                    let secs = d.as_secs() as i64;
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default()
+                });
+            let registered = registered.contains(&ws_path);
+            out.push(ScanResult {
+                path: ws_path,
+                registered,
+                last_modified,
+                db_size_bytes: m.len(),
+            });
+        }
+
+        if depth >= max_depth {
             continue;
         }
-        let ws_txt = entry.path().join("workspace.txt");
-        let Ok(ws_path) = std::fs::read_to_string(&ws_txt) else { continue };
-        let ws_path = ws_path.trim().to_string();
-        if ws_path.is_empty() { continue }
-
-        // Filter by root prefix if provided. Both sides are normalized first:
-        // `ws_path` is a canonical path (which on Windows carries a `\\?\`
-        // verbatim prefix), while the scan `root` is whatever the caller sent
-        // (usually non-canonical). Without stripping that prefix the
-        // `starts_with` check would never match on Windows.
-        let root_canon = root
-            .canonicalize()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| root.to_string_lossy().into_owned());
-        let root_norm = root_canon.strip_prefix(r"\\?\").unwrap_or(&root_canon);
-        let ws_norm = ws_path.strip_prefix(r"\\?\").unwrap_or(&ws_path);
-        if root_norm != "/" && root_norm != "\\" && root_norm.len() > 3 {
-            if !ws_norm.starts_with(root_norm) {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-        }
-
-        if !Path::new(&ws_path).exists() { continue }
-
-        let db = entry.path().join("sac.sqlite");
-        let (last_modified, db_size_bytes) = match std::fs::metadata(&db) {
-            Ok(m) => {
-                let ts = m.modified().ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| {
-                        let secs = d.as_secs() as i64;
-                        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
-                            .map(|dt| dt.to_rfc3339())
-                            .unwrap_or_default()
-                    });
-                (ts, m.len())
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Skip data/VCS/dependency dirs so a deep scan stays cheap and never
+            // descends into the very `.speedy/` folders it is detecting.
+            if matches!(
+                name.as_ref(),
+                ".git" | ".speedy" | ".speedy-text" | ".speedy-daemon" | "node_modules" | "target"
+            ) {
+                continue;
             }
-            Err(_) => (None, 0),
-        };
-
-        let registered = registered.contains(&ws_path);
-        out.push(ScanResult { path: ws_path, registered, last_modified, db_size_bytes });
+            stack.push((entry.path(), depth + 1));
+        }
     }
     out
 }
@@ -2803,8 +2799,8 @@ mod tests {
         let project = root.join("proj-a");
         std::fs::create_dir_all(&project).unwrap();
 
-        // Use root as the workspace data root so scan_speedy_dirs finds the entry.
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", root.to_str().unwrap());
+        // The DB now lives in `<workspace>/.speedy/sac.sqlite`; scan walks the
+        // filesystem from `root` and should discover proj-a by that marker.
         let data_dir = speedy_core::daemon_util::workspace_data_dir(&project);
         std::fs::write(data_dir.join("sac.sqlite"), b"fake db content").unwrap();
 
@@ -3074,7 +3070,6 @@ not-json-line\n\
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", dir.to_str().unwrap());
         let db_path = speedy_core::daemon_util::workspace_data_dir(&dir).join("sac.sqlite");
 
         // Create a minimal chunks table and insert 3 rows.

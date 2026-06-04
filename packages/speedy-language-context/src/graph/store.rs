@@ -1,6 +1,6 @@
 //! SQLite-backed store for the symbol graph.
 //!
-//! Schema lives in AppData next to the executable (`workspaces/<hash>/slc.sqlite`).
+//! Schema lives in the per-workspace data dir (`<workspace>/.speedy/slc.sqlite`).
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};

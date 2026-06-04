@@ -204,12 +204,15 @@ pub fn find_sibling_exe(stem: &str) -> Option<PathBuf> {
 /// Incremental sync of a workspace (ai-context only — the SLC and text indexes
 /// keep themselves current via per-file updates). No-op when `speedy_indexer`
 /// is disabled. Returns `true` when the worker ran and succeeded.
-pub async fn sync_workspace(raw_path: &str) -> Result<bool> {
+pub async fn sync_workspace(raw_path: &str, force: bool) -> Result<bool> {
     let canonical = std::path::Path::new(raw_path).canonicalize()?;
     let path_str = canonical.to_string_lossy().to_string();
 
+    // `force` marks an explicit user action (the GUI/CLI "Sync" command), which
+    // must run regardless of the opt-in flag. Automatic syncs (daemon initial
+    // sync / watcher) pass `force = false` so they still respect the flag.
     let features = load_features(Some(&path_str));
-    if !features.speedy_indexer {
+    if !features.speedy_indexer && !force {
         info!(target: "sync", workspace = %path_str, "Sync skipped (speedy_indexer disabled)");
         return Ok(false);
     }
@@ -218,6 +221,10 @@ pub async fn sync_workspace(raw_path: &str) -> Result<bool> {
     let exe = find_ai_context_exe();
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(["-p", &path_str, "sync"]).env("SPEEDY_NO_DAEMON", "1");
+    if force {
+        // Bypass the worker's own opt-in gate for an explicit sync.
+        cmd.env("SPEEDY_FORCE", "1");
+    }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let output = cmd.output().await?;
@@ -234,8 +241,21 @@ pub async fn sync_workspace(raw_path: &str) -> Result<bool> {
     }
 }
 
+/// Decide which contexts a manual reindex runs. The enabled ones run; if the
+/// user has enabled *nothing* (the default opt-in state), all three run so the
+/// explicit "Index" action is never a silent no-op. Returns
+/// `(run_ai, run_slc, run_text)`.
+fn contexts_to_run(f: &Features) -> (bool, bool, bool) {
+    let any = f.speedy_indexer || f.language_context || f.text_context;
+    (
+        f.speedy_indexer || !any,
+        f.language_context || !any,
+        f.text_context || !any,
+    )
+}
+
 /// Full reindex of a workspace: fans out to all three context workers in
-/// sequence, each gated by its feature flag. AI-context runs under a hard
+/// sequence (see `contexts_to_run` for which ones). AI-context runs under a hard
 /// wall-clock cap so a wedged child can never block the caller; SLC and
 /// text-context always get a chance to run even if AI-context fails. Returns a
 /// human-readable summary (`"ai-context: ok | slc: ok | text: disabled"`).
@@ -251,18 +271,25 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
     const AI_CONTEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
     const AI_CONTEXT_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
 
-    // Load features first so we can skip steps that are disabled.
+    // A manual reindex is an explicit user action, so it must never be a silent
+    // no-op: run whichever contexts the user enabled, and if NONE are enabled
+    // run all of them (see `contexts_to_run`). Automatic indexing — daemon
+    // initial-sync and the watcher — still respects the opt-in flags via their
+    // own paths.
     let features = load_features(Some(&path_str));
+    let (run_ai, run_slc, run_text) = contexts_to_run(&features);
 
     let started = Instant::now();
 
-    // AI-context reindex — only when the speedy_indexer feature is enabled.
-    let (stdout, ai_ok, ai_timed_out) = if features.speedy_indexer {
+    // AI-context reindex — when the indexer is enabled (or nothing is, see above).
+    let (stdout, ai_ok, ai_timed_out) = if run_ai {
         let exe = find_ai_context_exe();
         let mut cmd = tokio::process::Command::new(&exe);
         cmd.current_dir(&path_str)
             .args(["index", "--clear", "."])
             .env("SPEEDY_NO_DAEMON", "1")
+            // Explicit reindex: bypass the worker's own opt-in gate.
+            .env("SPEEDY_FORCE", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -353,7 +380,7 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
 
     let mut slc_ok: Option<bool> = None;
     let mut slc_err: Option<String> = None;
-    if features.language_context {
+    if run_slc {
         match find_language_context_exe() {
             Some(slc_exe) => {
                 // Clear the SLC graph DB before a full re-index so deleted files
@@ -363,6 +390,7 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
                     .arg("--path").arg(&path_str)
                     .arg("clear-index")
                     .env("SPEEDY_NO_DAEMON", "1")
+                    .env("SPEEDY_FORCE", "1")
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
@@ -377,6 +405,7 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
                     .arg("--path").arg(&path_str)
                     .arg("index")
                     .env("SPEEDY_NO_DAEMON", "1")
+                    .env("SPEEDY_FORCE", "1")
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
@@ -433,7 +462,7 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
     // so no separate clear step is needed.
     let mut text_ok: Option<bool> = None;
     let mut text_err: Option<String> = None;
-    if features.text_context {
+    if run_text {
         match find_text_context_exe() {
             Some(text_exe) => {
                 info!(target: "index", workspace = %path_str, exe = %text_exe.display(), "text index starting");
@@ -490,7 +519,7 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
     // Decide overall result. If AI-context failed AND SLC didn't succeed,
     // surface an error to the caller. Otherwise return a summary so the GUI
     // toast tells the user which half ran.
-    let ai_status = if !features.speedy_indexer {
+    let ai_status = if !run_ai {
         "skipped"
     } else if ai_ok {
         "ok"
@@ -505,21 +534,21 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
         match slc_ok {
             Some(true) => "ok".to_string(),
             Some(false) => format!("failed ({})", slc_err.as_deref().unwrap_or("see logs")),
-            None => if features.language_context { "not-found".to_string() } else { "disabled".to_string() },
+            None => if run_slc { "not-found".to_string() } else { "disabled".to_string() },
         },
         match text_ok {
             Some(true) => "ok".to_string(),
             Some(false) => format!("failed ({})", text_err.as_deref().unwrap_or("see logs")),
-            None => if features.text_context { "not-found".to_string() } else { "disabled".to_string() },
+            None => if run_text { "not-found".to_string() } else { "disabled".to_string() },
         }
     );
 
     // Only bail if something that was supposed to run actually failed.
-    if features.speedy_indexer && !ai_ok && slc_ok != Some(true) {
+    if run_ai && !ai_ok && slc_ok != Some(true) {
         anyhow::bail!("reindex failed — {summary}");
     }
 
-    Ok(if features.speedy_indexer && ai_ok { stdout.trim().to_string() } else { summary })
+    Ok(if run_ai && ai_ok { stdout.trim().to_string() } else { summary })
 }
 
 #[cfg(test)]
@@ -564,18 +593,21 @@ mod tests {
         assert!(set_feature(None, "bogus_feature", true).is_err());
     }
 
-    #[tokio::test]
-    async fn reindex_all_disabled_is_noop_summary() {
-        // An unconfigured workspace has every feature off: reindex must not spawn
-        // anything and should report all three as disabled.
-        let dir = std::env::temp_dir().join(format!("speedy_ctx_reidx_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    #[test]
+    fn unconfigured_reindex_runs_all_contexts() {
+        // The whole point of the manual "Index" action: with nothing enabled
+        // (the default), an explicit reindex must run every context, not no-op.
+        let (run_ai, run_slc, run_text) = contexts_to_run(&Features::defaults());
+        assert!(run_ai && run_slc && run_text);
+    }
 
-        let summary = reindex_workspace(&dir.to_string_lossy()).await.unwrap();
-        assert_eq!(summary, "ai-context: skipped | slc: disabled | text: disabled");
-
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn reindex_respects_partial_selection() {
+        // When the user has enabled something specific, only that runs.
+        let f = Features { speedy_indexer: true, language_context: false, text_context: false };
+        assert_eq!(contexts_to_run(&f), (true, false, false));
+        let f = Features { speedy_indexer: false, language_context: true, text_context: true };
+        assert_eq!(contexts_to_run(&f), (false, true, true));
     }
 
     #[tokio::test]
@@ -583,8 +615,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("speedy_ctx_sync_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ran = sync_workspace(&dir.to_string_lossy()).await.unwrap();
-        assert!(!ran, "sync must be a no-op when speedy_indexer is disabled");
+        let ran = sync_workspace(&dir.to_string_lossy(), false).await.unwrap();
+        assert!(!ran, "automatic sync must be a no-op when speedy_indexer is disabled");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
