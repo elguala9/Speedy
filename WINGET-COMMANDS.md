@@ -1,12 +1,12 @@
 # Winget — Publish Commands
 
-## Prima submission
+## First submission
 
 ```powershell
 cargo xtask publish-winget
 ```
 
-Oppure con versione esplicita:
+Or with an explicit version:
 
 ```powershell
 cargo xtask publish-winget --version 0.2.0
@@ -14,18 +14,18 @@ cargo xtask publish-winget --version 0.2.0
 .\scripts\submit-winget.ps1 -Version 0.2.0
 ```
 
-Apre il browser per il login GitHub e crea la PR su `microsoft/winget-pkgs`.
-Review Microsoft: **1–3 giorni lavorativi**.
+Opens the browser for GitHub login and creates the PR on `microsoft/winget-pkgs`.
+Microsoft review: **1–3 business days**.
 
 ---
 
-## Aggiornamento versione
+## Version update
 
 ```powershell
 cargo xtask publish-winget --update
 ```
 
-Oppure con versione esplicita:
+Or with an explicit version:
 
 ```powershell
 cargo xtask publish-winget --update --version 0.3.0
@@ -35,30 +35,30 @@ cargo xtask publish-winget --update --version 0.3.0
 
 ---
 
-## Prerequisiti prima di pubblicare
+## Prerequisites before publishing
 
 ```powershell
-# 1. Builda il tag e fai push (avvia GitHub Actions → produce i .tar.gz)
+# 1. Build the tag and push it (triggers GitHub Actions → produces the .tar.gz files)
 git tag v0.2.0
 git push GitHub v0.2.0
 
-# 2. Builda l'installer localmente (non prodotto da CI)
+# 2. Build the installer locally (not produced by CI)
 cargo xtask dist --installer
 
-# 3. Carica l'installer sulla Release GitHub manualmente
-#    oppure tramite gh CLI:
+# 3. Upload the installer to the GitHub Release manually
+#    or via the gh CLI:
 gh release upload v0.2.0 dist\speedy-setup-0.2.0.exe
 ```
 
-A quel punto l'installer è raggiungibile all'URL atteso da wingetcreate:
+At that point the installer is reachable at the URL expected by wingetcreate:
 `https://github.com/elguala9/Speedy/releases/download/v0.2.0/speedy-setup-0.2.0.exe`
 
 ---
 
-## Installa wingetcreate (se mancante)
+## Install wingetcreate (if missing)
 
 ```powershell
 winget install --id Microsoft.WingetCreate
 ```
 
-Lo script `submit-winget.ps1` lo installa automaticamente se mancante.
+The `submit-winget.ps1` script installs it automatically if missing.

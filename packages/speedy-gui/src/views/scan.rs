@@ -23,31 +23,41 @@ impl Default for ScanView {
 
 impl ScanView {
     pub fn render(&mut self, ui: &mut Ui, bridge: &DaemonBridge, state: &DaemonState) {
-        ui.heading("Scan workspace orfani");
+        ui.heading("Scan orphaned workspaces");
         ui.add_space(6.0);
-        ui.label("Cerca cartelle che contengono un .speedy/ ma non sono registrate nel daemon.");
+        ui.label("Find folders that contain a .speedy/ but are not registered in the daemon.");
         ui.add_space(6.0);
 
-        ui.horizontal(|ui| {
-            ui.label("Root:");
-            ui.add(egui::TextEdit::singleline(&mut self.root).desired_width(420.0));
-            if ui.button("…").clicked() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    self.root = folder.to_string_lossy().to_string();
+        if state.standalone {
+            ui.colored_label(
+                Color32::from_rgb(220, 180, 80),
+                "Scanning requires the daemon. Start it from the Dashboard to use this feature.",
+            );
+            ui.add_space(6.0);
+        }
+
+        ui.add_enabled_ui(!state.standalone, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Root:");
+                ui.add(egui::TextEdit::singleline(&mut self.root).desired_width(420.0));
+                if ui.button("…").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        self.root = folder.to_string_lossy().to_string();
+                    }
                 }
-            }
-            ui.label("Max depth:");
-            ui.add(egui::DragValue::new(&mut self.max_depth).range(1..=20));
-            if ui.button("Scansiona").clicked() {
-                self.selected.clear();
-                bridge.scan(self.root.clone(), self.max_depth);
-            }
+                ui.label("Max depth:");
+                ui.add(egui::DragValue::new(&mut self.max_depth).range(1..=20));
+                if ui.button("Scan").clicked() {
+                    self.selected.clear();
+                    bridge.scan(self.root.clone(), self.max_depth);
+                }
+            });
         });
 
         ui.add_space(8.0);
 
         if state.scan_results.is_empty() {
-            ui.label(RichText::new("Nessun risultato (ancora). Lancia una scansione.").weak());
+            ui.label(RichText::new("No results (yet). Run a scan.").weak());
             return;
         }
 
@@ -60,7 +70,7 @@ impl ScanView {
                 .collect();
             if ui
                 .button(format!(
-                    "Registra selezionati ({})",
+                    "Register selected ({})",
                     self.selected.iter().filter(|p| unregistered.contains(&p.as_str())).count()
                 ))
                 .clicked()
@@ -72,10 +82,10 @@ impl ScanView {
                 }
                 self.selected.clear();
             }
-            if ui.button("Seleziona tutti i non registrati").clicked() {
+            if ui.button("Select all unregistered").clicked() {
                 self.selected = unregistered.iter().map(|s| s.to_string()).collect();
             }
-            if ui.button("Pulisci selezione").clicked() {
+            if ui.button("Clear selection").clicked() {
                 self.selected.clear();
             }
         });
@@ -110,7 +120,7 @@ impl ScanView {
                             }
                             ui.monospace(&r.path);
                             if r.registered {
-                                ui.colored_label(Color32::from_rgb(80, 200, 80), "sì");
+                                ui.colored_label(Color32::from_rgb(80, 200, 80), "yes");
                             } else {
                                 ui.colored_label(Color32::from_rgb(220, 180, 80), "no");
                             }

@@ -15,7 +15,9 @@ CLI and two MCP servers for AI coding agents.
   speedy-daemon.exe
     The single background daemon. Watches all registered workspaces,
     keeps the index up to date, and serves requests from the CLI.
-    Starts automatically at login (if you selected that option).
+    Optional and NOT auto-started: by default Speedy syncs through git
+    hooks. Start it from the GUI (Dashboard) and enable "Avvio al login"
+    there if you want live file-watching at every logon.
 
   speedy-cli.exe
     Thin client for the daemon. Use this for scripting, indexing and

@@ -84,7 +84,7 @@ impl LogsView {
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
-            ui.label("Sorgente:");
+            ui.label("Source:");
             let live_label = "Live (stream)";
             if ui
                 .selectable_label(matches!(self.source, LogSource::Live), live_label)
@@ -97,8 +97,8 @@ impl LogsView {
                 LogSource::File(p) => p
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "(seleziona)".into()),
-                _ => "(seleziona)".into(),
+                    .unwrap_or_else(|| "(select)".into()),
+                _ => "(select)".into(),
             };
             egui::ComboBox::from_id_source("log_file_combo")
                 .selected_text(current_file)
@@ -114,13 +114,13 @@ impl LogsView {
                         }
                     }
                 });
-            if ui.button("↻ Rilegge elenco").clicked() {
+            if ui.button("↻ Reload list").clicked() {
                 self.available_files = list_log_files();
             }
         });
 
         ui.horizontal_wrapped(|ui| {
-            ui.label("Livello:");
+            ui.label("Level:");
             ui.checkbox(&mut self.level_filter.trace, "trace");
             ui.checkbox(&mut self.level_filter.debug, "debug");
             ui.checkbox(&mut self.level_filter.info, "info");
@@ -128,7 +128,7 @@ impl LogsView {
             ui.checkbox(&mut self.level_filter.error, "error");
         });
         ui.horizontal(|ui| {
-            ui.label("Cerca:");
+            ui.label("Search:");
             ui.add(egui::TextEdit::singleline(&mut self.substring).desired_width(220.0));
             ui.label("Target:");
             ui.add(
@@ -148,7 +148,7 @@ impl LogsView {
             if matches!(self.source, LogSource::Live) {
                 ui.checkbox(&mut self.follow_tail, "Follow tail");
             }
-            if ui.button("Pulisci buffer").clicked() {
+            if ui.button("Clear buffer").clicked() {
                 if matches!(self.source, LogSource::Live) {
                     self.stream.clear();
                 } else {
@@ -227,7 +227,7 @@ impl LogsView {
 
         ui.horizontal(|ui| {
             if ui
-                .button(format!("Esporta selezione ({})", filtered.len()))
+                .button(format!("Export selection ({})", filtered.len()))
                 .clicked()
             {
                 if let Some(p) = rfd::FileDialog::new()
@@ -240,12 +240,12 @@ impl LogsView {
                     match write_export(&p, &snapshot) {
                         Ok(_) => {
                             if let Ok(mut s) = bridge.state.lock() {
-                                s.set_toast(format!("Esportato: {}", p.display()), true);
+                                s.set_toast(format!("Exported: {}", p.display()), true);
                             }
                         }
                         Err(e) => {
                             if let Ok(mut s) = bridge.state.lock() {
-                                s.set_toast(format!("Export fallito: {e}"), false);
+                                s.set_toast(format!("Export failed: {e}"), false);
                             }
                         }
                     }

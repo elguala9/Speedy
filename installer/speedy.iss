@@ -1,13 +1,13 @@
 ; ============================================================
 ;  Speedy — Inno Setup 6 installer script
 ;
-;  Build minimo:
+;  Minimal build:
 ;    iscc /DMyAppVersion=0.1.0 installer\speedy.iss
 ;
-;  Build con icona custom:
+;  Build with custom icon:
 ;    iscc /DMyAppVersion=0.1.0 /DMySetupIcon=installer\assets\speedy.ico installer\speedy.iss
 ;
-;  Usa scripts\build-installer.ps1 per fare tutto in un colpo.
+;  Use scripts\build-installer.ps1 to do everything in one go.
 ; ============================================================
 
 #ifndef MyAppVersion
@@ -17,8 +17,8 @@
 #define MyAppName      "Speedy"
 #define MyAppPublisher "Parresia"
 #define MyAppURL       "https://github.com/elguala9/Speedy"
-; GUID fisso — non cambiare: identifica l'app per gli aggiornamenti automatici
-; (le {{ }} sono escape per le parentesi graffe in Inno Setup)
+; Fixed GUID — do not change: identifies the app for automatic updates
+; (the {{ }} are escapes for curly braces in Inno Setup)
 #define MyAppId        "6F3A1B2C-4D5E-6F7A-8B9C-0D1E2F3A4B5C"
 
 ; ============================================================
@@ -33,41 +33,41 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
 
-; Installa in %LOCALAPPDATA%\Programs\Speedy — nessun admin richiesto
+; Installs into %LOCALAPPDATA%\Programs\Speedy — no admin required
 DefaultDirName={localappdata}\Programs\Speedy
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 
-; Nessun privilegio di amministratore necessario
+; No administrator privileges needed
 PrivilegesRequired=lowest
 
 ; Output
 OutputDir=..\dist
 OutputBaseFilename=speedy-setup-{#MyAppVersion}
 
-; Icona custom (opzionale — passa /DMySetupIcon=percorso al .ico per usarla)
+; Custom icon (optional — pass /DMySetupIcon=path to the .ico to use it)
 #ifdef MySetupIcon
 SetupIconFile={#MySetupIcon}
 #endif
 
-; Compressione massima (riduce le dimensioni dell'installer del 30-40%)
+; Maximum compression (reduces installer size by 30-40%)
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 
-; Notifica Windows del cambio PATH così i nuovi terminali lo vedono subito
+; Notify Windows of the PATH change so new terminals see it immediately
 ChangesEnvironment=yes
 
-; Disabilitiamo Restart Manager: su Windows 11 può bloccarsi durante l'uninstall
-; mostrando dialog invisibili o aspettando processi che non rispondono.
-; Killiamo noi i processi via taskkill nelle sezioni [Run] e [UninstallRun].
+; We disable Restart Manager: on Windows 11 it can hang during uninstall
+; by showing invisible dialogs or waiting for unresponsive processes.
+; We kill the processes ourselves via taskkill in the [Run] and [UninstallRun] sections.
 CloseApplications=no
 
 ; Uninstaller
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 UninstallDisplayIcon={app}\speedy-gui.exe
 
-; Requisito minimo: Windows 10 1809 (che ha Unix domain socket nativo)
+; Minimum requirement: Windows 10 1809 (which has native Unix domain sockets)
 MinVersion=10.0.17763
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -81,27 +81,29 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; ============================================================
 [Tasks]
 ; ============================================================
-; Task selezionati di default (Flags: checkedonce = selezionato la prima volta, poi ricorda la scelta)
-Name: "autostart";   Description: "Avvia il daemon automaticamente ad ogni login (consigliato)";  GroupDescription: "Avvio automatico:";    Flags: checkedonce
-Name: "addtopath";   Description: "Aggiungi Speedy al PATH (richiesto da speedy-cli e speedy-mcp)"; GroupDescription: "Integrazione sistema:"; Flags: checkedonce
+; Tasks selected by default (Flags: checkedonce = selected the first time, then remembers the choice)
+; NB: automatic startup at login is NO LONGER managed by the installer. By default
+; Speedy works through git hooks (no daemon). Startup at login is enabled/
+; disabled from the GUI (Dashboard → "Start at login").
+Name: "addtopath";   Description: "Add Speedy to PATH (required by speedy-cli and speedy-mcp)"; GroupDescription: "System integration:"; Flags: checkedonce
 
-; Task non selezionato di default
-Name: "desktopicon"; Description: "Crea collegamento sul Desktop per Speedy GUI"; GroupDescription: "Icone aggiuntive:"; Flags: unchecked
+; Task not selected by default
+Name: "desktopicon"; Description: "Create a Desktop shortcut for Speedy GUI"; GroupDescription: "Additional icons:"; Flags: unchecked
 
-; Ollama — opt-in: deselezionato di default, Check nasconde il task se già installato
-Name: "installoollama"; Description: "Scarica e installa Ollama (richiesto per i modelli AI locali)"; GroupDescription: "Dipendenze:"; Check: OllamaNotInstalled; Flags: unchecked
+; Ollama — opt-in: deselected by default, Check hides the task if already installed
+Name: "installoollama"; Description: "Download and install Ollama (required for local AI models)"; GroupDescription: "Dependencies:"; Check: OllamaNotInstalled; Flags: unchecked
 
-; Modello predefinito — opt-in: deselezionato di default, Check nasconde il task se già presente
-Name: "pullmodel"; Description: "Scarica il modello predefinito nomic-embed-text (~270 MB, richiede connessione)"; GroupDescription: "Dipendenze:"; Check: ModelNotInstalled; Flags: unchecked
+; Default model — opt-in: deselected by default, Check hides the task if already present
+Name: "pullmodel"; Description: "Download the default model nomic-embed-text (~270 MB, requires a connection)"; GroupDescription: "Dependencies:"; Check: ModelNotInstalled; Flags: unchecked
 
 ; ============================================================
 [Files]
 ; ============================================================
-; Binari principali
-;   ignoreversion       — sovrascrive sempre (utile per aggiornamenti)
-;   restartreplace      — durante install, se il file è in uso, schedula a reboot
-;   uninsrestartdelete  — durante uninstall, se il file è in uso, schedula a reboot
-;                         (così l'uninstaller non si blocca su lock di antivirus/RM)
+; Main binaries
+;   ignoreversion       — always overwrite (useful for updates)
+;   restartreplace      — during install, if the file is in use, schedule for reboot
+;   uninsrestartdelete  — during uninstall, if the file is in use, schedule for reboot
+;                         (so the uninstaller does not hang on antivirus/RM locks)
 Source: "..\dist\speedy-ai-context.exe";        DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "..\dist\speedy-daemon.exe";            DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "..\dist\speedy-cli.exe";               DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
@@ -112,48 +114,47 @@ Source: "..\dist\speedy-language-context-mcp.exe";  DestDir: "{app}"; Flags: ign
 Source: "..\dist\speedy-text-context.exe";          DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "..\dist\speedy-text-context-mcp.exe";      DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
-; Documentazione — copiata nella cartella di installazione
+; Documentation — copied into the installation folder
 Source: "..\installer\README.txt";       DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\INSTALLATION.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\FOR-IA.md";        DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\SETTINGS_MCP.md";  DestDir: "{app}"; Flags: ignoreversion
 
-; Script di disinstallazione di emergenza — se l'uninstaller di Inno Setup
-; si blocca per qualsiasi motivo, l'utente può lanciare questo script.
+; Emergency uninstall script — if the Inno Setup uninstaller
+; hangs for any reason, the user can run this script.
 Source: "..\installer\uninstall-emergency.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
+
+; ============================================================
+[InstallDelete]
+; ============================================================
+; Upgrade cleanup: previous versions created a shortcut for automatic
+; daemon startup in the Startup folder. Startup at login is now managed
+; by the GUI, so we remove any legacy shortcut.
+Type: files; Name: "{userstartup}\Speedy Daemon.lnk"
 
 ; ============================================================
 [Icons]
 ; ============================================================
 
-; --- Avvio automatico al login (task: autostart) ---
-; speedy-daemon.exe è compilato con windows_subsystem="windows" in release build,
-; quindi parte senza finestra console — nessun wrapper VBS necessario.
-Name: "{userstartup}\Speedy Daemon"; \
-  Filename: "{app}\speedy-daemon.exe"; \
-  WorkingDir: "{app}"; \
-  Comment: "Speedy semantic search daemon — avvio automatico"; \
-  Tasks: autostart
-
 ; --- Start Menu ---
 Name: "{group}\Speedy";             Filename: "{app}\speedy-gui.exe";    WorkingDir: "{app}"
 Name: "{group}\Speedy Daemon";      Filename: "{app}\speedy-daemon.exe"; WorkingDir: "{app}"
-Name: "{group}\Disinstalla Speedy"; Filename: "{uninstallexe}"
+Name: "{group}\Uninstall Speedy"; Filename: "{uninstallexe}"
 
-; --- Desktop (opzionale) ---
+; --- Desktop (optional) ---
 Name: "{userdesktop}\Speedy"; Filename: "{app}\speedy-gui.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 ; ============================================================
 [Registry]
 ; ============================================================
 
-; Aggiunge {app} al PATH utente (REG_EXPAND_SZ in HKCU\Environment\Path).
-; {olddata} = valore attuale del registry.
-; La funzione Check: NeedsAddPath evita duplicati.
-; uninsneveruninstall: Inno Setup NON ripristina il vecchio valore PATH durante
-; la disinstallazione — lo fa RemoveFromPath nel [Code], che rimuove solo il
-; segmento Speedy invece di ripristinare un valore potenzialmente obsoleto.
+; Adds {app} to the user PATH (REG_EXPAND_SZ in HKCU\Environment\Path).
+; {olddata} = current registry value.
+; The Check: NeedsAddPath function avoids duplicates.
+; uninsneveruninstall: Inno Setup does NOT restore the old PATH value during
+; uninstall — RemoveFromPath in [Code] does it, removing only the
+; Speedy segment instead of restoring a potentially stale value.
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
   ValueData: "{olddata};{app}"; \
   Tasks: addtopath; \
@@ -164,67 +165,64 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 [Run]
 ; ============================================================
 
-; Avvia il daemon subito al termine dell'installazione (senza aspettare il prossimo login).
-; runhidden: non apre una finestra (supportato da windows_subsystem in release build).
-; Nota: non ha il flag postinstall, quindi gira automaticamente senza mostrarlo come checkbox.
-Filename: "{app}\speedy-daemon.exe"; \
-  WorkingDir: "{app}"; \
-  Flags: nowait runhidden; \
-  StatusMsg: "Avvio daemon in background..."
+; The daemon is NO LONGER started automatically at the end of installation.
+; By default Speedy works through git hooks (standalone mode, no daemon).
+; The user can start the daemon manually from the GUI (Dashboard → "Start daemon")
+; and enable startup at login from the same screen.
 
-; Offre all'utente di aprire la GUI al termine (checkbox nella pagina Finish).
+; Offers the user to open the GUI at the end (checkbox on the Finish page).
 Filename: "{app}\speedy-gui.exe"; \
   WorkingDir: "{app}"; \
-  Description: "Apri Speedy GUI"; \
+  Description: "Open Speedy GUI"; \
   Flags: nowait postinstall shellexec
 
-; Offre di aprire il README con Notepad al termine.
+; Offers to open the README with Notepad at the end.
 Filename: "{app}\README.txt"; \
-  Description: "Apri README (istruzioni d'uso)"; \
+  Description: "Open README (usage instructions)"; \
   Flags: nowait postinstall shellexec
 
-; 1. Scarica OllamaSetup.exe nella cartella temp dell'installer (silenzioso).
+; 1. Download OllamaSetup.exe into the installer's temp folder (silent).
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile '{tmp}\OllamaSetup.exe' -UseBasicParsing"""; \
   Tasks: installoollama; \
-  StatusMsg: "Download Ollama in corso..."; \
+  StatusMsg: "Downloading Ollama..."; \
   Flags: runhidden waituntilterminated
 
-; 2. Apre l'installer di Ollama in una finestra separata e aspetta il completamento.
+; 2. Opens the Ollama installer in a separate window and waits for completion.
 Filename: "{tmp}\OllamaSetup.exe"; \
   Tasks: installoollama; \
-  StatusMsg: "Installazione Ollama in corso..."; \
+  StatusMsg: "Installing Ollama..."; \
   Flags: waituntilterminated
 
-; Scarica il modello predefinito nomic-embed-text tramite Ollama.
-; Attende 5s dopo l'eventuale installazione di Ollama, poi esegue 'ollama pull'.
-; Se Ollama non è presente (utente ha deselezionato il task sopra), esce senza errori.
+; Downloads the default model nomic-embed-text via Ollama.
+; Waits 5s after any Ollama installation, then runs 'ollama pull'.
+; If Ollama is not present (user deselected the task above), it exits without errors.
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""$o=[System.Environment]::GetFolderPath('LocalApplicationData')+'\Programs\Ollama\ollama.exe';if(Test-Path $o){{Start-Sleep 5;&$o pull nomic-embed-text}"""; \
   Tasks: pullmodel; \
-  StatusMsg: "Download modello nomic-embed-text (~270 MB)..."; \
+  StatusMsg: "Downloading model nomic-embed-text (~270 MB)..."; \
   Flags: runhidden waituntilterminated
 
 ; ============================================================
 [UninstallDelete]
 ; ============================================================
 
-; La cartella logs/ viene creata a runtime (non è in [Files]) — la eliminiamo sempre.
+; The logs/ folder is created at runtime (not in [Files]) — we always delete it.
 Type: filesandordirs; Name: "{app}\logs"
 
 ; ============================================================
 [UninstallRun]
 ; ============================================================
 
-; Force-kill di tutti i processi Speedy.
-; NIENTE speedy-cli daemon stop qui: può bloccarsi 10s su IPC timeout e non
-; aggiunge nulla a taskkill /F. taskkill esce con errore se il processo non
-; è in esecuzione — ignorato da Inno Setup.
+; Force-kill all Speedy processes.
+; NO speedy-cli daemon stop here: it can hang 10s on IPC timeout and adds
+; nothing over taskkill /F. taskkill exits with an error if the process is
+; not running — ignored by Inno Setup.
 Filename: "{sys}\taskkill.exe"; \
   Parameters: "/F /IM speedy-daemon.exe /T"; \
   Flags: runhidden; \
   RunOnceId: "KillDaemon"; \
-  StatusMsg: "Chiusura processi Speedy..."
+  StatusMsg: "Closing Speedy processes..."
 
 Filename: "{sys}\taskkill.exe"; \
   Parameters: "/F /IM speedy-cli.exe /T"; \
@@ -259,8 +257,8 @@ var
 
 { ----------------------------------------------------------------
   OLLAMA — OllamaNotInstalled
-  Restituisce True se ollama.exe non è presente nel percorso di
-  installazione standard (%LOCALAPPDATA%\Programs\Ollama).
+  Returns True if ollama.exe is not present in the standard
+  installation path (%LOCALAPPDATA%\Programs\Ollama).
   ---------------------------------------------------------------- }
 function OllamaNotInstalled(): Boolean;
 begin
@@ -269,8 +267,8 @@ end;
 
 { ----------------------------------------------------------------
   OLLAMA — ModelNotInstalled
-  Restituisce True se il manifest di nomic-embed-text non è presente
-  nella directory modelli di Ollama (~\.ollama\models\manifests\...).
+  Returns True if the nomic-embed-text manifest is not present
+  in the Ollama models directory (~\.ollama\models\manifests\...).
   ---------------------------------------------------------------- }
 function ModelNotInstalled(): Boolean;
 begin
@@ -282,8 +280,8 @@ end;
 
 { ----------------------------------------------------------------
   PATH — NeedsAddPath
-  Restituisce True se AppPath non è già presente nel PATH utente.
-  Confronto case-insensitive: aggiunge ;AppPath in mezzo al PATH.
+  Returns True if AppPath is not already present in the user PATH.
+  Case-insensitive comparison: adds ;AppPath within the PATH.
   ---------------------------------------------------------------- }
 function NeedsAddPath(AppPath: string): Boolean;
 var
@@ -294,15 +292,15 @@ begin
     Result := True;
     Exit;
   end;
-  { Circoscrive con ';' per evitare match parziali (es. \Speedy vs \SpeedyExtra) }
+  { Bound with ';' to avoid partial matches (e.g. \Speedy vs \SpeedyExtra) }
   Result := Pos(';' + Uppercase(AppPath) + ';',
                 ';' + Uppercase(CurrentPath) + ';') = 0;
 end;
 
 { ----------------------------------------------------------------
   PATH — RemoveFromPath
-  Rimuove AppPath dal PATH utente (case-insensitive).
-  Gestisce sia ';AppPath' sia 'AppPath;' all'inizio/fine.
+  Removes AppPath from the user PATH (case-insensitive).
+  Handles both ';AppPath' and 'AppPath;' at the start/end.
   ---------------------------------------------------------------- }
 procedure RemoveFromPath(AppPath: string);
 var
@@ -315,7 +313,7 @@ begin
   AppUC := Uppercase(AppPath);
   CurUC := Uppercase(CurrentPath);
 
-  { Cerca ';AppPath' (caso più comune: AppPath in mezzo o alla fine) }
+  { Look for ';AppPath' (most common case: AppPath in the middle or at the end) }
   P := Pos(';' + AppUC, CurUC);
   if P > 0 then
   begin
@@ -324,7 +322,7 @@ begin
     Exit;
   end;
 
-  { Cerca 'AppPath;' (caso: AppPath all'inizio del PATH) }
+  { Look for 'AppPath;' (case: AppPath at the start of the PATH) }
   P := Pos(AppUC + ';', CurUC);
   if P > 0 then
   begin
@@ -335,8 +333,8 @@ end;
 
 { ----------------------------------------------------------------
   UNINSTALL — InitializeUninstall
-  Mostra un dialog che chiede se eliminare anche i dati utente.
-  Default: No (MB_DEFBUTTON2) per sicurezza.
+  Shows a dialog asking whether to also delete user data.
+  Default: No (MB_DEFBUTTON2) for safety.
   ---------------------------------------------------------------- }
 function InitializeUninstall(): Boolean;
 var
@@ -348,20 +346,20 @@ begin
   UserProfile := GetEnv('USERPROFILE');
 
   Answer := MsgBox(
-    'Vuoi eliminare anche tutti i dati utente di Speedy?' + #13#10 +
+    'Do you also want to delete all Speedy user data?' + #13#10 +
     '' + #13#10 +
-    'Verranno eliminati:' + #13#10 +
+    'The following will be deleted:' + #13#10 +
     '  ' + AppData + '\speedy\' + #13#10 +
-    '    (workspaces registrati, log del daemon, configurazione)' + #13#10 +
+    '    (registered workspaces, daemon logs, configuration)' + #13#10 +
     '  ' + AppData + '\Speedy GUI\' + #13#10 +
-    '    (preferenze e layout della GUI)' + #13#10 +
+    '    (GUI preferences and layout)' + #13#10 +
     '  ' + UserProfile + '\.speedy\' + #13#10 +
-    '    (configurazione globale utente)' + #13#10 +
+    '    (global user configuration)' + #13#10 +
     '' + #13#10 +
-    'NON vengono toccate le cartelle .speedy\ nei tuoi progetti' + #13#10 +
-    '(indici e database restano intatti).' + #13#10 +
+    'The .speedy\ folders in your projects are NOT touched' + #13#10 +
+    '(indexes and databases remain intact).' + #13#10 +
     '' + #13#10 +
-    'Si = rimozione completa.  No = mantieni i dati (consigliato).',
+    'Yes = full removal.  No = keep the data (recommended).',
     mbConfirmation,
     MB_YESNO or MB_DEFBUTTON2
   );
@@ -370,9 +368,9 @@ end;
 
 { ----------------------------------------------------------------
   UNINSTALL - CurUninstallStepChanged
-  usUninstall:     rimuove la dir di installazione dal PATH utente
-                   e cancella le chiavi di registro specifiche di Speedy
-  usPostUninstall: se l'utente ha scelto Si, cancella le dir dati
+  usUninstall:     removes the installation dir from the user PATH
+                   and deletes the Speedy-specific registry keys
+  usPostUninstall: if the user chose Yes, deletes the data dirs
   ---------------------------------------------------------------- }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
@@ -383,8 +381,8 @@ begin
 
     usUninstall:
     begin
-      // Kill difensivo: se i processi fossero ancora vivi bloccano i file.
-      // ResultCode ignorato (taskkill esce con errore se il processo non gira).
+      // Defensive kill: if the processes are still alive they lock the files.
+      // ResultCode ignored (taskkill exits with an error if the process is not running).
       Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-daemon.exe /T',
            '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-gui.exe /T',
@@ -395,16 +393,21 @@ begin
            '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM speedy-text-context.exe /T',
            '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Sleep(1200); // attende che il SO rilasci i file lock prima della cancellazione
+      Sleep(1200); // waits for the OS to release the file locks before deletion
 
-      // Rimuove solo il segmento {app} dal PATH, non tocca il resto
+      // Removes only the {app} segment from the PATH, leaves the rest untouched
       RemoveFromPath(ExpandConstant('{app}'));
 
-      { Chiavi di registro specifiche di Speedy (no-op se non esistono) }
+      { Speedy-specific registry keys (no-op if they do not exist) }
       RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Speedy');
       RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Parresia\Speedy');
-      { Rimuove il parent solo se rimasto vuoto }
+      { Removes the parent only if left empty }
       RegDeleteKeyIfEmpty(HKCU, 'Software\Parresia');
+
+      { Startup-at-login entry created by the GUI (HKCU ...\Run). No-op if absent. }
+      RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Speedy Daemon');
+      { Legacy automatic startup shortcut (previous versions) }
+      DeleteFile(ExpandConstant('{userstartup}\Speedy Daemon.lnk'));
     end;
 
     usPostUninstall:
@@ -418,22 +421,22 @@ begin
 
       if AppData <> '' then
       begin
-        { Dati del daemon: workspaces.json, logs/, daemon.pid, daemon.lock }
+        { Daemon data: workspaces.json, logs/, daemon.pid, daemon.lock }
         DelTree(AppData + '\speedy', True, True, True);
 
-        { Dati GUI (eframe "Speedy GUI"): preferenze, layout, socket name }
+        { GUI data (eframe "Speedy GUI"): preferences, layout, socket name }
         DelTree(AppData + '\Speedy GUI', True, True, True);
       end;
 
       if LocalAppData <> '' then
       begin
-        { Cache eframe (alcune versioni scrivono qui invece di AppData) }
+        { eframe cache (some versions write here instead of AppData) }
         DelTree(LocalAppData + '\Speedy GUI', True, True, True);
       end;
 
       if UserProfile <> '' then
       begin
-        { Configurazione globale utente: ~/.speedy/config.speedy.json }
+        { Global user configuration: ~/.speedy/config.speedy.json }
         DelTree(UserProfile + '\.speedy', True, True, True);
       end;
     end;

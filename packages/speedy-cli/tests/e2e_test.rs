@@ -55,6 +55,19 @@ fn create_test_project(dir: &Path) {
     ).unwrap();
 }
 
+/// Opt-in: enable the file indexer for a test workspace. The default is now
+/// off (no-daemon / opt-in model), so `index`/`sync`/`reindex` would otherwise
+/// no-op with "speedy_indexer disabled".
+fn enable_indexer(dir: &Path) {
+    let speedy = dir.join(".speedy");
+    std::fs::create_dir_all(&speedy).unwrap();
+    std::fs::write(
+        speedy.join("config.toml"),
+        b"[features]\nspeedy_indexer = true\n",
+    )
+    .unwrap();
+}
+
 struct DaemonGuard {
     process: Option<Child>,
     socket_name: String,
@@ -180,10 +193,15 @@ fn test_workspace_add_and_remove() {
 
 #[test]
 fn test_index_and_query_via_daemon() {
+    if !ollama_reachable() {
+        eprintln!("skipping test_index_and_query_via_daemon: Ollama unreachable");
+        return;
+    }
     let _lock = acquire_lock();
     let name = unique_name("idx");
     let dir = std::env::temp_dir().join(&name);
     create_test_project(&dir);
+    enable_indexer(&dir);
     let guard = DaemonGuard::start(&name, &dir);
 
     let index = guard.run_cli(&["index", "."]);
@@ -246,10 +264,15 @@ fn test_daemon_stop() {
 
 #[test]
 fn test_standalone_index_and_query() {
+    if !ollama_reachable() {
+        eprintln!("skipping test_standalone_index_and_query: Ollama unreachable");
+        return;
+    }
     let _lock = acquire_lock();
     let name = unique_name("standalone");
     let dir = std::env::temp_dir().join(&name);
     create_test_project(&dir);
+    enable_indexer(&dir);
     let _guard = DaemonGuard::start(&name, &dir);
     let speedy = bin_path("speedy-cli");
 
@@ -305,6 +328,7 @@ fn test_watcher_index_query_pipeline() {
     // walk something huge; we'll add the marker file afterwards to test the
     // watcher path specifically.
     create_test_project(&dir);
+    enable_indexer(&dir);
     let guard = DaemonGuard::start(&name, &dir);
 
     let ws_path = dir.to_string_lossy().to_string();
@@ -353,6 +377,7 @@ fn test_standalone_no_daemon_flag() {
     let name = unique_name("nodaemon");
     let dir = std::env::temp_dir().join(&name);
     create_test_project(&dir);
+    enable_indexer(&dir);
 
     // Use a socket name that nothing else listens on. A daemon-dir under the
     // workspace itself isolates pid/workspaces.json from the user's real one.
@@ -431,6 +456,7 @@ fn test_standalone_index_nonexistent_path() {
     let name = unique_name("nonexistent");
     let dir = std::env::temp_dir().join(&name);
     std::fs::create_dir_all(&dir).unwrap();
+    enable_indexer(&dir);
     let _guard = DaemonGuard::start(&name, &dir);
 
     let speedy = bin_path("speedy-cli");

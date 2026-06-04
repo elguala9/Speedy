@@ -8,9 +8,12 @@ pub struct DashboardView {
     /// Live buffer behind the daemon-exe text field. Kept here (not in the
     /// bridge) so typing doesn't roundtrip through the override mutex on
     /// every frame. We sync it with the bridge override on init and on the
-    /// "Applica" / "Sfoglia" / "Ripristina" actions.
+    /// "Apply" / "Browse" / "Restore" actions.
     daemon_exe_buf: String,
     daemon_exe_initialized: bool,
+    /// Cached "launch daemon at login" state. Reading it hits the registry, so
+    /// we resolve it lazily once and refresh only after the user toggles it.
+    autostart_enabled: Option<bool>,
 }
 
 impl DashboardView {
@@ -28,9 +31,16 @@ impl DashboardView {
         if !state.alive {
             ui.colored_label(
                 Color32::from_rgb(220, 80, 80),
-                "Daemon non in esecuzione.",
+                "Daemon not running.",
             );
-            if ui.button("Avvia daemon").clicked() {
+            if state.standalone {
+                ui.label(
+                    "Standalone mode: operations (sync, reindex, workspace) \
+                     run via speedy-cli without a daemon. Live metrics and log \
+                     streaming require the daemon.",
+                );
+            }
+            if ui.button("Start daemon").clicked() {
                 if let Err(e) = bridge.spawn_daemon() {
                     if let Ok(mut s) = bridge.state.lock() {
                         s.set_toast(format!("Spawn failed: {e}"), false);
@@ -127,13 +137,15 @@ impl DashboardView {
             }
         });
 
+        self.render_autostart(ui, bridge);
+
         ui.add_space(12.0);
-        ui.label(RichText::new("Preferenze").strong());
+        ui.label(RichText::new("Preferences").strong());
         ui.horizontal(|ui| {
-            ui.checkbox(notify_on_error, "Notifiche di sistema su errore");
+            ui.checkbox(notify_on_error, "System notifications on error");
         });
         ui.horizontal(|ui| {
-            ui.label("Auto-refresh ogni:");
+            ui.label("Auto-refresh every:");
             let mut secs = refresh_interval.as_secs().max(1) as u32;
             if ui.add(egui::DragValue::new(&mut secs).range(1..=60).suffix(" s")).changed() {
                 *refresh_interval = Duration::from_secs(secs as u64);
@@ -143,7 +155,7 @@ impl DashboardView {
 
     fn render_daemon_exe(&mut self, ui: &mut Ui, bridge: &DaemonBridge) {
         ui.add_space(10.0);
-        ui.label(RichText::new("Eseguibile daemon").strong());
+        ui.label(RichText::new("Daemon executable").strong());
 
         let override_set = bridge.daemon_exe_override().is_some();
         let resolved = bridge.resolved_daemon_exe();
@@ -160,25 +172,25 @@ impl DashboardView {
         }
 
         ui.horizontal(|ui| {
-            ui.label(if override_set { "Personalizzato:" } else { "Auto:" });
+            ui.label(if override_set { "Custom:" } else { "Auto:" });
             ui.add(
                 egui::TextEdit::singleline(&mut self.daemon_exe_buf)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Percorso a speedy-daemon"),
+                    .hint_text("Path to speedy-daemon"),
             );
         });
 
         ui.horizontal(|ui| {
-            if ui.button("Sfoglia…").clicked() {
-                let mut dialog = rfd::FileDialog::new().set_title("Seleziona speedy-daemon");
+            if ui.button("Browse…").clicked() {
+                let mut dialog = rfd::FileDialog::new().set_title("Select speedy-daemon");
                 if cfg!(windows) {
-                    dialog = dialog.add_filter("Eseguibile", &["exe"]);
+                    dialog = dialog.add_filter("Executable", &["exe"]);
                 }
                 if let Some(p) = dialog.pick_file() {
                     self.daemon_exe_buf = p.to_string_lossy().into_owned();
                     bridge.set_daemon_exe_override(Some(p));
                     if let Ok(mut s) = bridge.state.lock() {
-                        s.set_toast("Path daemon aggiornato", true);
+                        s.set_toast("Daemon path updated", true);
                     }
                 }
             }
@@ -191,7 +203,7 @@ impl DashboardView {
                     .unwrap_or_else(|| resolved_str.clone());
             let apply_enabled = !buf_trimmed.is_empty() && dirty;
             if ui
-                .add_enabled(apply_enabled, egui::Button::new("Applica"))
+                .add_enabled(apply_enabled, egui::Button::new("Apply"))
                 .clicked()
             {
                 let p = PathBuf::from(buf_trimmed);
@@ -199,9 +211,9 @@ impl DashboardView {
                 bridge.set_daemon_exe_override(Some(p));
                 if let Ok(mut s) = bridge.state.lock() {
                     if exists {
-                        s.set_toast("Path daemon aggiornato", true);
+                        s.set_toast("Daemon path updated", true);
                     } else {
-                        s.set_toast("Path salvato ma il file non esiste", false);
+                        s.set_toast("Path saved but the file does not exist", false);
                     }
                 }
             }
@@ -209,7 +221,7 @@ impl DashboardView {
             if ui
                 .add_enabled(
                     override_set,
-                    egui::Button::new("Ripristina automatico"),
+                    egui::Button::new("Restore auto-detect"),
                 )
                 .clicked()
             {
@@ -218,11 +230,11 @@ impl DashboardView {
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 if let Ok(mut s) = bridge.state.lock() {
-                    s.set_toast("Rilevamento automatico ripristinato", true);
+                    s.set_toast("Auto-detection restored", true);
                 }
             }
 
-            if !resolved_str.is_empty() && ui.button("Apri cartella").clicked() {
+            if !resolved_str.is_empty() && ui.button("Open folder").clicked() {
                 if let Some(parent) = resolved.as_ref().ok().and_then(|p| p.parent()) {
                     open_in_filemanager(&parent.to_string_lossy());
                 }
@@ -233,16 +245,73 @@ impl DashboardView {
             Ok(p) if !p.exists() => {
                 ui.colored_label(
                     Color32::from_rgb(220, 100, 100),
-                    format!("⚠ il file non esiste: {}", p.display()),
+                    format!("⚠ file does not exist: {}", p.display()),
                 );
             }
             Err(e) => {
                 ui.colored_label(
                     Color32::from_rgb(220, 100, 100),
-                    format!("⚠ daemon non trovato: {e}"),
+                    format!("⚠ daemon not found: {e}"),
                 );
             }
             _ => {}
+        }
+    }
+
+    fn render_autostart(&mut self, ui: &mut Ui, bridge: &DaemonBridge) {
+        ui.add_space(12.0);
+        ui.label(RichText::new("Launch at login").strong());
+
+        // Resolve the (registry-backed) state once, then refresh only after a
+        // toggle so we don't read the registry on every frame.
+        let mut enabled = *self
+            .autostart_enabled
+            .get_or_insert_with(crate::autostart::is_enabled);
+
+        let resolved = bridge.resolved_daemon_exe();
+
+        let resp = ui.checkbox(
+            &mut enabled,
+            "Start the daemon automatically when logging in to Windows",
+        );
+        if resp.changed() {
+            let result = if enabled {
+                match &resolved {
+                    Ok(exe) => crate::autostart::enable(exe),
+                    Err(e) => Err(anyhow::anyhow!("daemon not found: {e}")),
+                }
+            } else {
+                crate::autostart::disable()
+            };
+            // Re-read the real state regardless of outcome so the checkbox
+            // reflects what actually happened.
+            self.autostart_enabled = Some(crate::autostart::is_enabled());
+            if let Ok(mut s) = bridge.state.lock() {
+                match result {
+                    Ok(()) => s.set_toast(
+                        if enabled {
+                            "Launch at login enabled"
+                        } else {
+                            "Launch at login disabled"
+                        },
+                        true,
+                    ),
+                    Err(e) => s.set_toast(format!("Operation failed: {e}"), false),
+                }
+            }
+        }
+
+        ui.label(
+            RichText::new(
+                "When enabled, speedy-daemon starts at login for live file \
+                 monitoring. By default Speedy works without a daemon (git hooks only).",
+            )
+            .small()
+            .color(Color32::GRAY),
+        );
+
+        if !cfg!(windows) {
+            ui.colored_label(Color32::GRAY, "Available only on Windows.");
         }
     }
 }

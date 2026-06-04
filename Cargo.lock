@@ -4513,6 +4513,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
  "walkdir",
 ]
 

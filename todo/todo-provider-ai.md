@@ -1,38 +1,38 @@
 # TODO: AI Provider Abstraction
 
-## Obiettivo
-Astrarre il provider AI di embedding in modo che Speedy possa funzionare con qualsiasi backend (locale o remoto), non solo Ollama. Il comportamento di default rimane identico all'attuale.
+## Goal
+Abstract the AI embedding provider so that Speedy can work with any backend (local or remote), not just Ollama. The default behavior remains identical to the current one.
 
 ---
 
-## 1. Principio di merge della configurazione
+## 1. Configuration merge principle
 
-**Vale per ogni campo scalare del config.**
+**Applies to every scalar config field.**
 
-La risoluzione di ogni singola chiave segue questa cascata:
+The resolution of each individual key follows this cascade:
 
 ```
-env var  >  workspace config.speedy.json  >  utente config.speedy.json  >  default hard-coded
+env var  >  workspace config.speedy.json  >  user config.speedy.json  >  hard-coded default
 ```
 
-**Eccezione — `ignore_patterns` (lista):** override totale. Se il workspace definisce la lista, quella dell'utente viene ignorata completamente. Se il workspace non la definisce, si usa quella dell'utente. Se nessuno la definisce, si usa il default hard-coded. Non si fa union.
+**Exception — `ignore_patterns` (list):** total override. If the workspace defines the list, the user's one is ignored completely. If the workspace does not define it, the user's one is used. If neither defines it, the hard-coded default is used. No union is performed.
 
 ---
 
-## 2. Formato del file di configurazione: `config.speedy.json`
+## 2. Configuration file format: `config.speedy.json`
 
-File JSON che affianca il TOML esistente (il TOML rimane supportato).
+JSON file that sits alongside the existing TOML (the TOML remains supported).
 
-### Posizioni
+### Locations
 
-1. `<workspace>/.speedy/config.speedy.json`  ← workspace, priorità alta
-2. `~/.speedy/config.speedy.json`             ← utente, fallback
+1. `<workspace>/.speedy/config.speedy.json`  ← workspace, high priority
+2. `~/.speedy/config.speedy.json`             ← user, fallback
 
-Su Windows: `~` = `%USERPROFILE%`. Usare il crate `dirs` per la risoluzione cross-platform.
+On Windows: `~` = `%USERPROFILE%`. Use the `dirs` crate for cross-platform resolution.
 
-**`config.speedy.json` va aggiunto al `.gitignore` del progetto** — può contenere API key.
+**`config.speedy.json` must be added to the project's `.gitignore`** — it may contain API keys.
 
-### Struttura generale
+### General structure
 
 ```json
 {
@@ -49,36 +49,36 @@ Su Windows: `~` = `%USERPROFILE%`. Usare il crate `dirs` per la risoluzione cros
 }
 ```
 
-Il file può contenere anche solo alcuni campi — i restanti vengono risolti dalla cascata sopra.
+The file may contain only some of the fields — the remaining ones are resolved through the cascade above.
 
-### Esempi provider
+### Provider examples
 
-**Ollama (default, embedding nativo)**
+**Ollama (default, native embedding)**
 ```json
 { "provider": { "type": "ollama", "model": "all-minilm" } }
 ```
 
-**OpenAI (embedding nativo)**
+**OpenAI (native embedding)**
 ```json
 { "provider": { "type": "openai", "model": "text-embedding-3-small", "api_key": "sk-..." } }
 ```
 
-**Gemini (embedding nativo)**
+**Gemini (native embedding)**
 ```json
 { "provider": { "type": "gemini", "model": "text-embedding-004", "api_key": "AIza..." } }
 ```
 
-**Anthropic / Claude (generativo usato come proxy embedding)**
+**Anthropic / Claude (generative used as an embedding proxy)**
 ```json
 { "provider": { "type": "anthropic", "model": "claude-3-haiku-20240307", "api_key": "sk-ant-...", "dims": 384 } }
 ```
 
-**DeepSeek (generativo usato come proxy embedding)**
+**DeepSeek (generative used as an embedding proxy)**
 ```json
 { "provider": { "type": "deepseek", "model": "deepseek-chat", "api_key": "..." } }
 ```
 
-**Qualsiasi endpoint OpenAI-compatible**
+**Any OpenAI-compatible endpoint**
 ```json
 {
   "provider": {
@@ -90,40 +90,40 @@ Il file può contenere anche solo alcuni campi — i restanti vengono risolti da
 }
 ```
 
-**Processo esterno (ex agent_command)**
+**External process (formerly agent_command)**
 ```json
 { "provider": { "type": "agent", "command": "my-embed-script" } }
 ```
 
 ---
 
-## 3. Design Rust: massima astrazione
+## 3. Rust design: maximum abstraction
 
-### Principio
-Non enumerare i provider in una enum — usare una struttura generica. Il `type` è una stringa aperta; il codice sa come adattare il transport in base ad essa.
+### Principle
+Do not enumerate the providers in an enum — use a generic structure. The `type` is an open string; the code knows how to adapt the transport based on it.
 
-### 3.1 Struttura config provider (in `speedy-core`)
+### 3.1 Provider config structure (in `speedy-core`)
 
 ```rust
 pub struct ProviderConfig {
     /// "ollama", "openai", "gemini", "anthropic", "deepseek",
-    /// "openai-compatible", "agent", o qualsiasi stringa custom.
+    /// "openai-compatible", "agent", or any custom string.
     pub provider_type: String,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
-    /// Per type="agent": comando da eseguire.
+    /// For type="agent": command to execute.
     pub command: Option<String>,
-    /// Dimensione del vettore per GenerativeEmbeddingProvider. Default: 384.
+    /// Vector dimension for GenerativeEmbeddingProvider. Default: 384.
     pub dims: Option<usize>,
-    /// Headers HTTP aggiuntivi (proxy aziendali, auth custom).
+    /// Additional HTTP headers (corporate proxies, custom auth).
     pub extra_headers: Option<HashMap<String, String>>,
 }
 ```
 
-### 3.2 Due famiglie di provider
+### 3.2 Two provider families
 
-**A) Provider con embedding API nativa** — usano `HttpEmbeddingProvider`:
+**A) Providers with a native embedding API** — use `HttpEmbeddingProvider`:
 
 ```rust
 struct HttpEmbeddingProvider {
@@ -137,56 +137,56 @@ struct HttpEmbeddingProvider {
 enum AuthScheme {
     None,
     BearerToken(String),
-    ApiKeyHeader(String, String),  // (header_name, value) — es. Azure usa "api-key"
-    QueryParam(String, String),    // (param_name, value) — es. Gemini usa ?key=...
+    ApiKeyHeader(String, String),  // (header_name, value) — e.g. Azure uses "api-key"
+    QueryParam(String, String),    // (param_name, value) — e.g. Gemini uses ?key=...
 }
 ```
 
-**B) Provider generativi usati come proxy embedding** — usano `GenerativeEmbeddingProvider`:
+**B) Generative providers used as an embedding proxy** — use `GenerativeEmbeddingProvider`:
 
-Inviano il testo al modello con un prompt strutturato che chiede di restituire un vettore JSON di float. La risposta viene parsata ed estratta.
+They send the text to the model with a structured prompt that asks it to return a JSON array of floats. The response is parsed and extracted.
 
 ```rust
 struct GenerativeEmbeddingProvider {
     endpoint: String,
     auth: AuthScheme,
     model: String,
-    dims: usize,  // dimensione del vettore richiesta, es. 384 o 1536
+    dims: usize,  // requested vector dimension, e.g. 384 or 1536
     client: reqwest::Client,
 }
 ```
 
-Il prompt usato è deterministic e fisso, es.:
+The prompt used is deterministic and fixed, e.g.:
 ```
 Return ONLY a JSON array of {dims} floats representing the semantic embedding of this text. No explanation.
 Text: {input}
 ```
 
-**C) Provider agent (processo esterno)** — `AgentEmbeddingProvider` già esistente, integrato come tipo nel JSON.
+**C) Agent provider (external process)** — `AgentEmbeddingProvider` already existing, integrated as a type in the JSON.
 
-### 3.3 Trait `EmbeddingProvider` (già in `embed.rs`)
+### 3.3 `EmbeddingProvider` trait (already in `embed.rs`)
 
-Invariato — già astratto correttamente. Tutte e tre le famiglie lo implementano.
+Unchanged — already abstracted correctly. All three families implement it.
 
-### 3.4 Factory `create_provider()`
+### 3.4 `create_provider()` factory
 
-Mappa `provider_type` → implementazione concreta:
+Maps `provider_type` → concrete implementation:
 
-| type                | famiglia    | base_url        | auth                        |
+| type                | family      | base_url        | auth                        |
 |---------------------|-------------|-----------------|------------------------------|
 | `ollama`            | HTTP native | localhost:11434 | None                         |
 | `openai`            | HTTP native | api.openai.com  | BearerToken                  |
-| `openai-compatible` | HTTP native | da config       | BearerToken (opzionale)      |
+| `openai-compatible` | HTTP native | from config     | BearerToken (optional)       |
 | `gemini`            | HTTP native | generativelanguage.googleapis.com | QueryParam(`key`) |
-| `azure-openai`      | HTTP native | da config       | ApiKeyHeader(`api-key`)      |
-| `anthropic`         | Generativo  | api.anthropic.com | ApiKeyHeader(`x-api-key`)  |
-| `deepseek`          | Generativo  | api.deepseek.com | BearerToken                 |
-| `agent`             | Processo    | —               | —                            |
-| qualsiasi altro     | HTTP native | da config (obbligatorio) | BearerToken          |
+| `azure-openai`      | HTTP native | from config     | ApiKeyHeader(`api-key`)      |
+| `anthropic`         | Generative  | api.anthropic.com | ApiKeyHeader(`x-api-key`)  |
+| `deepseek`          | Generative  | api.deepseek.com | BearerToken                 |
+| `agent`             | Process     | —               | —                            |
+| any other           | HTTP native | from config (mandatory) | BearerToken          |
 
-### 3.5 Validazione config all'avvio
+### 3.5 Config validation at startup
 
-Tutti i controlli avvengono in `create_provider()` prima di restituire il provider, non a runtime durante una query.
+All the checks happen in `create_provider()` before returning the provider, not at runtime during a query.
 
 ```rust
 fn requires_api_key(provider_type: &str) -> bool {
@@ -194,87 +194,87 @@ fn requires_api_key(provider_type: &str) -> bool {
 }
 ```
 
-Errori espliciti da restituire:
+Explicit errors to return:
 
-| Condizione                                           | Messaggio                                                      |
+| Condition                                            | Message                                                       |
 |------------------------------------------------------|----------------------------------------------------------------|
-| provider remoto + `api_key` mancante                 | `"Provider '{type}' requires an API key. Set 'api_key' in config.speedy.json or SPEEDY_API_KEY env var."` |
-| `type: "agent"` + `command` mancante                 | `"Provider 'agent' requires a 'command' field."` |
-| `type: "openai-compatible"` o sconosciuto + `base_url` mancante | `"Provider '{type}' requires a 'base_url' field."` |
+| remote provider + missing `api_key`                  | `"Provider '{type}' requires an API key. Set 'api_key' in config.speedy.json or SPEEDY_API_KEY env var."` |
+| `type: "agent"` + missing `command`                  | `"Provider 'agent' requires a 'command' field."` |
+| `type: "openai-compatible"` or unknown + missing `base_url` | `"Provider '{type}' requires a 'base_url' field."` |
 
-### 3.6 Comportamento GenerativeEmbeddingProvider su risposta non parsabile
+### 3.6 GenerativeEmbeddingProvider behavior on an unparseable response
 
-Se il modello generativo non restituisce un JSON array valido di float:
-- **non fare retry** — il fallimento è probabilmente deterministico (modello sbagliato, prompt non seguito)
-- restituire errore con messaggio: `"Generative provider '{type}' returned unparseable embedding. Check that the model supports instruction-following."`
-- il chunk non viene indicizzato (stessa semantica di un errore HTTP)
+If the generative model does not return a valid JSON array of floats:
+- **do not retry** — the failure is probably deterministic (wrong model, prompt not followed)
+- return an error with the message: `"Generative provider '{type}' returned unparseable embedding. Check that the model supports instruction-following."`
+- the chunk is not indexed (same semantics as an HTTP error)
 
 ---
 
-## 4. Logica di merge config (in `speedy-core/src/config.rs`)
+## 4. Config merge logic (in `speedy-core/src/config.rs`)
 
 ```
 fn load_config() -> Config:
-    1. Carica JSON workspace (.speedy/config.speedy.json)
-    2. Carica JSON utente (~/.speedy/config.speedy.json)
-    3. Carica TOML workspace (speedy.toml / .speedy/config.toml)  [compat]
-    4. Carica TOML utente [compat]
-    5. Per ogni campo scalare: primo non-None in ordine:
-       env var → workspace JSON → utente JSON → workspace TOML → utente TOML → default
-    6. Per ignore_patterns (lista): primo non-None in ordine (stesso), nessuna union
+    1. Load workspace JSON (.speedy/config.speedy.json)
+    2. Load user JSON (~/.speedy/config.speedy.json)
+    3. Load workspace TOML (speedy.toml / .speedy/config.toml)  [compat]
+    4. Load user TOML [compat]
+    5. For each scalar field: first non-None in order:
+       env var → workspace JSON → user JSON → workspace TOML → user TOML → default
+    6. For ignore_patterns (list): first non-None in order (same), no union
 ```
 
-Mapping TOML flat → JSON nested per compatibilità:
+Flat TOML → nested JSON mapping for compatibility:
 - `model` → `provider.model`
-- `ollama_url` → `provider.base_url` (quando `provider_type = "ollama"`)
+- `ollama_url` → `provider.base_url` (when `provider_type = "ollama"`)
 - `provider_type` → `provider.type`
-- `agent_command` → `provider.command` (quando `provider_type = "agent"`)
+- `agent_command` → `provider.command` (when `provider_type = "agent"`)
 
-**TOML utente:** il TOML utente (`~/.speedy/config.toml`) non esiste oggi. Non va aggiunto — il JSON utente copre già il caso. La cascata si semplifica a:
+**User TOML:** the user TOML (`~/.speedy/config.toml`) does not exist today. It should not be added — the user JSON already covers the case. The cascade simplifies to:
 ```
-env var → workspace JSON → utente JSON → workspace TOML → default
+env var → workspace JSON → user JSON → workspace TOML → default
 ```
 
-`Config::from_env()` — usato per background task dove il CWD è incidentale — skippa **tutti** i file (JSON e TOML). Solo: default + env var.
+`Config::from_env()` — used for background tasks where the CWD is incidental — skips **all** files (JSON and TOML). Only: default + env var.
 
 ---
 
-## 5. Variabili d'ambiente
+## 5. Environment variables
 
-| Env var              | Campo corrispondente              |
+| Env var              | Corresponding field               |
 |----------------------|-----------------------------------|
 | `SPEEDY_PROVIDER`    | `provider.type`                   |
 | `SPEEDY_MODEL`       | `provider.model`                  |
 | `SPEEDY_BASE_URL`    | `provider.base_url`               |
 | `SPEEDY_API_KEY`     | `provider.api_key`                |
 | `SPEEDY_AGENT_COMMAND` | `provider.command`              |
-| `SPEEDY_OLLAMA_URL`  | alias legacy → `provider.base_url` |
+| `SPEEDY_OLLAMA_URL`  | legacy alias → `provider.base_url` |
 
 ---
 
-## 6. Passi implementativi
+## 6. Implementation steps
 
-- [x] Aggiungere `serde_json` e `dirs` a `speedy-core/Cargo.toml` (già presenti)
-- [x] Creare `packages/speedy-core/src/provider_config.rs` con `ProviderConfig` e logica merge
-- [x] Aggiornare `config.rs`: cascata completa (JSON + TOML + env) con regola override per `ignore_patterns`
-- [x] Aggiornare `config.rs`: mapping TOML flat → `ProviderConfig` nested per retrocompatibilità
-- [x] Refactoring `embed.rs`: `HttpEmbeddingProvider` generico + `AuthScheme` + `GenerativeEmbeddingProvider`
-- [x] Integrare `AgentEmbeddingProvider` esistente come `type: "agent"` nella factory
-- [x] Implementare factory `create_provider()` con tabella di mapping completa
-- [x] Aggiungere validazione all'avvio: api_key mancante, command mancante per agent, base_url mancante per tipo sconosciuto/openai-compatible
-- [x] Rinominare `SPEEDY_OLLAMA_URL` → `SPEEDY_BASE_URL` (mantenere alias legacy)
-- [ ] Aggiungere `.speedy/config.speedy.json` al `.gitignore` di default generato da `speedy init` (comando non ancora implementato)
-- [x] Aggiornare tests in `embed.rs` per i nuovi transport
-- [x] Aggiornare `README.md` con tabella provider e esempi `config.speedy.json`
-- [x] Aggiornare `CONFIG.md` con campo `dims` negli esempi provider generativi
+- [x] Add `serde_json` and `dirs` to `speedy-core/Cargo.toml` (already present)
+- [x] Create `packages/speedy-core/src/provider_config.rs` with `ProviderConfig` and merge logic
+- [x] Update `config.rs`: full cascade (JSON + TOML + env) with override rule for `ignore_patterns`
+- [x] Update `config.rs`: flat TOML → nested `ProviderConfig` mapping for backward compatibility
+- [x] Refactor `embed.rs`: generic `HttpEmbeddingProvider` + `AuthScheme` + `GenerativeEmbeddingProvider`
+- [x] Integrate the existing `AgentEmbeddingProvider` as `type: "agent"` in the factory
+- [x] Implement the `create_provider()` factory with the complete mapping table
+- [x] Add startup validation: missing api_key, missing command for agent, missing base_url for unknown/openai-compatible type
+- [x] Rename `SPEEDY_OLLAMA_URL` → `SPEEDY_BASE_URL` (keep the legacy alias)
+- [ ] Add `.speedy/config.speedy.json` to the default `.gitignore` generated by `speedy init` (command not yet implemented)
+- [x] Update the tests in `embed.rs` for the new transports
+- [x] Update `README.md` with the provider table and `config.speedy.json` examples
+- [x] Update `CONFIG.md` with the `dims` field in the generative provider examples
 
 ---
 
-## 7. Note
+## 7. Notes
 
-- Il DB vettoriale salva già il nome del modello. Se cambia provider/modello, l'avviso esistente funziona già — nessuna modifica necessaria.
-- I test E2E skippano se Ollama non è disponibile: aggiungere skip per provider remoti se `SPEEDY_API_KEY` non è settata.
-- Azure OpenAI usa `api-key` header — gestito da `AuthScheme::ApiKeyHeader`.
-- Gemini usa `?key=` in query string — gestito da `AuthScheme::QueryParam`.
-- I provider generativi (Anthropic, DeepSeek) producono vettori meno affidabili degli embedding nativi: documentare questo limite nel README.
-- `dims` per `GenerativeEmbeddingProvider` deve essere configurabile (default 384 per coerenza con `all-minilm`).
+- The vector DB already stores the model name. If the provider/model changes, the existing warning already works — no change needed.
+- The E2E tests skip if Ollama is not available: add a skip for remote providers if `SPEEDY_API_KEY` is not set.
+- Azure OpenAI uses the `api-key` header — handled by `AuthScheme::ApiKeyHeader`.
+- Gemini uses `?key=` in the query string — handled by `AuthScheme::QueryParam`.
+- Generative providers (Anthropic, DeepSeek) produce less reliable vectors than native embeddings: document this limitation in the README.
+- `dims` for `GenerativeEmbeddingProvider` must be configurable (default 384 for consistency with `all-minilm`).

@@ -12,10 +12,49 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Suppress the console window when the GUI spawns `speedy-cli` on Windows.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Resolve the `speedy-cli` executable (next to the GUI binary, then PATH).
+fn cli_exe() -> PathBuf {
+    speedy_core::contexts::find_sibling_exe("speedy-cli")
+        .unwrap_or_else(|| PathBuf::from("speedy-cli"))
+}
+
+/// Run `speedy-cli` with the given args, capturing stdout. The CLI itself
+/// decides whether to route through a live daemon or run standalone, so the GUI
+/// works identically with or without a daemon. Returns the trimmed stdout on
+/// success, or an error carrying stderr/stdout on failure.
+async fn run_cli(socket: String, args: Vec<String>) -> Result<String> {
+    let exe = cli_exe();
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.arg("--daemon-socket").arg(&socket);
+    cmd.args(&args);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", exe.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("{}", if stderr.is_empty() { stdout } else { stderr })
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct DaemonState {
     pub alive: bool,
     pub probed: bool,
+    /// True once probed and the daemon is not reachable: the GUI is running in
+    /// standalone mode (operations go through `speedy-cli`, which drives the
+    /// context workers in-process). Live metrics/status/log-stream are
+    /// unavailable in this mode.
+    pub standalone: bool,
     pub status: Option<DaemonStatus>,
     pub metrics: Option<Metrics>,
     pub workspaces: Vec<String>,
@@ -99,6 +138,7 @@ impl DaemonBridge {
     /// and the workspace list. Called periodically from `App::update`.
     pub fn refresh_all(&self) {
         let client = self.client.clone();
+        let socket = self.socket_name.clone();
         let state = self.state.clone();
         self.inc_busy();
         self.rt.spawn(async move {
@@ -106,6 +146,7 @@ impl DaemonBridge {
             let mut snapshot = DaemonState::default();
             snapshot.alive = alive;
             snapshot.probed = true;
+            snapshot.standalone = !alive;
             snapshot.last_refresh = Some(Instant::now());
 
             if alive {
@@ -122,6 +163,17 @@ impl DaemonBridge {
                 match client.get_all_workspaces().await {
                     Ok(list) => snapshot.workspaces = list,
                     Err(e) => snapshot.last_error = Some(format!("list: {e}")),
+                }
+            } else {
+                // Standalone: there is no daemon to report status/metrics, but
+                // the registered workspace list still lives on disk. Ask the CLI
+                // for it (`workspace list --json`) so the Workspaces tab works.
+                if let Ok(out) =
+                    run_cli(socket, vec!["workspace".into(), "list".into(), "--json".into()]).await
+                {
+                    if let Ok(list) = serde_json::from_str::<Vec<String>>(&out) {
+                        snapshot.workspaces = list;
+                    }
                 }
             }
 
@@ -166,15 +218,15 @@ impl DaemonBridge {
     }
 
     pub fn add_workspace(&self, path: String) {
-        let client = self.client.clone();
+        let socket = self.socket_name.clone();
         let state = self.state.clone();
         self.inc_busy();
         self.rt.spawn(async move {
-            let r = client.add_workspace(&path).await;
+            let r = run_cli(socket, vec!["workspace".into(), "add".into(), path.clone()]).await;
             if let Ok(mut s) = state.lock() {
                 s.busy = s.busy.saturating_sub(1);
                 match r {
-                    Ok(()) => s.set_toast(format!("Added: {path}"), true),
+                    Ok(_) => s.set_toast(format!("Added: {path}"), true),
                     Err(e) => {
                         s.last_error = Some(format!("add {path}: {e}"));
                         s.set_toast(format!("Add failed: {e}"), false);
@@ -186,15 +238,15 @@ impl DaemonBridge {
     }
 
     pub fn remove_workspace(&self, path: String) {
-        let client = self.client.clone();
+        let socket = self.socket_name.clone();
         let state = self.state.clone();
         self.inc_busy();
         self.rt.spawn(async move {
-            let r = client.remove_workspace(&path).await;
+            let r = run_cli(socket, vec!["workspace".into(), "remove".into(), path.clone()]).await;
             if let Ok(mut s) = state.lock() {
                 s.busy = s.busy.saturating_sub(1);
                 match r {
-                    Ok(()) => s.set_toast(format!("Removed: {path}"), true),
+                    Ok(_) => s.set_toast(format!("Removed: {path}"), true),
                     Err(e) => {
                         s.last_error = Some(format!("remove {path}: {e}"));
                         s.set_toast(format!("Remove failed: {e}"), false);
@@ -206,19 +258,19 @@ impl DaemonBridge {
     }
 
     pub fn sync_workspace(&self, path: String) {
-        let client = self.client.clone();
+        let socket = self.socket_name.clone();
         let state = self.state.clone();
         self.inc_busy();
         if let Ok(mut s) = self.state.lock() {
             s.syncing.insert(path.clone());
         }
         self.rt.spawn(async move {
-            let r = client.sync(&path).await;
+            let r = run_cli(socket, vec!["-p".into(), path.clone(), "sync".into()]).await;
             if let Ok(mut s) = state.lock() {
                 s.busy = s.busy.saturating_sub(1);
                 s.syncing.remove(&path);
                 match r {
-                    Ok(()) => s.set_toast(format!("Synced: {path}"), true),
+                    Ok(_) => s.set_toast(format!("Synced: {path}"), true),
                     Err(e) => {
                         s.last_error = Some(format!("sync {path}: {e}"));
                         s.set_toast(format!("Sync failed: {e}"), false);
@@ -229,7 +281,7 @@ impl DaemonBridge {
     }
 
     pub fn reindex_workspace(&self, path: String) {
-        let client = self.client.clone();
+        let socket = self.socket_name.clone();
         let state = self.state.clone();
         self.inc_busy();
         if let Ok(mut s) = self.state.lock() {
@@ -237,7 +289,7 @@ impl DaemonBridge {
         }
         let path_for_poll = path.clone();
         self.rt.spawn(async move {
-            let r = client.reindex(&path).await;
+            let r = run_cli(socket, vec!["reindex".into(), "-p".into(), path.clone()]).await;
             if let Ok(mut s) = state.lock() {
                 s.busy = s.busy.saturating_sub(1);
                 s.indexing.remove(&path);
@@ -310,24 +362,28 @@ impl DaemonBridge {
     pub fn prune_missing(&self) {
         let client = self.client.clone();
         let state = self.state.clone();
+        let standalone = self.state.lock().map(|s| s.standalone).unwrap_or(false);
         self.inc_busy();
         self.rt.spawn(async move {
-            let r = client.prune_missing().await;
+            // With a daemon, prune through it so its in-RAM watchers stay in
+            // sync; standalone, prune the on-disk registry directly.
+            let r: Result<usize> = if standalone {
+                speedy_core::workspace::prune_missing()
+            } else {
+                client.prune_missing().await.map(|paths| paths.len())
+            };
             if let Ok(mut s) = state.lock() {
                 s.busy = s.busy.saturating_sub(1);
                 match r {
-                    Ok(paths) if paths.is_empty() => {
-                        s.set_toast("Nessun workspace orfano", true);
+                    Ok(0) => {
+                        s.set_toast("No orphaned workspaces", true);
                     }
-                    Ok(paths) => {
-                        s.set_toast(
-                            format!("Rimossi {} workspace orfani", paths.len()),
-                            true,
-                        );
+                    Ok(n) => {
+                        s.set_toast(format!("Removed {n} orphaned workspaces"), true);
                     }
                     Err(e) => {
                         s.last_error = Some(format!("prune-missing: {e}"));
-                        s.set_toast(format!("Pulizia fallita: {e}"), false);
+                        s.set_toast(format!("Prune failed: {e}"), false);
                     }
                 }
             }

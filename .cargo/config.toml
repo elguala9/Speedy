@@ -8,6 +8,6 @@ publish-winget = "run -p xtask -- publish-winget"
 incremental = false
 
 [profile.dev.package."*"]
-# Le dipendenze esterne in debug mode vengono compilate con opt-level=1:
-# binari piu' veloci durante i test, file oggetto piu' piccoli rispetto a opt-level=0.
+# External dependencies in debug mode are compiled with opt-level=1:
+# faster binaries during tests, smaller object files than opt-level=0.
 opt-level = 1

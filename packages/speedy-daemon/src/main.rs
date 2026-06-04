@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, Mutex};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+use speedy_core::contexts;
 use speedy_core::hash_registry::HashRegistry;
 use speedy_core::local_sock::{GenericNamespaced, ListenerOptions, ToNsName};
 use speedy_core::local_sock::{ListenerTrait as _, Stream as LocalStream, StreamTrait as _};
@@ -328,30 +329,6 @@ impl CentralDaemon {
     }
 }
 
-fn find_speedy_exe() -> PathBuf {
-    let exe_name = format!("speedy-ai-context{}", std::env::consts::EXE_SUFFIX);
-    if let Ok(exe) = std::env::current_exe() {
-        let Some(dir) = exe.parent() else {
-            return PathBuf::from("speedy-ai-context");
-        };
-        let candidate = dir.join(&exe_name);
-        if candidate.exists() {
-            return candidate;
-        }
-        // When running under `cargo test`, current_exe is in target/debug/deps/
-        // — speedy-ai-context lives one directory up.
-        if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
-            if let Some(parent) = dir.parent() {
-                let candidate = parent.join(&exe_name);
-                if candidate.exists() {
-                    return candidate;
-                }
-            }
-        }
-    }
-    PathBuf::from("speedy-ai-context")
-}
-
 fn should_ignore_watch_path(p: &Path) -> bool {
     let dirs = speedy_core::default_ignores::watch_dirs();
     p.components().any(|c| {
@@ -377,7 +354,7 @@ fn start_workspace_watcher(
     let heartbeat = last_heartbeat.clone();
     let event_at_clone = last_event_at.clone();
     let path = path.to_string();
-    let speedy_exe = find_speedy_exe();
+    let speedy_exe = contexts::find_ai_context_exe();
 
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -447,7 +424,7 @@ fn start_workspace_watcher(
                                 continue;
                             }
 
-                            let features = slc_features::load_features(Some(&p));
+                            let features = contexts::load_features(Some(&p));
 
                             if features.speedy_indexer {
                                 let skip = registry.as_ref()
@@ -493,7 +470,7 @@ fn start_workspace_watcher(
                                         file = %file_path,
                                         "language-context: mtime unchanged, skipping spawn"
                                     );
-                                } else if let Some(slc_exe) = slc_features::find_slc_exe() {
+                                } else if let Some(slc_exe) = contexts::find_language_context_exe() {
                                     let mut slc_cmd = std::process::Command::new(&slc_exe);
                                     slc_cmd
                                         .arg("--path").arg(&p)
@@ -526,7 +503,7 @@ fn start_workspace_watcher(
                                         file = %file_path,
                                         "text-context: mtime unchanged, skipping spawn"
                                     );
-                                } else if let Some(text_exe) = slc_features::find_text_exe() {
+                                } else if let Some(text_exe) = contexts::find_text_context_exe() {
                                     let mut text_cmd = std::process::Command::new(&text_exe);
                                     text_cmd
                                         .arg("update")
@@ -782,7 +759,7 @@ async fn prune_and_reconcile(watchers: &Arc<Mutex<HashMap<String, WatcherHandle>
 /// IPC-driven variant of [`prune_and_reconcile`]: stops watchers for paths
 /// that no longer exist on disk, drops the corresponding entries from
 /// `workspaces.json`, and returns the list of paths that were removed so the
-/// caller (e.g. the GUI "Pulisci orfani" button) can show feedback.
+/// caller (e.g. the GUI "Prune orphans" button) can show feedback.
 async fn handle_prune_missing(
     watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
 ) -> Vec<String> {
@@ -941,7 +918,7 @@ fn parse_exec_args(args: &str) -> (Option<String>, Vec<String>) {
 }
 
 async fn exec_speedy_command(args: &str, metrics: &Metrics) -> String {
-    let exe = find_speedy_exe();
+    let exe = contexts::find_ai_context_exe();
     let mut cmd = tokio::process::Command::new(&exe);
     let (cwd, parts) = parse_exec_args(args);
     if let Some(d) = cwd {
@@ -1150,7 +1127,7 @@ async fn dispatch_command(
                 let file_count = files.len();
                 tracing::info!(workspace = %ws, %file_count, "slc-notify received — spawning slc update");
                 if !files.is_empty() {
-                    if let Some(slc_exe) = slc_features::find_slc_exe() {
+                    if let Some(slc_exe) = contexts::find_language_context_exe() {
                         let mut cmd = std::process::Command::new(&slc_exe);
                         cmd.arg("--path").arg(ws);
                         cmd.arg("update");
@@ -1185,7 +1162,7 @@ async fn dispatch_command(
             } else {
                 (None, rest.trim())
             };
-            match slc_features::set_feature(workspace, name, true) {
+            match contexts::set_feature(workspace, name, true) {
                 Ok(()) => "ok\n".to_string(),
                 Err(e) => format!("error: {e}\n"),
             }
@@ -1198,7 +1175,7 @@ async fn dispatch_command(
             } else {
                 (None, rest.trim())
             };
-            match slc_features::set_feature(workspace, name, false) {
+            match contexts::set_feature(workspace, name, false) {
                 Ok(()) => "ok\n".to_string(),
                 Err(e) => format!("error: {e}\n"),
             }
@@ -1206,12 +1183,12 @@ async fn dispatch_command(
 
         _ if line.starts_with("feature-status\t") => {
             let workspace = &line["feature-status\t".len()..];
-            let f = slc_features::load_features(Some(workspace.trim()));
+            let f = contexts::load_features(Some(workspace.trim()));
             format!("{}\n", serde_json::to_string(&f).unwrap_or_default())
         }
 
         "feature-status" => {
-            let f = slc_features::load_features(None);
+            let f = contexts::load_features(None);
             format!("{}\n", serde_json::to_string(&f).unwrap_or_default())
         }
 
@@ -1315,7 +1292,7 @@ async fn handle_query_all(
         return "[]".to_string();
     }
 
-    let exe = find_speedy_exe();
+    let exe = contexts::find_ai_context_exe();
     let k_str = top_k.to_string();
 
     let mut tasks = Vec::with_capacity(paths.len());
@@ -1368,320 +1345,26 @@ async fn handle_sync(
     raw_path: &str,
     watchers: &Arc<Mutex<HashMap<String, WatcherHandle>>>,
 ) -> Result<()> {
-    let canonical = Path::new(raw_path).canonicalize()?;
-    let path_str = canonical.to_string_lossy().to_string();
-
-    let features = slc_features::load_features(Some(&path_str));
-    if !features.speedy_indexer {
-        info!(target: "sync", workspace = %path_str, "Sync skipped (speedy_indexer disabled)");
-        return Ok(());
-    }
-
-    let started = Instant::now();
-    let exe = find_speedy_exe();
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.args(["-p", &path_str, "sync"]).env("SPEEDY_NO_DAEMON", "1");
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd.output().await?;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        error!(target: "sync", workspace = %path_str, ms = elapsed_ms, stderr = %stderr.trim(), "Sync failed");
-    } else {
-        info!(target: "sync", workspace = %path_str, ms = elapsed_ms, stdout = %stdout.trim(), "Sync done");
-        let ws = watchers.lock().await;
-        if let Some(h) = ws.get(&path_str) {
-            h.last_sync_at.store(unix_now_secs(), Ordering::Relaxed);
+    // Orchestration lives in speedy-core so the CLI/GUI can run it without a
+    // daemon; the daemon adds the watcher bookkeeping on success.
+    let ran = contexts::sync_workspace(raw_path).await?;
+    if ran {
+        if let Ok(canonical) = Path::new(raw_path).canonicalize() {
+            let path_str = canonical.to_string_lossy().to_string();
+            let ws = watchers.lock().await;
+            if let Some(h) = ws.get(&path_str) {
+                h.last_sync_at.store(unix_now_secs(), Ordering::Relaxed);
+            }
         }
     }
-
     Ok(())
 }
 
+/// Full reindex of a workspace across all three context workers. The
+/// orchestration lives in `speedy_core::contexts` so the CLI/GUI can run the
+/// exact same fan-out without a daemon.
 async fn handle_reindex(raw_path: &str) -> Result<String> {
-    let canonical = Path::new(raw_path).canonicalize()?;
-    let path_str = canonical.to_string_lossy().to_string();
-
-    // Hard wall-clock cap on the ai-context reindex. The child must NEVER be
-    // able to wedge the daemon: if it stops making progress (deadlock on a
-    // lock, infinite loop, runaway embed loop), we kill it and continue
-    // with SLC. 30 min is generous because the first index on a big repo
-    // can blow through thousands of sequential Ollama embed calls.
-    const AI_CONTEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
-    const AI_CONTEXT_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
-
-    // Load features first so we can skip steps that are disabled.
-    let features = slc_features::load_features(Some(&path_str));
-
-    let started = Instant::now();
-
-    // AI-context reindex — only when the speedy_indexer feature is enabled.
-    let (stdout, ai_ok, ai_timed_out) = if features.speedy_indexer {
-        let exe = find_speedy_exe();
-        let mut cmd = tokio::process::Command::new(&exe);
-        cmd.current_dir(&path_str)
-            .args(["index", "--clear", "."])
-            .env("SPEEDY_NO_DAEMON", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-
-        info!(target: "index", workspace = %path_str, timeout_s = AI_CONTEXT_TIMEOUT.as_secs(), "AI-context reindex starting");
-
-        let child = cmd.spawn()?;
-        let workspace_for_heartbeat = path_str.clone();
-        let started_for_heartbeat = started;
-        let heartbeat = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(AI_CONTEXT_HEARTBEAT);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            ticker.tick().await; // first tick fires immediately, skip it
-            loop {
-                ticker.tick().await;
-                let secs = started_for_heartbeat.elapsed().as_secs();
-                info!(
-                    target: "index",
-                    workspace = %workspace_for_heartbeat,
-                    elapsed_s = secs,
-                    "AI-context reindex still running (Ollama embed loop is the usual bottleneck)"
-                );
-            }
-        });
-
-        let wait_fut = child.wait_with_output();
-        let (output_opt, timed_out) = match tokio::time::timeout(AI_CONTEXT_TIMEOUT, wait_fut).await {
-            Ok(Ok(o)) => (Some(o), false),
-            Ok(Err(e)) => {
-                error!(target: "index", workspace = %path_str, error = %e, "AI-context wait error");
-                (None, false)
-            }
-            Err(_) => {
-                // Timeout fired. `kill_on_drop` will reap the process when `child`
-                // is dropped at function exit, but the future already consumed it,
-                // so we cannot drop it explicitly here — `wait_with_output` moves
-                // `child`. The kill propagates via the OS once the pipes close.
-                (None, true)
-            }
-        };
-        heartbeat.abort();
-
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-
-        let (stdout, stderr, exit_code, ok) = match output_opt {
-            Some(o) => (
-                String::from_utf8_lossy(&o.stdout).into_owned(),
-                String::from_utf8_lossy(&o.stderr).into_owned(),
-                o.status.code(),
-                o.status.success(),
-            ),
-            None => (String::new(), String::new(), None, false),
-        };
-
-        if ok {
-            info!(target: "index", workspace = %path_str, ms = elapsed_ms, stdout = %stdout.trim(), "AI-context reindex done");
-        } else if timed_out {
-            error!(
-                target: "index",
-                workspace = %path_str,
-                ms = elapsed_ms,
-                timeout_s = AI_CONTEXT_TIMEOUT.as_secs(),
-                "AI-context reindex TIMED OUT and was killed — continuing with SLC if enabled"
-            );
-        } else {
-            // Don't bail: SLC (speedy-language-context) is an independent feature
-            // and must still get a chance to run even when AI-context fails on
-            // this workspace (e.g. a panic on a single bad file). We log loudly
-            // and proceed.
-            error!(
-                target: "index",
-                workspace = %path_str,
-                ms = elapsed_ms,
-                exit_code = ?exit_code,
-                stdout = %stdout.trim(),
-                stderr = %stderr.trim(),
-                "AI-context reindex failed (continuing with SLC if enabled)"
-            );
-        }
-
-        (stdout, ok, timed_out)
-    } else {
-        info!(target: "index", workspace = %path_str, "AI-context reindex skipped (speedy_indexer disabled)");
-        (String::new(), true, false)
-    };
-    let mut slc_ok: Option<bool> = None;
-    let mut slc_err: Option<String> = None;
-    if features.language_context {
-        match slc_features::find_slc_exe() {
-            Some(slc_exe) => {
-                // Clear the SLC graph DB before a full re-index so deleted files
-                // don't leave stale symbols behind.
-                let mut slc_clear_cmd = tokio::process::Command::new(&slc_exe);
-                slc_clear_cmd
-                    .arg("--path").arg(&path_str)
-                    .arg("clear-index")
-                    .env("SPEEDY_NO_DAEMON", "1")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                #[cfg(windows)]
-                slc_clear_cmd.creation_flags(CREATE_NO_WINDOW);
-                let _ = slc_clear_cmd.output().await;
-
-                info!(target: "index", workspace = %path_str, exe = %slc_exe.display(), "SLC index starting");
-                let slc_started = Instant::now();
-                let mut slc_cmd = tokio::process::Command::new(&slc_exe);
-                slc_cmd
-                    .arg("--path").arg(&path_str)
-                    .arg("index")
-                    .env("SPEEDY_NO_DAEMON", "1")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                #[cfg(windows)]
-                slc_cmd.creation_flags(CREATE_NO_WINDOW);
-                match slc_cmd.output().await {
-                    Ok(o) => {
-                        let slc_ms = slc_started.elapsed().as_millis() as u64;
-                        let so = String::from_utf8_lossy(&o.stdout);
-                        let se = String::from_utf8_lossy(&o.stderr);
-                        if o.status.success() {
-                            info!(
-                                target: "index",
-                                workspace = %path_str,
-                                ms = slc_ms,
-                                stdout = %so.trim(),
-                                "SLC index done"
-                            );
-                            slc_ok = Some(true);
-                        } else {
-                            error!(
-                                target: "index",
-                                workspace = %path_str,
-                                ms = slc_ms,
-                                exit_code = ?o.status.code(),
-                                stderr = %se.trim(),
-                                stdout = %so.trim(),
-                                "SLC index failed"
-                            );
-                            slc_ok = Some(false);
-                            slc_err = Some(se.trim().to_string());
-                        }
-                    }
-                    Err(e) => {
-                        error!(target: "index", workspace = %path_str, error = %e, "failed to spawn SLC index");
-                        slc_ok = Some(false);
-                        slc_err = Some(e.to_string());
-                    }
-                }
-            }
-            None => {
-                warn!(
-                    target: "index",
-                    workspace = %path_str,
-                    "speedy-language-context executable not found next to daemon or in PATH — skipping SLC index"
-                );
-            }
-        }
-    } else {
-        info!(target: "index", workspace = %path_str, "SLC index skipped (language_context feature disabled)");
-    }
-
-    // Text-symbol index — its `index` command clears and rebuilds on its own,
-    // so no separate clear step is needed.
-    let mut text_ok: Option<bool> = None;
-    let mut text_err: Option<String> = None;
-    if features.text_context {
-        match slc_features::find_text_exe() {
-            Some(text_exe) => {
-                info!(target: "index", workspace = %path_str, exe = %text_exe.display(), "text index starting");
-                let text_started = Instant::now();
-                let mut text_cmd = tokio::process::Command::new(&text_exe);
-                text_cmd
-                    .arg("index")
-                    .arg(&path_str)
-                    .env("SPEEDY_NO_DAEMON", "1")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                #[cfg(windows)]
-                text_cmd.creation_flags(CREATE_NO_WINDOW);
-                match text_cmd.output().await {
-                    Ok(o) => {
-                        let text_ms = text_started.elapsed().as_millis() as u64;
-                        let se = String::from_utf8_lossy(&o.stderr);
-                        if o.status.success() {
-                            info!(target: "index", workspace = %path_str, ms = text_ms, "text index done");
-                            text_ok = Some(true);
-                        } else {
-                            error!(
-                                target: "index",
-                                workspace = %path_str,
-                                ms = text_ms,
-                                exit_code = ?o.status.code(),
-                                stderr = %se.trim(),
-                                "text index failed"
-                            );
-                            text_ok = Some(false);
-                            text_err = Some(se.trim().to_string());
-                        }
-                    }
-                    Err(e) => {
-                        error!(target: "index", workspace = %path_str, error = %e, "failed to spawn text index");
-                        text_ok = Some(false);
-                        text_err = Some(e.to_string());
-                    }
-                }
-            }
-            None => {
-                warn!(
-                    target: "index",
-                    workspace = %path_str,
-                    "speedy-text-context executable not found next to daemon or in PATH — skipping text index"
-                );
-            }
-        }
-    } else {
-        info!(target: "index", workspace = %path_str, "text index skipped (text_context feature disabled)");
-    }
-
-    // Decide overall result. If AI-context failed AND SLC didn't succeed,
-    // surface an error to the caller. Otherwise return a summary so the GUI
-    // toast tells the user which half ran.
-    let ai_status = if !features.speedy_indexer {
-        "skipped"
-    } else if ai_ok {
-        "ok"
-    } else if ai_timed_out {
-        "timeout"
-    } else {
-        "failed"
-    };
-    let summary = format!(
-        "ai-context: {} | slc: {} | text: {}",
-        ai_status,
-        match slc_ok {
-            Some(true) => "ok".to_string(),
-            Some(false) => format!("failed ({})", slc_err.as_deref().unwrap_or("see logs")),
-            None => if features.language_context { "not-found".to_string() } else { "disabled".to_string() },
-        },
-        match text_ok {
-            Some(true) => "ok".to_string(),
-            Some(false) => format!("failed ({})", text_err.as_deref().unwrap_or("see logs")),
-            None => if features.text_context { "not-found".to_string() } else { "disabled".to_string() },
-        }
-    );
-
-    // Only bail if something that was supposed to run actually failed.
-    if features.speedy_indexer && !ai_ok && slc_ok != Some(true) {
-        anyhow::bail!("reindex failed — {summary}");
-    }
-
-    Ok(if features.speedy_indexer && ai_ok { stdout.trim().to_string() } else { summary })
+    contexts::reindex_workspace(raw_path).await
 }
 
 async fn handle_workspace_status(
@@ -1999,166 +1682,6 @@ fn main() -> Result<()> {
     })
 }
 
-/// Lightweight feature-toggle storage for the daemon. Mirrors the
-/// `speedy-language-context::features` schema but lives inline so the daemon
-/// does not depend on that crate.
-///
-/// When a workspace path is provided the features are stored in
-/// `<workspace>/.speedy/config.toml` under `[features]` — the same file that
-/// `speedy-language-context` reads — so both processes see the same state.
-/// Without a workspace, the global fallback `~/.speedy/daemon-features.toml`
-/// is used for backward compatibility.
-mod slc_features {
-    use anyhow::Result;
-    use serde::{Deserialize, Serialize};
-    use std::path::PathBuf;
-
-    fn default_true() -> bool {
-        true
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Features {
-        #[serde(default = "default_true")]
-        pub speedy_indexer: bool,
-        #[serde(default = "default_true")]
-        pub language_context: bool,
-        #[serde(default = "default_true")]
-        pub text_context: bool,
-    }
-
-    impl Features {
-        fn all_on() -> Self {
-            Self {
-                speedy_indexer: true,
-                language_context: true,
-                text_context: true,
-            }
-        }
-    }
-
-    fn global_config_path() -> PathBuf {
-        let home = if let Some(p) =
-            std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-        {
-            PathBuf::from(p)
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        };
-        home.join(".speedy").join("daemon-features.toml")
-    }
-
-    fn workspace_config_path(workspace: &str) -> PathBuf {
-        PathBuf::from(workspace).join(".speedy").join("config.toml")
-    }
-
-    /// Load features: workspace config (under `[features]`) if available, else global.
-    pub fn load_features(workspace: Option<&str>) -> Features {
-        if let Some(ws) = workspace.filter(|s| !s.is_empty()) {
-            let path = workspace_config_path(ws);
-            if path.exists() {
-                if let Ok(raw) = std::fs::read_to_string(&path) {
-                    if let Ok(doc) = toml::from_str::<toml::Value>(&raw) {
-                        if let Some(section) = doc.get("features") {
-                            if let Ok(f) = section.clone().try_into::<Features>() {
-                                return f;
-                            }
-                        }
-                    }
-                }
-            }
-            return Features::all_on();
-        }
-        // Global fallback
-        let path = global_config_path();
-        if !path.exists() {
-            return Features::all_on();
-        }
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => return Features::all_on(),
-        };
-        toml::from_str::<Features>(&raw).unwrap_or_else(|_| Features::all_on())
-    }
-
-    /// Persist a feature toggle. If workspace is given, writes to
-    /// `<workspace>/.speedy/config.toml` under `[features]`; otherwise writes
-    /// to the global daemon config.
-    pub fn set_feature(workspace: Option<&str>, name: &str, enabled: bool) -> Result<()> {
-        let mut f = load_features(workspace);
-        match name {
-            "speedy_indexer" | "speedy-indexer" => f.speedy_indexer = enabled,
-            "language_context" | "language-context" => f.language_context = enabled,
-            "text_context" | "text-context" => f.text_context = enabled,
-            other => anyhow::bail!("unknown feature: {other}"),
-        }
-
-        if let Some(ws) = workspace.filter(|s| !s.is_empty()) {
-            let path = workspace_config_path(ws);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            // Merge into existing TOML, preserving other sections.
-            let mut doc: toml::Value = if path.exists() {
-                let raw = std::fs::read_to_string(&path).unwrap_or_default();
-                toml::from_str(&raw)
-                    .unwrap_or_else(|_| toml::Value::Table(toml::value::Table::new()))
-            } else {
-                toml::Value::Table(toml::value::Table::new())
-            };
-            let features_val = toml::Value::try_from(&f)?;
-            if let toml::Value::Table(table) = &mut doc {
-                table.insert("features".to_string(), features_val);
-            }
-            let serialized = toml::to_string_pretty(&doc)?;
-            std::fs::write(path, serialized)?;
-        } else {
-            let path = global_config_path();
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let serialized = toml::to_string_pretty(&f)?;
-            std::fs::write(path, serialized)?;
-        }
-        Ok(())
-    }
-
-    /// Locate the `speedy-language-context` executable: same directory as this
-    /// daemon binary first, then PATH. Returns `None` if not found.
-    pub fn find_slc_exe() -> Option<PathBuf> {
-        find_exe_near_daemon(if cfg!(windows) {
-            "speedy-language-context.exe"
-        } else {
-            "speedy-language-context"
-        })
-    }
-
-    /// Locate the `speedy-text-context` executable (same strategy as `find_slc_exe`).
-    pub fn find_text_exe() -> Option<PathBuf> {
-        find_exe_near_daemon(if cfg!(windows) {
-            "speedy-text-context.exe"
-        } else {
-            "speedy-text-context"
-        })
-    }
-
-    /// Find an executable next to the running daemon binary first, then on PATH.
-    fn find_exe_near_daemon(exe_name: &str) -> Option<PathBuf> {
-        if let Ok(self_exe) = std::env::current_exe() {
-            if let Some(dir) = self_exe.parent() {
-                let candidate = dir.join(exe_name);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-        std::env::var_os("PATH").and_then(|path_var| {
-            std::env::split_paths(&path_var)
-                .map(|dir| dir.join(exe_name))
-                .find(|p| p.is_file())
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {

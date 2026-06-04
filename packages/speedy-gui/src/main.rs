@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod daemon;
 mod log_stream;
 mod tray;

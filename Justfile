@@ -1,95 +1,95 @@
-# ───── Speedy – comandi rapidi ─────
-# richiede `just`: cargo install just
+# ───── Speedy – quick commands ─────
+# requires `just`: cargo install just
 
 set shell := ["powershell.exe", "-NoProfile", "-Command"]
 
 # default: test + build
 default: test build
 
-# test: esegue tutti i test del workspace
+# test: run all workspace tests
 test:
     cargo test --workspace
 
-# test con output verboso
+# test with verbose output
 test-verbose:
     cargo test --workspace -- --nocapture
 
-# test solo di un crate specifico
+# test only a specific crate
 test-crate crate:
     cargo test -p "{{crate}}"
 
-# build: compila tutto in debug
+# build: compile everything in debug
 build:
     cargo build --workspace
 
-# build-all: alias per cargo build-all (tutti i binari, release)
+# build-all: alias for cargo build-all (all binaries, release)
 build-all:
     cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-mcp -p speedy-gui -p speedy-language-context
 
-# build-slc: solo il binario speedy-language-context
+# build-slc: only the speedy-language-context binary
 build-slc:
     cargo build --release -p speedy-language-context
 
-# build-release: compila ottimizzato
+# build-release: compile optimized
 build-release:
     cargo build --release --workspace
 
-# check: analisi senza compilare
+# check: analyze without compiling
 check:
     cargo check --workspace
 
-# lint: clippy (se installato)
+# lint: clippy (if installed)
 lint:
     cargo clippy --workspace -- -D warnings
 
-# clean: pulisce tutto
+# clean: clean everything
 clean:
     cargo clean
 
-# run-speedy: esegue speedy dal workspace
+# run-speedy: run speedy from the workspace
 run-speedy cmd *args:
     cargo run -p speedy-ai-context --bin speedy-ai-context -- {{cmd}} {{args}}
 
-# run-cli: esegue il cli demo
+# run-cli: run the cli demo
 run-cli:
     cargo run -p speedy-ai-context --bin cli
 
-# run-server: esegue il server demo
+# run-server: run the server demo
 run-server:
     cargo run -p speedy-ai-context --bin server
 
-# tree: mostra l'albero dipendenze
+# tree: show the dependency tree
 tree:
     cargo tree
 
-# outdated: mostra dipendenze outdated
+# outdated: show outdated dependencies
 outdated:
     cargo outdated
 
-# docs: genera documentazione
+# docs: generate documentation
 docs:
     cargo doc --workspace --no-deps --open
 
-# fix: corregge warning automaticamente
+# fix: fix warnings automatically
 fix:
     cargo fix --workspace --allow-dirty
 
-# release <versione>: pusha master + crea tag → GitHub Actions builda gli exe
-# Esempio: just release 0.2.0
+# release <version>: push master + create tag → GitHub Actions builds the exes
+# Example: just release 0.2.0
 release version:
     powershell -NoProfile -File scripts/publish.ps1 {{version}}
 
-# build-dist: compila tutti i binari release e li copia in dist\ (senza installer).
+# build-dist: compile all release binaries and copy them to dist\ (no installer).
 build-dist:
     powershell -NoProfile -File scripts/build-release.ps1
 
-# dist: build release di tutti i binari + installer/uninstaller Inno Setup.
-# Output: dist\speedy-setup-<version>.exe e dist\speedy-uninstall-<version>.exe.
+# dist: release build of all binaries + Inno Setup installer/uninstaller.
+# Output: dist\speedy-setup-<version>.exe and dist\speedy-uninstall-<version>.exe.
 dist:
     powershell -NoProfile -File scripts/build-installer.ps1
 
-# release-all: dist + ammazza i processi Speedy in esecuzione + installa
-# silenziosamente l'.exe appena prodotto in %LOCALAPPDATA%\Programs\Speedy.
-# Pensato per ciclo dev locale: ricompila, reimpacchetta, reinstalla in un colpo.
+# release-all: dist + kill running Speedy processes + silently install
+# the freshly produced .exe into %LOCALAPPDATA%\Programs\Speedy.
+# Meant for the local dev loop: recompile, repackage, reinstall in one shot.
 release-all: dist
     powershell -NoProfile -File scripts/install-local.ps1
