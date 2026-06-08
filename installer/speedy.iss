@@ -120,6 +120,9 @@ Source: "..\installer\INSTALLATION.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\FOR-IA.md";        DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\SETTINGS_MCP.md";  DestDir: "{app}"; Flags: ignoreversion
 
+; Per-MCP usage guides — what to add to AGENT.md / CLAUDE.md for each server
+Source: "..\installer\mcp-guides\*"; DestDir: "{app}\mcp-guides"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 ; Emergency uninstall script — if the Inno Setup uninstaller
 ; hangs for any reason, the user can run this script.
 Source: "..\installer\uninstall-emergency.ps1"; DestDir: "{app}"; Flags: ignoreversion
