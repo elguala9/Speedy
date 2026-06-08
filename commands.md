@@ -9,8 +9,10 @@
 | `index [<SUBDIR>]` | Index a directory (default `.`) |
 | `query <QUERY> [-k <N>]` | Semantic search (default top-K 5) |
 | `context` | Workspace summary |
-| `sync` | Incremental FS → index sync |
+| `sync` | Incremental FS → index sync (this worker only) |
 | `reembed` | Drop all embeddings and re-index with the current model |
+| `install-hooks [--path <PATH>] [--force]` | Install the Speedy git hooks (call speedy-cli on commit/checkout/merge/rebase) |
+| `uninstall-hooks [--path <PATH>]` | Remove the Speedy-managed git hooks (foreign hooks left untouched) |
 | `daemon` | Spawn the central daemon |
 | `workspace list` | List registered workspaces |
 
@@ -39,16 +41,18 @@
 | `index [<SUBDIR>]` | Index via daemon |
 | `query <QUERY> [-k <N>] [--all]` | Semantic search via daemon. `--all`: fan-out across all workspaces, aggregate top-K |
 | `context` | Workspace summary via daemon |
-| `sync` | Incremental sync via daemon |
+| `sync` | **Incremental** sync across **all enabled contexts** (mtime+hash skip; prunes deletions) |
+| `update <FILES…>` | **Per-file** incremental update across all enabled contexts (used by the `post-commit` hook) |
+| `reindex [-p <PATH>]` | **Full** rebuild across all enabled contexts |
 | `reembed` | Drop embeddings and re-index with the current model (via daemon) |
-| `force [-p <PATH>]` | Daemon-driven sync of a workspace |
+| `force [-p <PATH>]` | Same fan-out incremental sync, targeting an explicit path |
 | `daemon status` | Daemon status (PID, uptime, ws/watchers) |
 | `daemon list` | Active workspaces on the daemon |
 | `daemon stop` | Stop the daemon |
 | `daemon ping` | Ping → pong |
 | `workspace list` | List registered workspaces |
-| `workspace add <PATH>` | Add workspace to the daemon |
-| `workspace remove <PATH>` | Remove workspace from the daemon |
+| `workspace add <PATH>` | Register a workspace; **also installs the Speedy git hooks** if it's a git repo |
+| `workspace remove <PATH>` | Unregister a workspace; **also removes the Speedy git hooks** |
 
 ### Flags
 
@@ -115,3 +119,12 @@ No CLI flags. Launched by the MCP client, communicates over stdio JSON-RPC.
 | `speedy_query` | `{ query: string, top_k?: number }` |
 | `speedy_index` | `{ path?: string }` |
 | `speedy_context` | `{}` |
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `SPEEDY_NO_DAEMON=1` | Forces the standalone path: `speedy-cli` skips the daemon probe and drives the workers in-process. Set by every git hook. |
+| `SPEEDY_SKIP_HOOKS=1` | Makes the Speedy git hooks exit immediately (no indexing on commit/checkout/merge/rebase). |
+| `SPEEDY_FORCE=1` | Bypasses a worker's per-workspace opt-in gate (used by explicit `sync`/`reindex`/`update`). |
+| `SPEEDY_MODEL` | Embedding model name (default `all-minilm`); run `reembed` after changing it. |

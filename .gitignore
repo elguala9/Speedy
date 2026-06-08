@@ -7,3 +7,5 @@
 .claude
 # icona generata da make-icon.ps1 (non committare binary generati)
 installer/assets/speedy.ico
+# local working notes — not tracked
+todo/

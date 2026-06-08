@@ -1,7 +1,10 @@
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy install-hooks)
-SPEEDY="{{SPEEDY_EXE}}"
-[ -x "$SPEEDY" ] || SPEEDY=$(command -v speedy 2>/dev/null)
+# Routes through speedy-cli, which orchestrates every enabled context
+# (ai-context, language-context, text-context). Indexing is opt-in: each
+# context no-ops unless it is enabled here. Runs entirely daemon-free.
+SPEEDY="{{SPEEDY_CLI_EXE}}"
+[ -x "$SPEEDY" ] || SPEEDY=$(command -v speedy-cli 2>/dev/null)
 [ -n "$SPEEDY" ] || exit 0
 [ -n "$SPEEDY_SKIP_HOOKS" ] && exit 0
 
@@ -9,15 +12,8 @@ SPEEDY="{{SPEEDY_EXE}}"
 [ "$3" = "0" ] && exit 0
 ROOT=$(git rev-parse --show-toplevel)
 
-if "$SPEEDY" ping 2>/dev/null | grep -q "pong"; then
-    "$SPEEDY" daemon sync "$ROOT"
-else
-    SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" sync
-fi
-
-# speedy-language-context: full reindex after branch switch (optional)
-SLC="{{SLC_EXE}}"
-[ -x "$SLC" ] || SLC=$(command -v speedy-language-context 2>/dev/null)
-[ -n "$SLC" ] && "$SLC" --path "$ROOT" index
+# Incremental sync across all enabled contexts (hash-skips unchanged files,
+# prunes files removed by the branch switch).
+SPEEDY_NO_DAEMON=1 "$SPEEDY" -p "$ROOT" sync
 
 exit 0

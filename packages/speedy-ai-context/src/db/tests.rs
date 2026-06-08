@@ -88,7 +88,6 @@ async fn test_clear_all_chunks_empties_store() {
 #[tokio::test]
 async fn test_migration_from_old_blob_schema() {
     let dir = tempfile::TempDir::new().unwrap();
-    std::env::set_var("SPEEDY_WORKSPACE_DATA_ROOT", dir.path().to_str().unwrap());
     let data_dir = speedy_core::daemon_util::workspace_data_dir(dir.path());
     let db_path = data_dir.join("sac.sqlite");
 

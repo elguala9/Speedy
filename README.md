@@ -2,7 +2,24 @@
 
 Local Semantic File System — bridges your local filesystem with AI models.
 
-Speedy indexes your codebase into a SQLite vector database, watches for file changes via a single background daemon, and exposes semantic search over your code through a CLI and an MCP server for AI agents (Claude Code, Cursor, opencode, Windsurf, …).
+Speedy indexes your codebase into a SQLite vector database and exposes semantic search over your code through a CLI and an MCP server for AI agents (Claude Code, Cursor, opencode, Windsurf, …).
+
+> **Default behavior (no daemon).** Out of the box Speedy does **not** run the
+> background daemon. Synchronization happens **only through git hooks**, which
+> run standalone (no daemon) on each commit/checkout/merge/rebase. The hooks are
+> installed automatically when you register a repo with
+> `speedy-cli workspace add` (and removed by `workspace remove`); you can also
+> manage them by hand with `speedy install-hooks` / `uninstall-hooks`. Every
+> hook routes through `speedy-cli`, which fans the work out to **all enabled
+> contexts** (ai-context, language-context, text-context). The daemon is still
+> available for live file-watching but is **never auto-started** — launch it
+> explicitly with `speedy daemon` or the GUI's "Start daemon" button.
+>
+> **All contexts are opt-in.** `speedy_indexer` (semantic index),
+> `language_context` (code intelligence) and `text_context` are **disabled by
+> default** for a new workspace; the workers no-op until you enable them
+> (`speedy enable speedy`, `speedy enable slc`). Toggles live under
+> `[features]` in `.speedy/config.toml`.
 
 > For the full per-binary option reference see **[`commands.md`](./commands.md)**.
 > For the end-to-end runtime flow see **[`flow.md`](./flow.md)**.
@@ -56,7 +73,7 @@ Pre-built binaries are available on the [Releases page](https://github.com/elgua
 ### Windows — Automatic installer (recommended)
 
 Download `speedy-setup-<version>.exe` from the [Releases page](https://github.com/elguala9/Speedy/releases) and run it.
-No admin required. Installs the binaries, configures PATH and automatic daemon startup.
+No admin required. Installs the binaries and configures PATH. The daemon is **not** started or registered for login — Speedy works via git hooks by default; enable launch-at-login from the GUI (Dashboard → "Avvio al login") if you want live file-watching.
 
 To build the installer from source:
 ```powershell
@@ -123,20 +140,17 @@ $dir = 'C:\Program Files\Speedy'
 
 Open a fresh terminal afterwards.
 
-**2. The daemon — in the Windows Startup folder**
+**2. The daemon — optional, opt-in**
 
-`speedy-daemon.exe` is different: it's a single, global, always-on process,
-so put it where Windows will launch it automatically at every login. Place
-(or shortcut) the binary into the **Startup folder**:
+The daemon is **not** required: by default Speedy syncs through git hooks
+(`speedy install-hooks`), which run the worker standalone on each commit. Run
+the daemon only if you want **live file-watching** (auto-reindex on save).
 
-```
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
-```
+Easiest way: launch the GUI and use **Dashboard → "Start daemon"**, then tick
+**"Launch at login"** to have it start automatically at every logon.
 
-Quick way to open it: `Win + R` → `shell:startup` → Enter.
-
-Drop a copy of `speedy-daemon.exe` there, or — cleaner — drop a **shortcut**
-that points to the binary in your install dir:
+Prefer to wire it up by hand? Drop a shortcut to `speedy-daemon.exe` into the
+Startup folder (`Win + R` → `shell:startup` → Enter):
 
 ```powershell
 $startup = [Environment]::GetFolderPath('Startup')
@@ -146,9 +160,6 @@ $lnk     = $ws.CreateShortcut("$startup\speedy-daemon.lnk")
 $lnk.TargetPath = $target
 $lnk.Save()
 ```
-
-After the next login (or by running it once manually) the daemon is up; all
-other commands talk to it transparently.
 
 ### First run
 
@@ -181,8 +192,11 @@ SPEEDY_NO_DAEMON=1 speedy-ai-context index .
 SPEEDY_NO_DAEMON=1 speedy-ai-context query "find auth"
 ```
 
-You lose live re-indexing on file changes — every query reflects only what
-the last manual `index` / `sync` captured.
+Without the daemon there is no live re-indexing on *every* save — but if the
+workspace was added with `speedy-cli workspace add` (or you ran
+`speedy install-hooks`), the git hooks keep the index fresh on every
+commit/checkout/merge/rebase. Between commits, a query reflects what the last
+hook run (or manual `index` / `sync` / `update`) captured.
 
 ## Prerequisites
 
@@ -218,10 +232,12 @@ Global flags: `-p/--path`, `--daemon-socket`, `--json`.
 | `query <q> [-k <N>]`             | Send `exec ... query <q> -k <N>` — semantic search (requires embedding model) |
 | `grep <pattern> [-k <N>]`        | FTS5 keyword search directly on the local index (no embedding, no daemon) |
 | `context`                        | Send `exec ... context`                                             |
-| `sync`                           | Send `exec ... sync`                                                |
-| `force [-p <path>]`              | Send `sync <path>` directly (daemon-driven incremental sync)        |
+| `sync`                           | **Incremental** sync across **all enabled contexts** (mtime+hash skip; prunes deletions) |
+| `update <files…>`                | **Per-file** incremental update across all enabled contexts (used by the `post-commit` hook) |
+| `force [-p <path>]`              | Same fan-out incremental sync, targeting an explicit path           |
+| `reindex [-p <path>]`            | **Full** rebuild across all enabled contexts                        |
 | `daemon {status,list,stop,ping}` | Talk to the daemon directly (no `speedy-ai-context.exe` involved)              |
-| `workspace {list,add,remove}`    | Register/unregister workspaces (note: path is **positional** here)  |
+| `workspace {list,add,remove}`    | Register/unregister workspaces (path is **positional**); `add`/`remove` also install/remove the git hooks |
 
 ### `speedy-daemon.exe` — the central daemon
 

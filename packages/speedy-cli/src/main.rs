@@ -4,7 +4,6 @@ use speedy_core::daemon_client::DaemonClient;
 use speedy_core::daemon_util;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-use tracing::warn;
 
 use speedy_core::local_sock::{GenericNamespaced, Stream as LocalStream, StreamTrait as _, ToNsName};
 
@@ -43,10 +42,20 @@ enum Commands {
     Context,
     #[command(about = "Sync filesystem changes to the database incrementally")]
     Sync,
+    #[command(about = "Incrementally update specific changed files across all enabled contexts")]
+    Update {
+        #[arg(required = true, help = "Files to update (absolute, or relative to the workspace root)")]
+        files: Vec<String>,
+    },
     #[command(about = "Drop and rebuild every chunk's embedding (use after changing SPEEDY_MODEL)")]
     Reembed,
     #[command(about = "Force reindex of a workspace")]
     Force {
+        #[arg(short = 'p', help = "Workspace path (default: current dir)")]
+        path: Option<String>,
+    },
+    #[command(about = "Full reindex across all enabled contexts (ai/language/text)")]
+    Reindex {
         #[arg(short = 'p', help = "Workspace path (default: current dir)")]
         path: Option<String>,
     },
@@ -118,18 +127,73 @@ async fn send_raw_cmd(socket_name: &str, req: &str) -> Result<String> {
     Ok(resp.trim().to_string())
 }
 
-async fn ensure_daemon(socket_name: &str) -> Result<()> {
-    let client = DaemonClient::new(socket_name);
-    if client.is_alive().await {
-        return Ok(());
+/// Run the `speedy-ai-context` worker in-process (standalone — no daemon).
+/// Stdio is inherited so the worker's own (human or `--json`) output reaches
+/// the user directly, and the worker applies its own feature gating.
+async fn run_ai_context_standalone(cwd: &str, json: bool, args: &[&str]) -> Result<()> {
+    let exe = speedy_core::contexts::find_ai_context_exe();
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.arg("-p").arg(cwd);
+    if json {
+        cmd.arg("--json");
     }
-
-    warn!("Daemon non risponde. Avvio...");
-    let daemon_dir = daemon_util::daemon_dir_path()?;
-    daemon_util::kill_existing_daemon(&daemon_dir);
-    daemon_util::spawn_daemon_process(socket_name)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    for a in args {
+        cmd.arg(a);
+    }
+    cmd.env("SPEEDY_NO_DAEMON", "1");
+    // The CLI is only ever invoked by an explicit user action (terminal or the
+    // GUI buttons), so bypass the worker's opt-in gate: an explicit `sync`/
+    // `index`/`reembed` must actually run. Read-only commands ignore this.
+    cmd.env("SPEEDY_FORCE", "1");
+    let status = cmd
+        .status()
+        .await
+        .with_context(|| format!("failed to spawn {}", exe.display()))?;
+    if !status.success() {
+        anyhow::bail!("speedy-ai-context exited with status {status}");
+    }
     Ok(())
+}
+
+/// Cross-workspace semantic query without a daemon: replicate the daemon's
+/// `query-all` fan-out by running the ai-context worker once per registered
+/// workspace, tagging each hit with its workspace, then merging and ranking.
+async fn standalone_query_all(query: &str, top_k: usize) -> Result<serde_json::Value> {
+    let workspaces = speedy_core::workspace::list()?;
+    let exe = speedy_core::contexts::find_ai_context_exe();
+    let k = top_k.to_string();
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+    for ws in workspaces {
+        let mut cmd = tokio::process::Command::new(&exe);
+        cmd.args(["-p", &ws.path, "query", query, "-k", &k, "--json"])
+            .env("SPEEDY_NO_DAEMON", "1");
+        let output = match cmd.output().await {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(stdout.trim()).unwrap_or_default();
+        for mut item in parsed {
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert(
+                    "workspace".to_string(),
+                    serde_json::Value::String(ws.path.clone()),
+                );
+            }
+            merged.push(item);
+        }
+    }
+    merged.sort_by(|a, b| {
+        let sa = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let sb = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged.truncate(top_k);
+    Ok(serde_json::Value::Array(merged))
 }
 
 fn main() -> Result<()> {
@@ -363,73 +427,20 @@ mod tests {
         assert!(err.contains("Cannot connect") || err.contains("refused") || err.contains("denied"));
     }
 
-    #[tokio::test]
-    async fn test_ensure_daemon_when_alive() {
-        let name = test_socket_name("ensure");
-        let ns_name = name.as_str().to_ns_name::<GenericNamespaced>().unwrap();
-        let listener = ListenerOptions::new().name(ns_name).create_tokio().unwrap();
-        let _handle = tokio::spawn(async move {
-            let socket = listener.accept().await.unwrap();
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let (mut reader, mut writer) = socket.split();
-            let mut buf = [0u8; 1024];
-            let _ = reader.read(&mut buf).await;
-            let _ = writer.write_all(b"pong\n").await;
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let result = ensure_daemon(&name).await;
-        assert!(result.is_ok());
-    }
-
-    // ── should_skip_daemon_check ─────────────────────
-
     #[test]
-    fn test_skip_daemon_check_workspace_subcommand() {
-        let cli = Cli::parse_from(["speedy-cli", "workspace", "list"]);
-        assert!(should_skip_daemon_check(&cli));
+    fn test_parse_reindex() {
+        let cli = Cli::parse_from(["speedy-cli", "reindex"]);
+        assert!(matches!(cli.command, Some(Commands::Reindex { path: None })));
     }
 
     #[test]
-    fn test_skip_daemon_check_daemon_subcommand() {
-        let cli = Cli::parse_from(["speedy-cli", "daemon", "ping"]);
-        assert!(should_skip_daemon_check(&cli));
-    }
-
-    #[test]
-    fn test_skip_daemon_check_no_command() {
-        let cli = Cli::parse_from(["speedy-cli"]);
-        assert!(should_skip_daemon_check(&cli));
-    }
-
-    #[test]
-    fn test_skip_daemon_check_does_not_skip_index() {
-        let cli = Cli::parse_from(["speedy-cli", "index"]);
-        assert!(!should_skip_daemon_check(&cli));
-    }
-
-    #[test]
-    fn test_skip_daemon_check_does_not_skip_query() {
-        let cli = Cli::parse_from(["speedy-cli", "query", "x"]);
-        assert!(!should_skip_daemon_check(&cli));
-    }
-
-    #[test]
-    fn test_skip_daemon_check_does_not_skip_context() {
-        let cli = Cli::parse_from(["speedy-cli", "context"]);
-        assert!(!should_skip_daemon_check(&cli));
-    }
-
-    #[test]
-    fn test_skip_daemon_check_does_not_skip_sync() {
-        let cli = Cli::parse_from(["speedy-cli", "sync"]);
-        assert!(!should_skip_daemon_check(&cli));
-    }
-
-    #[test]
-    fn test_skip_daemon_check_does_not_skip_force() {
-        let cli = Cli::parse_from(["speedy-cli", "force"]);
-        assert!(!should_skip_daemon_check(&cli));
+    fn test_parse_reindex_with_path() {
+        let cli = Cli::parse_from(["speedy-cli", "reindex", "-p", "/tmp/proj"]);
+        if let Some(Commands::Reindex { path }) = cli.command {
+            assert_eq!(path, Some("/tmp/proj".to_string()));
+        } else {
+            panic!("expected Reindex command");
+        }
     }
 
     // ── resolve_socket_name ──────────────────────────
@@ -481,22 +492,22 @@ mod tests {
     }
 }
 
-fn should_skip_daemon_check(cli: &Cli) -> bool {
-    match &cli.command {
-        Some(Commands::Daemon { .. })
-        | Some(Commands::Workspace { .. })
-        | Some(Commands::Grep { .. }) => true,
-        None => true,
-        _ => false,
-    }
-}
-
 async fn async_main(cli: Cli) -> Result<()> {
     let socket = resolve_socket_name(&cli);
-    if !should_skip_daemon_check(&cli) {
-        ensure_daemon(&socket).await?;
-    }
     let client = DaemonClient::new(&socket);
+
+    // Probe the daemon once. When it is up we route through it (it orchestrates
+    // the three context workers); when it is down we run standalone, driving the
+    // workers in-process via `speedy_core::contexts`. The daemon is opt-in and
+    // is never auto-started. `SPEEDY_NO_DAEMON` forces the standalone path — git
+    // hooks set it so they never depend on (or block on) the daemon.
+    let no_daemon = std::env::var("SPEEDY_NO_DAEMON")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false);
+    let alive = !no_daemon && client.is_alive().await;
 
     let cwd = std::env::current_dir()?;
     let cwd_str = cwd.to_string_lossy().to_string();
@@ -518,12 +529,20 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Some(Commands::Index { subdir }) => {
-            let resp = send_raw_cmd(&socket, &exec_cmd(&["index", subdir])).await?;
-            println!("{resp}");
+            if alive {
+                let resp = send_raw_cmd(&socket, &exec_cmd(&["index", subdir])).await?;
+                println!("{resp}");
+            } else {
+                run_ai_context_standalone(&cwd_str, json, &["index", subdir]).await?;
+            }
         }
         Some(Commands::Query { query, top_k, all }) => {
             if *all {
-                let aggregated = client.query_all(query, *top_k).await?;
+                let aggregated = if alive {
+                    client.query_all(query, *top_k).await?
+                } else {
+                    standalone_query_all(query, *top_k).await?
+                };
                 if cli.json {
                     println!("{}", serde_json::to_string_pretty(&aggregated)?);
                 } else if let Some(items) = aggregated.as_array() {
@@ -546,27 +565,94 @@ async fn async_main(cli: Cli) -> Result<()> {
                 }
             } else {
                 let k = top_k.to_string();
-                let resp = send_raw_cmd(&socket, &exec_cmd(&["query", query, "-k", &k])).await?;
-                println!("{resp}");
+                if alive {
+                    let resp = send_raw_cmd(&socket, &exec_cmd(&["query", query, "-k", &k])).await?;
+                    println!("{resp}");
+                } else {
+                    run_ai_context_standalone(&cwd_str, json, &["query", query, "-k", &k]).await?;
+                }
             }
         }
         Some(Commands::Context) => {
-            let resp = send_raw_cmd(&socket, &exec_cmd(&["context"])).await?;
-            println!("{resp}");
+            if alive {
+                let resp = send_raw_cmd(&socket, &exec_cmd(&["context"])).await?;
+                println!("{resp}");
+            } else {
+                run_ai_context_standalone(&cwd_str, json, &["context"]).await?;
+            }
         }
         Some(Commands::Sync) => {
-            let resp = send_raw_cmd(&socket, &exec_cmd(&["sync"])).await?;
-            println!("{resp}");
+            // Incremental sync across all enabled contexts (ai-context, SLC,
+            // text). Daemon when up, else the same fan-out in-process.
+            if alive {
+                let resp = send_raw_cmd(&socket, &exec_cmd(&["sync"])).await?;
+                println!("{resp}");
+            } else {
+                let ran = speedy_core::contexts::sync_workspace(&cwd_str, true).await?;
+                if json {
+                    println!("{}", serde_json::json!({ "synced": ran }));
+                } else if ran {
+                    println!("Sync complete");
+                } else {
+                    println!("Nothing to sync — enable AI Context, Language Context or Text Context first.");
+                }
+            }
+        }
+        Some(Commands::Update { files }) => {
+            // Per-file incremental update across all enabled contexts. Always
+            // runs in-process (it drives the workers directly), so it is daemon
+            // independent — the git post-commit hook relies on this.
+            let ran = speedy_core::contexts::update_files(&cwd_str, files, true).await?;
+            if json {
+                println!("{}", serde_json::json!({ "updated": ran, "files": files.len() }));
+            } else if ran {
+                println!("Updated {} file(s)", files.len());
+            } else {
+                println!("Nothing updated — enable a context, or the files no longer exist.");
+            }
         }
         Some(Commands::Reembed) => {
-            let resp = send_raw_cmd(&socket, &exec_cmd(&["reembed"])).await?;
-            println!("{resp}");
+            if alive {
+                let resp = send_raw_cmd(&socket, &exec_cmd(&["reembed"])).await?;
+                println!("{resp}");
+            } else {
+                run_ai_context_standalone(&cwd_str, json, &["reembed"]).await?;
+            }
         }
         Some(Commands::Force { path }) => {
             let target = path.clone().unwrap_or_else(|| cwd_str.clone());
-            let resp = send_raw_cmd(&socket, &format!("sync {target}")).await?;
-            println!("{resp}");
+            if alive {
+                let resp = send_raw_cmd(&socket, &format!("sync {target}")).await?;
+                println!("{resp}");
+            } else {
+                let ran = speedy_core::contexts::sync_workspace(&target, true).await?;
+                if json {
+                    println!("{}", serde_json::json!({ "synced": ran }));
+                } else if ran {
+                    println!("Sync complete");
+                } else {
+                    println!("Nothing to sync — enable AI Context, Language Context or Text Context first.");
+                }
+            }
         }
+        Some(Commands::Reindex { path }) => {
+            let target = path.clone().unwrap_or_else(|| cwd_str.clone());
+            // Full fan-out across all enabled contexts. Daemon when up, else the
+            // same orchestration in-process.
+            let summary = if alive {
+                client.reindex(&target).await?
+            } else {
+                speedy_core::contexts::reindex_workspace(&target).await?
+            };
+            if cli.json {
+                println!("{}", serde_json::json!({ "reindex": summary }));
+            } else {
+                println!("{summary}");
+            }
+        }
+        // Daemon introspection commands require a live daemon by design: when
+        // it is down they fail with a connection error (callers/tests rely on
+        // this). We deliberately do not synthesize a success here.
         Some(Commands::Daemon { action }) => match action {
             DaemonAction::Status => {
                 let s = client.status().await?;
@@ -624,23 +710,64 @@ async fn async_main(cli: Cli) -> Result<()> {
                 }
             }
             WorkspaceAction::Add { path } => {
-                client.add_workspace(path).await?;
+                if alive {
+                    client.add_workspace(path).await?;
+                } else {
+                    // No daemon: write the registry directly. A daemon started
+                    // later reloads workspaces.json from disk.
+                    speedy_core::workspace::add(path)?;
+                }
+                // Best-effort: wire up the Speedy git hooks so commits keep the
+                // index fresh without a daemon. Silently skipped when the path
+                // isn't a git repo (`force=false` never clobbers foreign hooks).
+                let hooks_note = match speedy_ai_context::hooks::install_hooks(std::path::Path::new(path), false) {
+                    Ok(r) if !r.installed.is_empty() => {
+                        format!(" (git hooks installed: {})", r.installed.join(", "))
+                    }
+                    Ok(_) => " (git hooks already present)".to_string(),
+                    Err(_) => " (not a git repo — git hooks skipped)".to_string(),
+                };
                 if cli.json {
                     println!("{}", serde_json::json!({ "added": true, "path": path }));
                 } else {
-                    println!("Workspace added: {path}");
+                    println!("Workspace added: {path}{hooks_note}");
                 }
             }
             WorkspaceAction::Remove { path } => {
-                client.remove_workspace(path).await?;
+                if alive {
+                    client.remove_workspace(path).await?;
+                } else {
+                    speedy_core::workspace::remove(path)?;
+                }
+                // Symmetric with add: pull out the Speedy-managed git hooks too
+                // (foreign hooks are left untouched). Best-effort.
+                let removed = speedy_ai_context::hooks::uninstall_hooks(std::path::Path::new(path))
+                    .unwrap_or_default();
+                let hooks_note = if removed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (git hooks removed: {})", removed.join(", "))
+                };
                 if cli.json {
                     println!("{}", serde_json::json!({ "removed": true, "path": path }));
                 } else {
-                    println!("Workspace removed: {path}");
+                    println!("Workspace removed: {path}{hooks_note}");
                 }
             }
         },
         Some(Commands::Grep { pattern, top_k }) => {
+            // Don't let a read-only grep CREATE an empty `sac.sqlite` in a
+            // workspace that was never indexed: bail early when the DB is
+            // absent instead of opening (and thus creating) it.
+            let db_path = daemon_util::workspace_data_dir(&cwd).join("sac.sqlite");
+            if !db_path.exists() {
+                if cli.json {
+                    println!("[]");
+                } else {
+                    println!("No local index — run 'speedy-cli index' first.");
+                }
+                return Ok(());
+            }
             let db = speedy_ai_context::db::SqliteVectorStore::new(&cwd_str)
                 .await
                 .context("cannot open local index — run 'speedy-cli index' first")?;

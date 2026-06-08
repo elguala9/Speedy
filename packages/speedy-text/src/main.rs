@@ -112,7 +112,11 @@ fn run() -> Result<()> {
             let mut conn = db::open(&db_path)
                 .with_context(|| format!("cannot open DB at {}", db_path.display()))?;
             db::migrate(&conn)?;
-            indexer::index(&mut conn, &root)?;
+            let (indexed, total) = indexer::index(&mut conn, &root)?;
+            println!(
+                "Indexed {indexed}/{total} files into {}",
+                db_path.display()
+            );
         }
 
         Commands::Sync { path } => {
@@ -121,7 +125,8 @@ fn run() -> Result<()> {
             let mut conn = db::open(&db_path)
                 .with_context(|| format!("cannot open DB at {}", db_path.display()))?;
             db::migrate(&conn)?;
-            indexer::sync(&mut conn, &root)?;
+            let (updated, removed) = indexer::sync(&mut conn, &root)?;
+            println!("Synced: {updated} updated, {removed} removed");
         }
 
         Commands::Update { path, file } => {

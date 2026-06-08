@@ -165,10 +165,10 @@ fn publish_winget(version: Option<String>, update: bool) {
     let script = root.join("scripts").join("submit-winget.ps1");
 
     println!("==> cargo publish-winget v{ver}{}",
-        if update { " (--update)" } else { " (prima submission)" });
+        if update { " (--update)" } else { " (first submission)" });
 
     if !script.exists() {
-        eprintln!("Script non trovato: {}", script.display());
+        eprintln!("Script not found: {}", script.display());
         std::process::exit(1);
     }
 

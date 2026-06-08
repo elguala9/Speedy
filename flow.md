@@ -1,233 +1,254 @@
-# Flow di Speedy — come deve girare
+# Speedy Flow — how it should run
 
-> Documento di verifica della comprensione del progetto. Descrive, passo passo, **cosa fa cosa** e **chi chiama chi** nei vari scenari. Se qualcosa qui è sbagliato, è un punto in cui ho frainteso il progetto.
+> Project comprehension verification document. It describes, step by step, **what does what** and **who calls whom** in the various scenarios. If something here is wrong, it's a point where I misunderstood the project.
 
-## Principio cardine
+## ⚠️ Current default: no daemon, everything opt-in
 
-**Un solo daemon. Globale. Per tutto.**
+> **Update (branch `feature/no-daemon`).** By default Speedy **does not use
+> the daemon**: synchronization happens **only via git hooks** (commit /
+> checkout / merge / rebase), which invoke the worker in standalone mode
+> (`SPEEDY_NO_DAEMON=1`). The daemon remains available but is **never
+> started automatically** — it must be launched explicitly (`speedy daemon` or from the
+> "Start daemon" button in the GUI).
+>
+> Moreover **all contexts are opt-in**: `speedy_indexer`, `language_context`
+> and `text_context` are **disabled by default** for a new workspace. Their
+> respective workers are no-ops until the feature is enabled
+> (`speedy enable speedy` / `speedy enable slc`). See `[features]` in
+> `.speedy/config.toml`.
+>
+> The following section describes the **historical daemon model**, valid only
+> when the daemon is started manually.
 
-- C'è **un solo** `speedy-daemon.exe` in esecuzione per utente, mai uno per
-  workspace. Tutti i workspace dell'utente sono gestiti da quell'unico
-  processo, ciascuno con il proprio task watcher interno.
-- Il daemon ha una **memoria persistente fissa** su disco
-  (`~/.config/speedy/workspaces.json` su Linux/macOS,
-  `%APPDATA%\speedy\workspaces.json` su Windows) dove tiene la lista dei
-  workspace registrati: path canonico + eventuali metadati per ognuno.
-- All'avvio (anche dopo un riavvio del PC) il daemon **rilegge questa
-  memoria** e ricostruisce in RAM lo stato: per ogni path ancora esistente
-  riavvia un watcher; gli orfani vengono purgati.
-- `workspaces.json` è la **fonte di verità**. Lo stato in RAM del daemon è
-  uno specchio. CLI / MCP / script esterni non scrivono mai direttamente
-  in `workspaces.json` — passano sempre per il daemon (`add` / `remove`),
-  che è l'unico autorizzato a mutarlo.
+## Core principle (daemon model, now opt-in)
+
+**A single daemon. Global. For everything.**
+
+- There is **only one** `speedy-daemon.exe` running per user, never one per
+  workspace. All of the user's workspaces are managed by that single
+  process, each with its own internal task watcher.
+- The daemon has a **fixed persistent memory** on disk
+  (`~/.config/speedy/workspaces.json` on Linux/macOS,
+  `%APPDATA%\speedy\workspaces.json` on Windows) where it keeps the list of
+  registered workspaces: canonical path + any metadata for each.
+- On startup (even after a PC reboot) the daemon **re-reads this
+  memory** and rebuilds the state in RAM: for each path that still exists it
+  restarts a watcher; orphans are purged.
+- `workspaces.json` is the **source of truth**. The daemon's in-RAM state is
+  a mirror. CLI / MCP / external scripts never write directly
+  to `workspaces.json` — they always go through the daemon (`add` / `remove`),
+  which is the only one authorized to mutate it.
 
 ---
 
-## 1. Gli attori (5 .exe + 1 lib)
+## 1. The actors (5 .exe + 1 lib)
 
 ```
-speedy-core (lib)        ← libreria leggera condivisa
+speedy-core (lib)        ← lightweight shared library
                            DaemonClient, workspace registry, config,
-                           local-socket helpers, types serde condivisi
+                           local-socket helpers, shared serde types
                            (DaemonStatus, Metrics, WorkspaceStatus,
                             ScanResult, LogLine), embedding type
 
-speedy-ai-context.exe (worker)      ← TUTTA la logica pesante inline
+speedy-ai-context.exe (worker)      ← ALL the heavy logic inline
                            indexer, query, embedding, SQLite, chunking,
-                           hashing, ignore, file filter, watcher reale
-                           può girare standalone, oppure essere spawnato
-                           come subprocess dal daemon
+                           hashing, ignore, file filter, real watcher
+                           can run standalone, or be spawned
+                           as a subprocess by the daemon
 
-speedy-daemon.exe        ← UN SOLO processo, globale per l'utente
-                           gestisce TUTTI i workspace insieme
-                           (mai un daemon-per-workspace)
-                           IPC server su local socket "speedy-daemon"
-                           N file-watcher (uno per workspace) DENTRO
-                           lo stesso processo, come task tokio
-                           NON fa embedding/indexing: delega a speedy-ai-context.exe
+speedy-daemon.exe        ← A SINGLE process, global per user
+                           manages ALL workspaces together
+                           (never a daemon-per-workspace)
+                           IPC server on local socket "speedy-daemon"
+                           N file-watchers (one per workspace) INSIDE
+                           the same process, as tokio tasks
+                           Does NOT do embedding/indexing: delegates to speedy-ai-context.exe
                            via subprocess
-                           target di deploy: cartella Startup di Windows
-                           (parte al login utente)
+                           deploy target: Windows Startup folder
+                           (starts at user login)
 
-speedy-cli.exe           ← thin client (solo tokio + serde + clap +
-                           interprocess), zero dipendenze pesanti
-                           parla con il daemon via local socket
-                           se daemon morto → lo spawna (speedy-daemon.exe)
+speedy-cli.exe           ← CLI front-end (depends on speedy-core)
+                           daemon-if-alive → routes requests to the daemon
+                           daemon-absent → orchestrates the three context
+                           workers in-process (speedy_core::contexts): reindex fans out to
+                           ai-context + language-context + text-context, each
+                           gated by its feature. The daemon is NEVER
+                           auto-started.
 
-speedy-ai-context-mcp.exe           ← server MCP (JSON-RPC su stdio) per ai-context (semantic search)
-                           usa SPEEDY_BIN (default: speedy-cli) per
-                           eseguire i tool → daemon → speedy-ai-context.exe
+speedy-ai-context-mcp.exe           ← MCP server (JSON-RPC over stdio) for ai-context (semantic search)
+                           uses SPEEDY_BIN (default: speedy-cli) to
+                           run the tools → daemon → speedy-ai-context.exe
 
-speedy-language-context-mcp.exe ← server MCP (JSON-RPC su stdio) per code intelligence
-                           opera direttamente su GraphStore SQLite, senza daemon
+speedy-language-context-mcp.exe ← MCP server (JSON-RPC over stdio) for code intelligence
+                           operates directly on GraphStore SQLite, without daemon
 
-speedy-gui.exe           ← desktop GUI (egui + eframe) per gestione manuale
-                           usa DaemonClient di speedy-core direttamente
-                           via tokio runtime in background, NON passa
-                           per speedy-cli. 4 tab: Dashboard / Workspaces /
-                           Scan / Logs. Tray icon di sistema.
+speedy-gui.exe           ← desktop GUI (egui + eframe) for manual management
+                           uses speedy-core's DaemonClient directly
+                           via a tokio runtime in the background, does NOT go
+                           through speedy-cli. 4 tabs: Dashboard / Workspaces /
+                           Scan / Logs. System tray icon.
 ```
 
-### Dipendenze fra crate
+### Dependencies between crates
 
-| Binary           | Dipende da                                       |
+| Binary           | Depends on                                       |
 |------------------|--------------------------------------------------|
-| `speedy-ai-context` | `speedy-core` + tutta la logica pesante       |
-| `speedy-daemon`  | `speedy-core` + tutta la logica pesante          |
-| `speedy-cli`     | solo `speedy-core` (DaemonClient + local_sock)   |
-| `speedy-ai-context-mcp`     | solo `speedy-core` (chiama `SPEEDY_BIN`)         |
+| `speedy-ai-context` | `speedy-core` + all the heavy logic           |
+| `speedy-daemon`  | `speedy-core` + all the heavy logic              |
+| `speedy-cli`     | only `speedy-core` (DaemonClient + local_sock)   |
+| `speedy-ai-context-mcp`     | only `speedy-core` (calls `SPEEDY_BIN`)         |
 | `speedy-language-context-mcp` | `speedy-language-context` lib (GraphStore, mcp) |
-| `speedy-gui`     | solo `speedy-core` (DaemonClient + types) + egui |
+| `speedy-gui`     | only `speedy-core` (DaemonClient + types) + egui |
 
 ---
 
-## 2. IPC — protocollo
+## 2. IPC — protocol
 
-- **Trasporto**: local socket via crate `interprocess`.
+- **Transport**: local socket via the `interprocess` crate.
   - Windows → Named Pipe `\\.\pipe\speedy-daemon`
-  - Unix    → Unix Domain Socket `speedy-daemon` (namespace generico)
-- **Nome default**: `speedy-daemon`. Override con `--daemon-socket`.
-- **Wire**: una richiesta per connessione, line-based UTF-8.
+  - Unix    → Unix Domain Socket `speedy-daemon` (generic namespace)
+- **Default name**: `speedy-daemon`. Override with `--daemon-socket`.
+- **Wire**: one request per connection, line-based UTF-8.
   - request:  `<cmd>[ args...]\n`
   - response: `<line>\n`
-  - il server chiude la connessione dopo la risposta.
-- **`exec` con path che contengono spazi** → forma tab-separata:
+  - the server closes the connection after the response.
+- **`exec` with paths containing spaces** → tab-separated form:
   ```
   exec\t<cwd>\t<arg1>\t<arg2>...
   ```
-  `<cwd>` può essere vuoto. Forma whitespace `exec <args>` ancora accettata per legacy.
+  `<cwd>` may be empty. The whitespace form `exec <args>` is still accepted for legacy.
 
-### Comandi
+### Commands
 
-| Comando                  | Risposta                                                   | Dispatch lato daemon                            |
+| Command                  | Response                                                   | Dispatch on the daemon side                     |
 |--------------------------|------------------------------------------------------------|-------------------------------------------------|
 | `ping`                   | `pong`                                                     | inline                                          |
 | `status`                 | JSON `{pid, uptime_secs, workspace_count, watcher_count, version}` | inline                                  |
-| `list`                   | JSON `["/path/1", "/path/2"]`                              | inline (dalla mappa watcher)                    |
+| `list`                   | JSON `["/path/1", "/path/2"]`                              | inline (from the watcher map)                   |
 | `watch-count`            | `N`                                                        | inline                                          |
 | `daemon-pid`             | `N`                                                        | inline                                          |
 | `is-workspace <path>`    | `true` / `false`                                           | inline                                          |
-| `add <path>`             | `ok` / `error: ...`                                        | registra in `workspaces.json` + spawna watcher  |
-| `remove <path>`          | `ok` / `error: ...`                                        | abort watcher + deregistra                      |
-| `sync <path>`            | `ok` / `error: ...`                                        | spawna `speedy-ai-context.exe -p <path> sync` (incrementale) |
-| `reload`                 | `ok: N workspaces reloaded`                                | rilegge workspaces.json + sync watcher          |
-| `exec <args>`            | stdout di `speedy-ai-context.exe`                                     | spawna `speedy-ai-context.exe <args>` con `SPEEDY_NO_DAEMON=1` |
-| `stop`                   | `ok` (poi shutdown graceful)                               | abort tutti i watcher, esce dal loop accept     |
-| qualsiasi altro          | `error: unknown command: <cmd>`                            | —                                               |
+| `add <path>`             | `ok` / `error: ...`                                        | registers in `workspaces.json` + spawns watcher |
+| `remove <path>`          | `ok` / `error: ...`                                        | abort watcher + deregister                      |
+| `sync <path>`            | `ok` / `error: ...`                                        | spawns `speedy-ai-context.exe -p <path> sync` (incremental) |
+| `reload`                 | `ok: N workspaces reloaded`                                | re-reads workspaces.json + sync watcher         |
+| `exec <args>`            | stdout of `speedy-ai-context.exe`                                     | spawns `speedy-ai-context.exe <args>` with `SPEEDY_NO_DAEMON=1` |
+| `stop`                   | `ok` (then graceful shutdown)                              | abort all watchers, exits the accept loop       |
+| any other                | `error: unknown command: <cmd>`                            | —                                               |
 
-Note operative del daemon:
-- `accept()` ha timeout 1s → può controllare il flag `running` e uscire pulito entro un tick dopo `stop`.
-- `exec` setta `SPEEDY_NO_DAEMON=1` nell'env del child → il worker non rientra mai nel daemon (no fork-bomb).
-- All'avvio, le entry in `workspaces.json` con path inesistente vengono purgate.
+Daemon operational notes:
+- `accept()` has a 1s timeout → it can check the `running` flag and exit cleanly within one tick after `stop`.
+- `exec` sets `SPEEDY_NO_DAEMON=1` in the child's env → the worker never re-enters the daemon (no fork-bomb).
+- On startup, entries in `workspaces.json` with a non-existent path are purged.
 
-> Comandi aggiuntivi a supporto della GUI (`metrics`, `scan`, `reindex`,
-> `workspace-status`, `tail-log`, `subscribe-log`, `query-all`) sono
-> documentati nel dettaglio in [`docs/ipc-protocol.md`](./docs/ipc-protocol.md).
-> Tutti one-shot tranne `subscribe-log`, che è long-lived: il daemon manda
-> `ok\n` come handshake e poi una `LogLine` JSON per ogni evento finché il
-> client non chiude la connessione.
+> Additional commands supporting the GUI (`metrics`, `scan`, `reindex`,
+> `workspace-status`, `tail-log`, `subscribe-log`, `query-all`) are
+> documented in detail in [`docs/ipc-protocol.md`](./docs/ipc-protocol.md).
+> All one-shot except `subscribe-log`, which is long-lived: the daemon sends
+> `ok\n` as a handshake and then one JSON `LogLine` per event until the
+> client closes the connection.
 
 ---
 
-## 3. Flusso "primo comando dopo boot del PC"
+## 3. "First command after PC boot" flow
 
 ```
-PC riparte
-  ~/.config/speedy/workspaces.json  → integro su disco
+PC restarts
+  ~/.config/speedy/workspaces.json  → intact on disk
   ~/.config/speedy/daemon.pid       → stale
-  named pipe "speedy-daemon"        → non esiste
+  named pipe "speedy-daemon"        → does not exist
 
 $ speedy-cli query "auth flow"
   │
   ├─ DaemonClient::is_alive()
   │    ├─ LocalStream::connect("speedy-daemon")
   │    ├─ write "ping\n" + shutdown
-  │    ├─ read_line con timeout 2s
-  │    └─ accetta solo se risposta == "pong"   ← evita pipe half-open
+  │    ├─ read_line with 2s timeout
+  │    └─ accept only if response == "pong"   ← avoids half-open pipe
   │
   │   → connect fail → false
   │
   ├─ ensure_daemon()
-  │    ├─ kill_existing_daemon()  ← rimuove daemon.pid stale,
-  │    │                            taskkill PID stale se serve
-  │    ├─ spawn speedy-daemon.exe  (CREATE_NO_WINDOW su Windows,
-  │    │                            stdout/stderr verso null)
-  │    └─ attende che is_alive() diventi true (poll con timeout)
+  │    ├─ kill_existing_daemon()  ← removes stale daemon.pid,
+  │    │                            taskkill stale PID if needed
+  │    ├─ spawn speedy-daemon.exe  (CREATE_NO_WINDOW on Windows,
+  │    │                            stdout/stderr to null)
+  │    └─ waits for is_alive() to become true (poll with timeout)
   │
   ├─ daemon.start()
-  │    ├─ scrive daemon.pid
-  │    ├─ legge workspaces.json
-  │    ├─ per ogni ws esistente → spawna watcher (tokio task)
+  │    ├─ writes daemon.pid
+  │    ├─ reads workspaces.json
+  │    ├─ for each existing ws → spawns watcher (tokio task)
   │    └─ Listener::bind("speedy-daemon"), loop accept()
   │
   ├─ DaemonClient::is_workspace(CWD)?  → false
   ├─ DaemonClient::add_workspace(CWD)
-  │    ├─ daemon riceve "add <canonical>"
-  │    ├─ workspace::add() su workspaces.json
-  │    ├─ spawna watcher
-  │    └─ (opzionale) sync_all iniziale via speedy-ai-context.exe sync
+  │    ├─ daemon receives "add <canonical>"
+  │    ├─ workspace::add() on workspaces.json
+  │    ├─ spawns watcher
+  │    └─ (optional) initial sync_all via speedy-ai-context.exe sync
   │
   └─ DaemonClient::cmd("exec\t<CWD>\tquery\tauth flow")
-       ├─ daemon spawna: speedy-ai-context.exe -p <CWD> query "auth flow"
-       │                 con SPEEDY_NO_DAEMON=1
-       ├─ speedy-ai-context.exe esegue la query sul DB SQLite
-       ├─ stdout torna al daemon
-       └─ daemon lo gira al cli → cli lo stampa
+       ├─ daemon spawns: speedy-ai-context.exe -p <CWD> query "auth flow"
+       │                 with SPEEDY_NO_DAEMON=1
+       ├─ speedy-ai-context.exe runs the query on the SQLite DB
+       ├─ stdout returns to the daemon
+       └─ daemon forwards it to the cli → cli prints it
 ```
 
 ---
 
-## 4. Flusso "file salvato dall'editor"
+## 4. "File saved from the editor" flow
 
 ```
-Utente salva src/lib.rs
+User saves src/lib.rs
   │
-  ├─ notify (nel watcher del workspace) genera evento
+  ├─ notify (in the workspace's watcher) generates an event
   │
-  ├─ daemon: debounce + filtro ignore (.gitignore + .speedyignore)
+  ├─ daemon: debounce + ignore filter (.gitignore + .speedyignore)
   │
-  ├─ daemon calcola hash SHA-256 del file
-  │    ├─ hash uguale al precedente?  → skip
-  │    └─ hash diverso?               → continua
+  ├─ daemon computes the file's SHA-256 hash
+  │    ├─ hash same as before?  → skip
+  │    └─ hash different?       → continue
   │
   ├─ PID-check anti-loop:
-  │    ├─ il file è stato toccato da un PID presente in active_pids?
-  │    └─ (cioè: una nostra scrittura via speedy-ai-context.exe?)  → skip
+  │    ├─ was the file touched by a PID present in active_pids?
+  │    └─ (i.e.: one of our writes via speedy-ai-context.exe?)  → skip
   │
-  └─ daemon spawna: speedy-ai-context.exe -p <ws> index ./src/lib.rs
+  └─ daemon spawns: speedy-ai-context.exe -p <ws> index ./src/lib.rs
        (SPEEDY_NO_DAEMON=1)
        │
-       ├─ inserisce il PID in active_pids
-       ├─ aspetta che il child termini (in task tokio)
-       └─ rimuove il PID da active_pids
+       ├─ inserts the PID into active_pids
+       ├─ waits for the child to finish (in a tokio task)
+       └─ removes the PID from active_pids
 ```
 
 ### Safety: self-write
 
 ```
-speedy-ai-context.exe scrive sul DB (.speedy/index.sqlite)
-  → notify nota le modifiche al file DB
-  → ma le ignore-rules contengono ".speedy/"  → skip
+speedy-ai-context.exe writes to the DB (.speedy/index.sqlite)
+  → notify detects the changes to the DB file
+  → but the ignore-rules contain ".speedy/"  → skip
 
-speedy-ai-context.exe non scrive nei sorgenti dell'utente → nessun loop possibile
+speedy-ai-context.exe does not write to the user's sources → no loop possible
 ```
 
-Il PID-check serve come secondo livello difensivo, in caso un giorno il worker dovesse riscrivere qualche file.
+The PID-check serves as a second defensive layer, in case one day the worker should rewrite some file.
 
 ---
 
-## 5. Flusso "AI Agent via MCP"
+## 5. "AI Agent via MCP" flow
 
-Due server MCP indipendenti, registrabili separatamente nei config degli agent.
+Two independent MCP servers, registrable separately in the agents' configs.
 
 ### 5a. `speedy-ai-context-mcp.exe` — semantic search (ai-context)
 
 ```
-Claude / altro agent
+Claude / other agent
   │  (stdio JSON-RPC)
   ▼
 speedy-ai-context-mcp.exe
-  │  per ogni tool call invoca: SPEEDY_BIN <args>
+  │  for each tool call invokes: SPEEDY_BIN <args>
   │  (default SPEEDY_BIN = speedy-cli.exe)
   ▼
 speedy-cli.exe
@@ -237,30 +258,30 @@ speedy-daemon.exe
   │  exec <args>  → subprocess
   ▼
 speedy-ai-context.exe
-  │  query / index / context / sync su SQLite + Ollama
+  │  query / index / context / sync on SQLite + Ollama
   ▼
-stdout risale fino all'agent come result MCP
+stdout bubbles up to the agent as MCP result
 ```
 
-`SPEEDY_BIN` permette di puntare a `speedy-ai-context.exe` direttamente (bypass daemon) per scenari batch / test.
+`SPEEDY_BIN` allows pointing to `speedy-ai-context.exe` directly (bypassing the daemon) for batch / test scenarios.
 
 ### 5b. `speedy-language-context-mcp.exe` — code intelligence
 
 ```
-Claude / altro agent
+Claude / other agent
   │  (stdio JSON-RPC)
   ▼
 speedy-language-context-mcp.exe
-  │  opera direttamente su GraphStore SQLite
-  │  (nessun daemon, nessun IPC)
+  │  operates directly on GraphStore SQLite
+  │  (no daemon, no IPC)
   ▼
-.speedy/graph.db  (SQLite locale al workspace)
+.speedy/graph.db  (SQLite local to the workspace)
   │  index_status / get_skeleton / run_pipeline / search_observations / save_observation
   ▼
-result MCP risale fino all'agent
+MCP result bubbles up to the agent
 ```
 
-Configurazione esempio (`claude_desktop_config.json`):
+Example configuration (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
@@ -278,230 +299,245 @@ Configurazione esempio (`claude_desktop_config.json`):
 
 ---
 
-## 5b. Flusso "GUI desktop (`speedy-gui.exe`)"
+## 5b. "Desktop GUI (`speedy-gui.exe`)" flow
 
-A differenza di MCP — che è una pipeline `agent → mcp → cli → daemon → speedy-ai-context` — la GUI **salta lo scalino `speedy-cli.exe`** e parla al daemon direttamente con `speedy-core::DaemonClient`.
+> **Update (no-daemon).** The GUI must work **even without a daemon**.
+> For this reason the **operations** (sync, reindex, workspace add/remove) no longer
+> go directly through `DaemonClient`: the GUI spawns **`speedy-cli`**, and it is the cli
+> that decides — daemon-if-alive, otherwise in-process orchestration of the three
+> context workers (`speedy_core::contexts`). The GUI continues to use
+> `DaemonClient` **only** for live monitoring (status, metrics,
+> log-stream), which exists only with the daemon: when the daemon is down the GUI enters
+> "standalone mode" (flag `DaemonState.standalone`), hides the
+> metrics and disables Scan, but remains fully operational.
+
+For live monitoring the GUI talks to the daemon directly with
+`speedy-core::DaemonClient`; for actions it goes through `speedy-cli`
+(`GUI → speedy-cli → (daemon | worker)`).
 
 ```
-Utente lancia speedy-gui.exe
+User launches speedy-gui.exe
   │
-  ├─ main thread: TrayHandle::try_new() (Windows/macOS lo vogliono qui)
+  ├─ main thread: TrayHandle::try_new() (Windows/macOS want it here)
   │   └─ eframe::run_native → SpeedyApp::new
   │        ├─ DaemonBridge::new
-  │        │   ├─ tokio::runtime::Runtime (multi-thread, 2 worker)
-  │        │   └─ Arc<Mutex<DaemonState>>  ← snapshot condivisa
-  │        └─ Carica settings da eframe::Storage (tab, tema, socket)
+  │        │   ├─ tokio::runtime::Runtime (multi-thread, 2 workers)
+  │        │   └─ Arc<Mutex<DaemonState>>  ← shared snapshot
+  │        └─ Loads settings from eframe::Storage (tab, theme, socket)
   │
-  ├─ A ogni frame (≤500ms, ctx.request_repaint_after):
-  │   ├─ App::update clona DaemonState (Vec/HashMap moderati: cheap)
-  │   ├─ Le view (Dashboard / Workspaces / Scan / Logs) leggono dalla snapshot
-  │   └─ Nessun Mutex held durante il disegno
+  ├─ On every frame (≤500ms, ctx.request_repaint_after):
+  │   ├─ App::update clones DaemonState (moderate Vec/HashMap: cheap)
+  │   ├─ The views (Dashboard / Workspaces / Scan / Logs) read from the snapshot
+  │   └─ No Mutex held during drawing
   │
-  └─ Utente clicca "Aggiungi workspace":
+  └─ User clicks "Add workspace":
        │
-       ├─ rfd::FileDialog::pick_folder (file picker nativo)
+       ├─ rfd::FileDialog::pick_folder (native file picker)
        │
        ├─ DaemonBridge::add_workspace(path)
-       │   ├─ inc_busy()  (mostra spinner in topbar)
+       │   ├─ inc_busy()  (shows spinner in topbar)
        │   ├─ runtime.spawn:
        │   │    ├─ DaemonClient::add_workspace(path)  →  IPC "add <canonical>"
-       │   │    └─ scrive il risultato in DaemonState.last_op_result
-       │   └─ ritorna SUBITO (UI non blocca)
+       │   │    └─ writes the result into DaemonState.last_op_result
+       │   └─ returns IMMEDIATELY (UI does not block)
        │
-       └─ Il frame successivo legge la snapshot:
-            ├─ se ok → toast verde + refresh lista workspace
-            └─ se err → toast rosso con il messaggio del daemon
+       └─ The next frame reads the snapshot:
+            ├─ if ok → green toast + refresh workspace list
+            └─ if err → red toast with the daemon's message
 ```
 
-### Log streaming (tab "Logs")
+### Log streaming ("Logs" tab)
 
 ```
 LogStreamHandle::start
   ├─ tokio task: DaemonClient::subscribe_log
-  │    ├─ apre la pipe, manda "subscribe-log\n", legge "ok\n"
-  │    └─ poi legge una LogLine JSON per riga → mpsc::UnboundedSender
+  │    ├─ opens the pipe, sends "subscribe-log\n", reads "ok\n"
+  │    └─ then reads one JSON LogLine per line → mpsc::UnboundedSender
   │
-  ├─ ring buffer cap 5000 nel main thread (drain del receiver in update())
+  ├─ ring buffer cap 5000 in the main thread (drain the receiver in update())
   │
-  └─ Se la pipe muore (daemon riavviato) → riconnessione automatica ogni 2s
+  └─ If the pipe dies (daemon restarted) → automatic reconnection every 2s
 ```
 
-Filtri (livelli, substring, target, workspace) operano sul buffer in memoria, niente nuovo IPC.
+Filters (levels, substring, target, workspace) operate on the in-memory buffer, no new IPC.
 
-### Differenze chiave vs MCP
+### Key differences vs MCP
 
-- **Niente subprocess**: la GUI non spawna `speedy-cli`/`speedy-ai-context.exe`. Tutto passa via `DaemonClient` in-process (più veloce, no overhead di fork per ogni click).
-- **State condiviso**: la GUI vede metriche + status + workspace status aggregati in una `DaemonState`, e li aggiorna in modo asincrono.
-- **Autostart**: gestito a livello OS (cartella Startup su Windows, equivalenti su macOS/Linux). La GUI non scrive nel registro né in LaunchAgents — l'utente posiziona `speedy-daemon.exe` (o un suo shortcut) nella cartella Startup.
-- **Tray + notifiche**: `tray-icon` per quick-actions (Open / Restart / Quit), `notify-rust` per popup di sistema sui livelli `error` del log stream (toggle opt-in).
+- **Operations via `speedy-cli`**: mutating actions spawn `speedy-cli` (which routes daemon-or-standalone). Live monitoring stays in-process via `DaemonClient`.
+- **Shared state**: the GUI sees metrics + status + workspace status aggregated into a `DaemonState`, and updates them asynchronously.
+- **Autostart**: handled at the OS level (Startup folder on Windows, equivalents on macOS/Linux). The GUI does not write to the registry or to LaunchAgents — the user places `speedy-daemon.exe` (or a shortcut to it) in the Startup folder.
+- **Tray + notifications**: `tray-icon` for quick-actions (Open / Restart / Quit), `notify-rust` for system popups on `error` levels of the log stream (opt-in toggle).
 
-### Quando il daemon è giù
+### When the daemon is down
 
-La GUI rileva il fallimento di `ping` e mostra un banner "Avvia daemon"; il click chiama `spawn_daemon_process` (stessa logica di `ensure_daemon` lato cli: cerca `speedy-daemon{EXE_SUFFIX}` accanto al binario GUI, spawn detached, polling `is_alive` con backoff fino a 10s).
+The GUI detects the `ping` failure and shows a "Start daemon" banner; the click calls `spawn_daemon_process` (same logic as `ensure_daemon` on the cli side: looks for `speedy-daemon{EXE_SUFFIX}` next to the GUI binary, spawns detached, polls `is_alive` with backoff up to 10s).
 
 ---
 
-## 6. Flusso "speedy-ai-context.exe standalone, no daemon"
+## 6. "speedy-ai-context.exe standalone, no daemon" flow
 
 ```
 $ speedy-ai-context index .
   │
-  ├─ should_skip_daemon_check()?  → sì
-  │    (subcomandi puntuali tipo index/query/context/sync da CLI diretta,
-  │     o env SPEEDY_NO_DAEMON=1, o flag --no-daemon)
+  ├─ should_skip_daemon_check()?  → yes
+  │    (specific subcommands like index/query/context/sync from the direct CLI,
+  │     or env SPEEDY_NO_DAEMON=1, or flag --no-daemon)
   │
-  └─ esegue tutto in-process
-       ├─ carica Config (env + speedy.toml / .speedy/config.toml)
-       ├─ apre SQLite in .speedy/index.sqlite
-       ├─ EmbeddingProvider (Ollama o agent)
-       ├─ scansione + ignore + chunking + embedding + insert
-       └─ termina
+  └─ runs everything in-process
+       ├─ loads Config (env + speedy.toml / .speedy/config.toml)
+       ├─ opens SQLite in .speedy/index.sqlite
+       ├─ EmbeddingProvider (Ollama or agent)
+       ├─ scan + ignore + chunking + embedding + insert
+       └─ terminates
 ```
 
-`speedy-ai-context.exe` è completamente autosufficiente. Il daemon serve **solo** per:
-1. Monitoring continuo (auto-reindex on save)
-2. Pre-flight check (indice sempre aggiornato prima di una query)
-3. API server per AI / MCP
+`speedy-ai-context.exe` is completely self-sufficient. The daemon is needed **only** for:
+1. Continuous monitoring (auto-reindex on save)
+2. Pre-flight check (index always up to date before a query)
+3. API server for AI / MCP
 
 ---
 
-## 7. Comandi CLI — chi li gestisce
+## 7. CLI commands — who handles them
 
-| Comando                         | `speedy-ai-context.exe`           | `speedy-cli.exe`                   |
+| Command                         | `speedy-ai-context.exe`           | `speedy-cli.exe`                   |
 |---------------------------------|------------------------|------------------------------------|
-| `index [<subdir>]`              | esegue inline          | exec → daemon → `speedy-ai-context.exe index` |
-| `query <q>`                     | esegue inline          | exec → daemon → `speedy-ai-context.exe query` |
-| `context`                       | esegue inline          | exec → daemon → `speedy-ai-context.exe context` |
-| `sync`                          | esegue inline          | exec → daemon → `speedy-ai-context.exe sync`  |
-| `reembed`                       | esegue inline          | exec → daemon → `speedy-ai-context.exe reembed` |
-| `force [-p <path>]`             | n/a (rimosso)          | sync → daemon                      |
-| `daemon status/ping/stop/list`  | n/a                    | risposta diretta dal daemon        |
-| `daemon` (no action)            | avvia il daemon centrale | n/a                              |
-| `workspace list`                | n/a (worker: solo `list`) | `add`/`remove`/`list` su daemon |
+| `index [<subdir>]`              | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context index` |
+| `query <q>`                     | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context query` |
+| `context`                       | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context context` |
+| `sync`                          | runs inline (ai-context only) | daemon alive → `sync` IPC; absent → `contexts::sync_workspace` (**incremental fan-out over the 3**, mtime+hash skip) |
+| `update <files…>`               | n/a                    | always in-process → `contexts::update_files` (**per-file fan-out over the 3**; used by the post-commit hook) |
+| `reembed`                       | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context reembed` |
+| `reindex [-p <path>]`           | n/a                    | daemon alive → `reindex` IPC; absent → `contexts::reindex_workspace` (**full rebuild**, fan-out over the 3) |
+| `force [-p <path>]`             | n/a                    | same incremental fan-out sync, explicit path |
+| `daemon status/ping/stop/list`  | n/a                    | requires daemon alive (error if down) |
+| `daemon` (no action)            | starts the central daemon | n/a                              |
+| `workspace add/remove`          | n/a (worker: only `list`) | daemon alive → IPC; absent → `speedy_core::workspace`; **+ install/remove the git hooks** (best-effort, git repos) |
+| `workspace list`                | n/a (worker: only `list`) | `speedy_core::workspace::list()` in-process |
 
 ---
 
-## 8. File su disco — la "memoria fissa" del daemon
+## 8. Files on disk — the daemon's "fixed memory"
 
 ```
 ~/.config/speedy/                      (Windows: %APPDATA%\speedy)
-├── workspaces.json     ← MEMORIA PERSISTENTE del daemon globale:
-│                         lista di TUTTI i workspace dell'utente
+├── workspaces.json     ← PERSISTENT MEMORY of the global daemon:
+│                         list of ALL the user's workspaces
 │                         [{ "path": "C:/a/proj1", ... },
 │                          { "path": "C:/b/proj2", ... }, ...]
-└── daemon.pid          ← PID del daemon corrente (uno solo)
+└── daemon.pid          ← PID of the current daemon (only one)
 
 <workspace>/
 ├── .speedy/
-│   ├── index.sqlite    ← vector store di QUESTO workspace
-│   └── config.toml     ← opzionale, override config per-workspace
-└── .speedyignore       ← opzionale, formato gitignore
+│   ├── index.sqlite    ← vector store of THIS workspace
+│   └── config.toml     ← optional, per-workspace config override
+└── .speedyignore       ← optional, gitignore format
 ```
 
-- **`workspaces.json` è la memoria del daemon**: globale, condivisa fra
-  tutti i workspace, sopravvive ai riavvii. Il daemon la legge all'avvio,
-  la aggiorna a ogni `add`/`remove`, la usa per ricreare i watcher dopo
-  un boot.
-- **Un solo `workspaces.json`** per utente — non uno per progetto.
-- **`daemon.pid`** serve solo per cleanup di un'istanza morta al boot
-  successivo (il nuovo daemon `taskkill`a il PID stale se esiste).
-- **`.speedy/index.sqlite`** vive invece **dentro** il singolo workspace:
-  ogni progetto ha il suo DB vettoriale locale. Il daemon non centralizza
-  i dati indicizzati — centralizza solo l'orchestrazione.
-  Il DB usa l'estensione **sqlite-vec** (`vec0` virtual table) per l'ANN
-  cosine similarity search; gli embedding non sono più salvati come BLOB
-  in `chunks` ma in una tabella separata `vec_chunks`.
-- **Concorrenza su `workspaces.json`** ancora **non** protetta da file-lock
-  cross-process (TODO). Comunque solo il daemon ci scrive, quindi in
-  pratica il problema si manifesta solo se due daemon partono insieme —
-  e quello è già escluso da `kill_existing_daemon()` + check `is_alive()`.
+- **`workspaces.json` is the daemon's memory**: global, shared across
+  all workspaces, survives restarts. The daemon reads it on startup,
+  updates it on every `add`/`remove`, uses it to recreate the watchers after
+  a boot.
+- **A single `workspaces.json`** per user — not one per project.
+- **`daemon.pid`** is used only for cleanup of a dead instance at the next
+  boot (the new daemon `taskkill`s the stale PID if it exists).
+- **`.speedy/index.sqlite`** instead lives **inside** the individual workspace:
+  each project has its own local vector DB. The daemon does not centralize
+  the indexed data — it only centralizes the orchestration.
+  The DB uses the **sqlite-vec** extension (`vec0` virtual table) for ANN
+  cosine similarity search; embeddings are no longer stored as BLOBs
+  in `chunks` but in a separate table `vec_chunks`.
+- **Concurrency on `workspaces.json`** is still **not** protected by a cross-process
+  file-lock (TODO). In any case only the daemon writes to it, so in
+  practice the problem only manifests if two daemons start together —
+  and that is already excluded by `kill_existing_daemon()` + `is_alive()` check.
 
 ---
 
-## 9. Invarianti che il sistema deve rispettare
+## 9. Invariants the system must respect
 
-1. **Mai due daemon vivi contemporaneamente.** `kill_existing_daemon()` viene chiamato sia dal cli (prima di spawnare) sia dal daemon stesso all'avvio. Se la pipe esiste già con un listener vivo che risponde `pong`, lo spawn viene saltato.
-2. **`speedy-ai-context.exe` spawnato dal daemon ha sempre `SPEEDY_NO_DAEMON=1`** → niente ricorsione.
-3. **Watcher e indexer non scrivono nei sorgenti dell'utente.** Solo in `.speedy/`, che è ignorato dal watcher tramite ignore-rules.
-4. **`add` è idempotente.** Aggiungere lo stesso workspace due volte non crea due watcher.
-5. **`remove` di un workspace inesistente non è un errore fatale**, risponde `ok` (o `error: ...` ma il cli lo tratta come no-op).
-6. **Sul boot, le entry in `workspaces.json` con path inesistente vengono purgate** prima di avviare i watcher.
-7. **`is_alive()` non si fida del solo connect** → manda `ping` e si aspetta `pong`. Un named pipe half-open non viene scambiato per un daemon vivo.
-8. **Port-fallback non c'è più**: con local socket non serve, il nome è risolvibile univocamente per utente/sessione. (Il vecchio fallback TCP 42137→42138 è obsoleto.)
-
----
-
-## 10. Cosa cambia rispetto a DAEMON-GUARD.md / ARCHITETTURA.md (storico)
-
-- **Trasporto**: TCP `127.0.0.1:42137` → **local socket** (`interprocess`). I documenti vecchi parlano di TCP; il codice attuale (`daemon_client.rs`, `local_sock.rs`) usa local socket. L'API è la stessa, cambia solo il connettore.
-- **Niente firewall prompt su Windows** (era il problema di `docs/windows-firewall-tcp.md`, ora rimosso).
-- **Niente port fallback** per la stessa ragione.
+1. **Never two daemons alive simultaneously.** `kill_existing_daemon()` is called both by the cli (before spawning) and by the daemon itself on startup. If the pipe already exists with a live listener that replies `pong`, the spawn is skipped.
+2. **`speedy-ai-context.exe` spawned by the daemon always has `SPEEDY_NO_DAEMON=1`** → no recursion.
+3. **Watcher and indexer do not write to the user's sources.** Only in `.speedy/`, which is ignored by the watcher via ignore-rules.
+4. **`add` is idempotent.** Adding the same workspace twice does not create two watchers.
+5. **`remove` of a non-existent workspace is not a fatal error**, it replies `ok` (or `error: ...` but the cli treats it as a no-op).
+6. **On boot, entries in `workspaces.json` with a non-existent path are purged** before starting the watchers.
+7. **`is_alive()` does not trust connect alone** → it sends `ping` and expects `pong`. A half-open named pipe is not mistaken for a live daemon.
+8. **There is no more port-fallback**: with the local socket it's not needed, the name is uniquely resolvable per user/session. (The old TCP fallback 42137→42138 is obsolete.)
 
 ---
 
-## 11. Punti dove potrei aver capito male — da verificare
+## 10. What changes relative to DAEMON-GUARD.md / ARCHITETTURA.md (historical)
 
-- **PID-tracking lato watcher**: il PID-set serve per `taskkill` allo shutdown (`packages/speedy-daemon/src/main.rs`, campo `CentralDaemon.active_pids`). **Decisione 2026-05-14**: si mantiene come *defense-in-depth*. La protezione principale contro self-write resta l'ignore di `.speedy/`, ma `active_pids` permette uno shutdown deterministico (zero indexer orfani) anche se domani il worker dovesse iniziare a scrivere file di stato fuori da `.speedy/`. Il costo è minimo (un `HashSet<u32>` per processo).
-- **Sync iniziale su `add` — risolto 2026-05-15**: `handle_add` ora fa fire-and-forget di `handle_sync` solo per i workspace nuovi (esistenti già su disco ma non ancora gestiti). L'awaiter del client torna `ok` subito, lo spawn di `speedy-ai-context.exe sync` corre in background con `SPEEDY_NO_DAEMON=1`. Override per test: `SPEEDY_SKIP_INITIAL_SYNC=1`.
-
----
-
-## 12. Auto-reload e periodic prune (aggiunti 2026-05-15)
-
-Il daemon mantiene la coerenza con la fonte di verità (`workspaces.json`) in due modi indipendenti:
-
-1. **File watcher su `workspaces.json`**: `spawn_workspaces_json_watcher` osserva la `daemon_dir` con `notify_debouncer_mini` (debounce 1s). Qualsiasi modifica al file (anche da tool esterni che non passano dal daemon) triggera `reload_from_disk`, che riconcilia in-memory ↔ disk. Quando è il daemon stesso a scrivere `workspaces.json`, l'evento di notify lo fa rientrare nel reload — ma `reload_from_disk` è no-op se gli `HashSet<String>` di disk-paths e in-memory-paths sono uguali.
-2. **Tick periodico (`PRUNE_EVERY_N_TICKS = 10`, ≈5 min)**: `prune_and_reconcile` rimuove i watcher i cui path non esistono più su disco e poi chiama `workspace::prune_missing` per allineare anche il file di registro. Cattura il caso "ho cancellato la cartella mentre il daemon era attivo".
+- **Transport**: TCP `127.0.0.1:42137` → **local socket** (`interprocess`). The old documents talk about TCP; the current code (`daemon_client.rs`, `local_sock.rs`) uses a local socket. The API is the same, only the connector changes.
+- **No firewall prompt on Windows** (that was the issue in `docs/windows-firewall-tcp.md`, now removed).
+- **No port fallback** for the same reason.
 
 ---
 
-## 13. Query cross-workspace (aggiunto 2026-05-15, protocol v2)
+## 11. Points where I might have misunderstood — to verify
 
-Comando IPC `query-all\t<top_k>\t<query>` → ritorna JSON-array di hit aggregati. Il daemon fa fan-out parallelo (`tokio::spawn` per ogni workspace registrato) eseguendo `speedy-ai-context.exe -p <ws> query <q> -k <K> --json` con `SPEEDY_NO_DAEMON=1`, deserializza ciascuna risposta in `Vec<serde_json::Value>`, aggiunge il campo `workspace` a ogni hit, fonde tutto, ordina per score discendente e taglia a top_k.
-
-CLI utente: `speedy-cli query --all <q>` (oppure direttamente via `DaemonClient::query_all`).
-
-Note operative:
-- Il fan-out non condivide il file lock di `workspaces.json` (per-workspace `vectors.db` sono indipendenti).
-- Se un workspace fallisce (Ollama giù, DB corrotto), restituisce array vuoto e gli altri proseguono.
-- `protocol_version` salito a 2; client più vecchi che vanno via `cmd("query-all …")` ricevono `error: unknown command`.
+- **PID-tracking on the watcher side**: the PID-set is used for `taskkill` at shutdown (`packages/speedy-daemon/src/main.rs`, field `CentralDaemon.active_pids`). **Decision 2026-05-14**: it is kept as *defense-in-depth*. The main protection against self-write remains the ignore of `.speedy/`, but `active_pids` allows a deterministic shutdown (zero orphan indexers) even if tomorrow the worker should start writing state files outside `.speedy/`. The cost is minimal (one `HashSet<u32>` per process).
+- **Initial sync on `add` — solved 2026-05-15**: `handle_add` now fire-and-forgets `handle_sync` only for new workspaces (already existing on disk but not yet managed). The client's awaiter returns `ok` immediately, the spawn of `speedy-ai-context.exe sync` runs in the background with `SPEEDY_NO_DAEMON=1`. Override for tests: `SPEEDY_SKIP_INITIAL_SYNC=1`.
 
 ---
 
-## 14. `prune-missing` esplicito (aggiunto 2026-05-15)
+## 12. Auto-reload and periodic prune (added 2026-05-15)
 
-Oltre al prune periodico di §12, esiste ora un comando IPC esplicito
-`prune-missing` (one-shot) che fa la stessa pulizia *su richiesta*:
+The daemon maintains consistency with the source of truth (`workspaces.json`) in two independent ways:
 
-- Lato daemon: ferma i watcher per i path non più esistenti, chiama
-  `workspace::prune_missing` e ritorna `{"removed": N, "paths": [...]}`.
-- Lato client: `DaemonClient::prune_missing() -> Result<Vec<String>>`.
-- UI: pulsante "🧹 Pulisci orfani" nella tab Workspaces della GUI.
-  Si differenzia dal `Remove` per-riga perché non richiede di sapere il
-  path: pulisce tutto ciò che non esiste più senza confermare uno per uno.
-
-`protocol_version` resta 2 — è un comando nuovo, non un'incompatibilità.
+1. **File watcher on `workspaces.json`**: `spawn_workspaces_json_watcher` watches the `daemon_dir` with `notify_debouncer_mini` (1s debounce). Any modification to the file (even from external tools that don't go through the daemon) triggers `reload_from_disk`, which reconciles in-memory ↔ disk. When it is the daemon itself that writes `workspaces.json`, the notify event makes it re-enter the reload — but `reload_from_disk` is a no-op if the `HashSet<String>` of disk-paths and in-memory-paths are equal.
+2. **Periodic tick (`PRUNE_EVERY_N_TICKS = 10`, ≈5 min)**: `prune_and_reconcile` removes the watchers whose paths no longer exist on disk and then calls `workspace::prune_missing` to also align the registry file. It catches the case "I deleted the folder while the daemon was active".
 
 ---
 
-## 15. GUI: daemon-exe override (aggiunto 2026-05-15)
+## 13. Cross-workspace query (added 2026-05-15, protocol v2)
 
-`spawn_daemon_process` nel `speedy-core` ora ha una variante
-`spawn_daemon_process_with(exe, socket)` che accetta un path esplicito.
-Esposto in `daemon_util::resolve_daemon_exe()` per UI/diagnostica.
+IPC command `query-all\t<top_k>\t<query>` → returns a JSON-array of aggregated hits. The daemon fans out in parallel (`tokio::spawn` for each registered workspace) running `speedy-ai-context.exe -p <ws> query <q> -k <K> --json` with `SPEEDY_NO_DAEMON=1`, deserializes each response into `Vec<serde_json::Value>`, adds the `workspace` field to each hit, merges everything, sorts by descending score and cuts at top_k.
 
-Nella GUI, la Dashboard mostra:
+User CLI: `speedy-cli query --all <q>` (or directly via `DaemonClient::query_all`).
 
-- Path risolto correntemente (override custom o auto-detect).
-- Campo testuale + `Sfoglia…` / `Applica` / `Ripristina automatico`.
-- "Apri cartella" per saltare al folder che contiene il binario.
+Operational notes:
+- The fan-out does not share the `workspaces.json` file lock (per-workspace `vectors.db` are independent).
+- If a workspace fails (Ollama down, corrupted DB), it returns an empty array and the others proceed.
+- `protocol_version` raised to 2; older clients that go via `cmd("query-all …")` receive `error: unknown command`.
 
-L'override è persistito in `eframe::Storage` (campo `daemon_exe_path`).
-Quando settato, `bridge.spawn_daemon()` lo usa al posto dell'auto-detect.
-Caso d'uso principale: GUI installata in una cartella separata dal daemon
-(es. `~/.local/bin/` per GUI e `~/.local/libexec/` per il daemon).
+---
 
-Autostart al login: **rimosso dalla GUI** (commit `c642282`). La GUI non
-scrive più nel registro Windows / LaunchAgents / `.desktop`. Per
-avviare il daemon all'accesso utente, vedi README — la mossa
-consigliata su Windows resta uno shortcut in `shell:startup`.
+## 14. Explicit `prune-missing` (added 2026-05-15)
+
+In addition to the periodic prune of §12, there is now an explicit IPC command
+`prune-missing` (one-shot) that does the same cleanup *on demand*:
+
+- Daemon side: stops the watchers for paths that no longer exist, calls
+  `workspace::prune_missing` and returns `{"removed": N, "paths": [...]}`.
+- Client side: `DaemonClient::prune_missing() -> Result<Vec<String>>`.
+- UI: "🧹 Clean orphans" button in the GUI's Workspaces tab.
+  It differs from the per-row `Remove` because it doesn't require knowing the
+  path: it cleans up everything that no longer exists without confirming one by one.
+
+`protocol_version` remains 2 — it's a new command, not an incompatibility.
+
+---
+
+## 15. GUI: daemon-exe override (added 2026-05-15)
+
+`spawn_daemon_process` in `speedy-core` now has a variant
+`spawn_daemon_process_with(exe, socket)` that accepts an explicit path.
+Exposed in `daemon_util::resolve_daemon_exe()` for UI/diagnostics.
+
+In the GUI, the Dashboard shows:
+
+- Currently resolved path (custom override or auto-detect).
+- Text field + `Browse…` / `Apply` / `Restore automatic`.
+- "Open folder" to jump to the folder containing the binary.
+
+The override is persisted in `eframe::Storage` (field `daemon_exe_path`).
+When set, `bridge.spawn_daemon()` uses it instead of auto-detect.
+Main use case: GUI installed in a folder separate from the daemon
+(e.g. `~/.local/bin/` for the GUI and `~/.local/libexec/` for the daemon).
+
+Autostart at login: **removed from the GUI** (commit `c642282`). The GUI no
+longer writes to the Windows registry / LaunchAgents / `.desktop`. To
+start the daemon at user login, see README — the recommended
+move on Windows remains a shortcut in `shell:startup`.

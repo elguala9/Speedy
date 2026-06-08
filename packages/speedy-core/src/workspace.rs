@@ -126,81 +126,90 @@ mod tests {
 
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn backup_and_clear() -> Option<Vec<WorkspaceEntry>> {
-        let current = list().ok();
-        let path = workspaces_path().unwrap();
-        let _ = std::fs::remove_file(&path);
-        current
+    /// Redirects the workspace registry to a fresh temp dir (via
+    /// `SPEEDY_DAEMON_DIR`) for the lifetime of a test, and serializes tests.
+    /// The registry path comes from a process-global env var, so without this
+    /// concurrent tests would clobber each other — and, worse, the user's real
+    /// `%APPDATA%\speedy\workspaces.json`. Cleaned up on drop. Holding the lock
+    /// guard (and recovering from poisoning) also prevents one panicking test
+    /// from cascading failures into the rest.
+    struct TestRegistry {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        dir: PathBuf,
+        prev: Option<std::ffi::OsString>,
     }
 
-    fn restore(backup: Option<Vec<WorkspaceEntry>>) {
-        let path = workspaces_path().unwrap();
-        if let Some(ws) = backup {
-            save_unlocked(&ws).unwrap();
-        } else {
-            let _ = std::fs::remove_file(&path);
+    impl TestRegistry {
+        fn new() -> Self {
+            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir()
+                .join(format!("speedy_ws_test_{}_{n}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let prev = std::env::var_os("SPEEDY_DAEMON_DIR");
+            std::env::set_var("SPEEDY_DAEMON_DIR", &dir);
+            Self { _lock: lock, dir, prev }
+        }
+    }
+
+    impl Drop for TestRegistry {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("SPEEDY_DAEMON_DIR", v),
+                None => std::env::remove_var("SPEEDY_DAEMON_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
     #[test]
     fn test_list_empty_when_no_file() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
         let ws = list().unwrap();
         assert!(ws.is_empty());
-        restore(backup);
     }
 
     #[test]
     fn test_add_and_list() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
         add("C:\\test-path").unwrap();
         let ws = list().unwrap();
         assert_eq!(ws.len(), 1);
         assert!(!ws[0].created_at.is_empty());
-        restore(backup);
     }
 
     #[test]
     fn test_add_duplicate_errors() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
         add("C:\\dup-path").unwrap();
         let err = add("C:\\dup-path").unwrap_err();
         assert!(err.to_string().contains("already exists"));
-        restore(backup);
     }
 
     #[test]
     fn test_remove() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
         add("C:\\rem-path").unwrap();
         remove("C:\\rem-path").unwrap();
         let ws = list().unwrap();
         assert!(ws.is_empty());
-        restore(backup);
     }
 
     #[test]
     fn test_remove_nonexistent_errors() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
         let err = remove("C:\\nope").unwrap_err();
         assert!(err.to_string().contains("not found"));
-        restore(backup);
     }
 
     #[test]
     fn test_is_registered() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
         assert!(!is_registered("C:\\reg-path"));
         add("C:\\reg-path").unwrap();
         assert!(is_registered("C:\\reg-path"));
         assert!(!is_registered("C:\\other-path"));
-        restore(backup);
     }
 
     /// Spawn N OS threads that each `add` a distinct path concurrently. The
@@ -209,8 +218,7 @@ mod tests {
     /// entries with no corruption / missing writes.
     #[test]
     fn test_concurrent_add_no_corruption() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
 
         const N: usize = 8;
         let mut handles = Vec::with_capacity(N);
@@ -230,19 +238,15 @@ mod tests {
         paths.sort();
         paths.dedup();
         assert_eq!(paths.len(), N, "duplicates appeared after concurrent add");
-
-        restore(backup);
     }
 
     #[test]
     fn test_add_multiple() {
-        let _lock = LOCK.lock().unwrap();
-        let backup = backup_and_clear();
+        let _reg = TestRegistry::new();
         add("C:\\a").unwrap();
         add("C:\\b").unwrap();
         add("C:\\c").unwrap();
         let ws = list().unwrap();
         assert_eq!(ws.len(), 3);
-        restore(backup);
     }
 }
