@@ -8,7 +8,9 @@ pub fn find_root(start: &Path) -> PathBuf {
 
 pub fn db_path(root: &Path) -> PathBuf {
     // Shares the per-workspace `.speedy/` dir with the other contexts.
-    root.join(".speedy").join("index.db")
+    // `speedy_subdir` is idempotent, so a `root` that already points at a
+    // `.speedy/` dir does not produce a nested `.speedy/.speedy/`.
+    speedy_core::daemon_util::speedy_subdir(root).join("index.db")
 }
 
 pub fn extensions_path(root: &Path) -> PathBuf {
