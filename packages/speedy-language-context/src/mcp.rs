@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -23,10 +23,21 @@ const SERVER_NAME: &str = "speedy-language-context";
 const SERVER_VERSION: &str = "0.1.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
+/// Open the per-workspace stores. This is what creates the `.speedy/` data dir
+/// and the SQLite file on disk, so it is called lazily on the first
+/// `tools/call` — never just because an editor connected to the server.
+fn open_stores(workspace_root: &Path) -> Result<(Arc<GraphStore>, Arc<Memory>, Arc<Indexer>)> {
+    let store = Arc::new(GraphStore::open(workspace_root)?);
+    let memory = Arc::new(Memory::open(workspace_root)?);
+    let indexer = Arc::new(Indexer::new(workspace_root)?);
+    Ok((store, memory, indexer))
+}
+
 pub async fn run_server(workspace_root: PathBuf) -> Result<()> {
-    let store = Arc::new(GraphStore::open(&workspace_root)?);
-    let memory = Arc::new(Memory::open(&workspace_root)?);
-    let indexer = Arc::new(Indexer::new(&workspace_root)?);
+    // Stores are opened lazily on the first `tools/call`. Merely launching the
+    // server (e.g. when an editor connects) must not touch the filesystem;
+    // `initialize` and `tools/list` need no database.
+    let mut stores: Option<(Arc<GraphStore>, Arc<Memory>, Arc<Indexer>)> = None;
 
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin).lines();
@@ -59,8 +70,30 @@ pub async fn run_server(workspace_root: PathBuf) -> Result<()> {
             "initialize" => handle_initialize(id.clone()),
             "tools/list" => handle_tools_list(id.clone()),
             "tools/call" => {
-                handle_tools_call(id.clone(), params, &store, &memory, &indexer, &workspace_root)
-                    .await
+                if stores.is_none() {
+                    match open_stores(&workspace_root) {
+                        Ok(s) => stores = Some(s),
+                        Err(e) => tracing::error!("failed to open stores: {e}"),
+                    }
+                }
+                match stores.as_ref() {
+                    Some((store, memory, indexer)) => {
+                        handle_tools_call(
+                            id.clone(),
+                            params,
+                            store,
+                            memory,
+                            indexer,
+                            &workspace_root,
+                        )
+                        .await
+                    }
+                    None => error_response(
+                        id.clone(),
+                        -32603,
+                        "failed to open workspace stores",
+                    ),
+                }
             }
             _ => error_response(id.clone(), -32601, &format!("method not found: {method}")),
         };
