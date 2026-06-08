@@ -19,10 +19,14 @@ Binary is distributed with the Speedy release bundle. Place `speedy-language-con
 ## CLI usage
 
 ```
-# Index the workspace (run once, then the daemon keeps it fresh)
+# Full (re)index of the workspace — clears the hash registry and re-parses every file
 speedy-language-context --path /path/to/workspace index
 
-# Incremental update after a git hook or manual change
+# Incremental sync — re-parses only files whose content hash changed and prunes
+# deleted ones (near-instant on an unchanged tree); used by the git hooks
+speedy-language-context --path /path/to/workspace sync
+
+# Incremental update of specific files after a git hook or manual change
 speedy-language-context --path /path/to/workspace update src/main.rs src/lib.rs
 
 # Print counts and last indexed timestamp

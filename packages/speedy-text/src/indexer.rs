@@ -8,7 +8,8 @@ use crate::{config, db, tokenize, walk};
 
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 
-pub fn index(conn: &mut Connection, root: &Path) -> Result<()> {
+/// Full re-index. Returns `(indexed, total)` — files written vs. files walked.
+pub fn index(conn: &mut Connection, root: &Path) -> Result<(usize, usize)> {
     let allowed_exts = config::load_or_create_extensions(root)?;
 
     // Clear the shared hash registry so every file is treated as new.
@@ -78,10 +79,11 @@ pub fn index(conn: &mut Connection, root: &Path) -> Result<()> {
 
     db::set_meta(conn, "last_index_at", &now_secs_str())?;
     eprintln!("[speedy-text] index done. {}/{} files indexed", indexed, total);
-    Ok(())
+    Ok((indexed, total))
 }
 
-pub fn sync(conn: &mut Connection, root: &Path) -> Result<()> {
+/// Incremental sync. Returns `(updated, removed)`.
+pub fn sync(conn: &mut Connection, root: &Path) -> Result<(usize, usize)> {
     let allowed_exts = config::load_or_create_extensions(root)?;
     let files = walk::walk(root, &allowed_exts)?;
     let total = files.len();
@@ -174,7 +176,7 @@ pub fn sync(conn: &mut Connection, root: &Path) -> Result<()> {
         "[speedy-text] sync done. {} updated, {} removed",
         processed, removed
     );
-    Ok(())
+    Ok((processed, removed))
 }
 
 /// Incrementally (re)index a single file. Used by the daemon file watcher so a

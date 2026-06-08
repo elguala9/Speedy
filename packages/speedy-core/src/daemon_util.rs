@@ -19,34 +19,37 @@ pub fn exe_log_dir() -> PathBuf {
     logs
 }
 
-/// Returns `<exe_dir>/workspaces/<16-hex>/` for a workspace path.
-/// On first call for a workspace, writes `workspace.txt` with the canonical path.
-/// `SPEEDY_WORKSPACE_DATA_ROOT` overrides the base directory (for tests).
+/// Returns the per-workspace data directory `<workspace>/.speedy/`, creating it
+/// if necessary. Every workspace-scoped SQLite database lives here so the index
+/// travels with the project rather than sitting in a hashed folder next to the
+/// executable:
+///   - `sac.sqlite`    — speedy-ai-context vector index
+///   - `slc.sqlite`    — speedy-language-context graph
+///   - `hashes.sqlite` — shared content-hash registry
+///   - `index.db`      — speedy-text-context symbol index
+///
+/// `.speedy/` is in the default ignore list (`default_ignores.txt`) and the
+/// daemon watcher skips it, so these DBs are never themselves indexed/watched.
 pub fn workspace_data_dir(workspace: &Path) -> PathBuf {
-    use sha2::{Sha256, Digest};
-
-    let canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let hash = hasher.finalize();
-    let hex: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
-
-    let base = if let Ok(root) = std::env::var("SPEEDY_WORKSPACE_DATA_ROOT") {
-        PathBuf::from(root)
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-    };
-
-    let dir = base.join("workspaces").join(&hex);
-    if !dir.exists() {
-        if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = std::fs::write(dir.join("workspace.txt"), canonical.to_string_lossy().as_bytes());
-        }
-    }
+    let dir = speedy_subdir(workspace);
+    let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// The `<workspace>/.speedy` path *without* creating it on disk.
+///
+/// Idempotent: if `workspace` already points at a `.speedy` directory it is
+/// returned unchanged, so a caller that accidentally hands us the data dir
+/// (e.g. a command run from inside `.speedy/`, or a workspace mistakenly
+/// registered as its own `.speedy` folder) never produces a nested
+/// `.speedy/.speedy`. `.speedy` is never a valid workspace root, so collapsing
+/// the duplicate is always the intended behaviour.
+pub fn speedy_subdir(workspace: &Path) -> PathBuf {
+    if workspace.file_name().and_then(|n| n.to_str()) == Some(".speedy") {
+        workspace.to_path_buf()
+    } else {
+        workspace.join(".speedy")
+    }
 }
 
 pub fn daemon_dir_path() -> Result<PathBuf> {
@@ -279,6 +282,36 @@ mod tests {
             Some(v) => std::env::set_var("SPEEDY_DAEMON_DIR", v),
             None => std::env::remove_var("SPEEDY_DAEMON_DIR"),
         }
+    }
+
+    #[test]
+    fn test_speedy_subdir_appends_once() {
+        let ws = Path::new("/home/me/project");
+        assert_eq!(speedy_subdir(ws), Path::new("/home/me/project/.speedy"));
+    }
+
+    #[test]
+    fn test_speedy_subdir_is_idempotent_on_data_dir() {
+        // Handing the resolver the data dir itself must NOT nest a second
+        // `.speedy` — this is the regression guard for the `.speedy/.speedy` bug.
+        let data = Path::new("/home/me/project/.speedy");
+        assert_eq!(speedy_subdir(data), data);
+    }
+
+    #[test]
+    fn test_workspace_data_dir_idempotent() {
+        let base = std::env::temp_dir().join("speedy_du_idem");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let first = workspace_data_dir(&base);
+        assert!(first.ends_with(".speedy"));
+        // Passing the data dir back in must resolve to the same dir, not nest.
+        let second = workspace_data_dir(&first);
+        assert_eq!(first, second);
+        assert!(!second.join(".speedy").exists(), "must not create .speedy/.speedy");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

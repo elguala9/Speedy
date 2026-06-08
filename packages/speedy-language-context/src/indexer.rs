@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use speedy_core::hash_registry::HashRegistry;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,6 +39,20 @@ impl Indexer {
         let root = self.root.clone();
         let store = self.store.clone();
         let stats = tokio::task::spawn_blocking(move || full_index_blocking(&root, &store))
+            .await
+            .context("blocking task panicked")??;
+        Ok(stats)
+    }
+
+    /// Incremental full-tree sync: walks the workspace but, unlike
+    /// [`full_index`](Self::full_index), does **not** wipe the hash registry, so
+    /// `index_one_file` skips every file whose content is unchanged. Files that
+    /// disappeared from disk are pruned from the graph. This is what the `sync`
+    /// command (and the GUI "Sync" button) runs — re-parsing only what changed.
+    pub async fn sync(&self) -> Result<IndexStats> {
+        let root = self.root.clone();
+        let store = self.store.clone();
+        let stats = tokio::task::spawn_blocking(move || sync_blocking(&root, &store))
             .await
             .context("blocking task panicked")??;
         Ok(stats)
@@ -85,10 +100,13 @@ impl Indexer {
 }
 
 fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
-    // Wipe the shared hash registry for this context so every file is treated
-    // as new on a full re-index.
-    if let Ok(registry) = HashRegistry::open(root) {
-        let _ = registry.delete_context("language-context");
+    // Open the shared hash registry once for the whole run (re-opening it per
+    // file means a fresh SQLite connection + WAL pragma + DDL each time, which
+    // dominates the cost on large trees). Wipe this context's rows so every
+    // file is treated as new on a full re-index.
+    let registry = HashRegistry::open(root).ok();
+    if let Some(reg) = &registry {
+        let _ = reg.delete_context("language-context");
     }
     let started = Instant::now();
     let mut files_indexed = 0usize;
@@ -122,7 +140,7 @@ fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
             files_skipped += 1;
             continue;
         }
-        match index_one_file(root, store, path) {
+        match index_one_file(root, store, path, registry.as_ref()) {
             Ok(n) => {
                 if n == usize::MAX {
                     files_skipped += 1;
@@ -178,7 +196,100 @@ fn full_index_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
     })
 }
 
+fn sync_blocking(root: &Path, store: &GraphStore) -> Result<IndexStats> {
+    // NOTE: deliberately does NOT wipe the hash registry — that is what makes
+    // this incremental. `index_one_file` consults the registry and returns
+    // early for files whose content hash is unchanged. Opened once for the whole
+    // run so the unchanged-file fast path is a single SELECT, not a fresh
+    // connection + WAL pragma + DDL per file.
+    let registry = HashRegistry::open(root).ok();
+    let started = Instant::now();
+    let mut files_indexed = 0usize;
+    let mut files_skipped = 0usize;
+    let mut symbols_found = 0usize;
+
+    let walker = WalkBuilder::new(root)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .add_custom_ignore_filename(".speedyignore")
+        .follow_links(false)
+        .build();
+
+    // Track which files still exist on disk so we can prune the rest.
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for entry in walker.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let path = entry.path();
+        if Indexer::should_skip(path) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        seen.insert(rel);
+
+        match index_one_file(root, store, path, registry.as_ref()) {
+            Ok(n) => {
+                if n == usize::MAX {
+                    files_skipped += 1;
+                } else {
+                    files_indexed += 1;
+                    symbols_found += n;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to index {}: {}", path.display(), e);
+                files_skipped += 1;
+            }
+        }
+    }
+
+    // Prune files that were removed from disk since the last index.
+    let mut files_removed = 0usize;
+    for stored in store.all_file_paths().unwrap_or_default() {
+        if !seen.contains(&stored) {
+            if let Err(e) = store.delete_file(&stored) {
+                tracing::warn!("failed to prune deleted file {}: {}", stored, e);
+            } else {
+                files_removed += 1;
+            }
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let _ = store.set_meta("last_indexed_at", &now);
+    let _ = store.set_meta("last_files_indexed", &files_indexed.to_string());
+    let _ = store.set_meta("last_symbols_found", &symbols_found.to_string());
+    let _ = store.set_meta("last_index_duration_ms", &duration_ms.to_string());
+
+    tracing::info!(
+        target: "language-context",
+        root = %root.display(),
+        files_indexed,
+        files_skipped,
+        files_removed,
+        symbols = symbols_found,
+        duration_ms,
+        "sync complete"
+    );
+
+    Ok(IndexStats {
+        files_indexed,
+        files_skipped,
+        symbols_found,
+        duration_ms,
+    })
+}
+
 fn index_files_blocking(root: &Path, store: &GraphStore, files: &[PathBuf]) -> Result<IndexStats> {
+    let registry = HashRegistry::open(root).ok();
     let started = Instant::now();
     let mut files_indexed = 0usize;
     let mut files_skipped = 0usize;
@@ -188,7 +299,7 @@ fn index_files_blocking(root: &Path, store: &GraphStore, files: &[PathBuf]) -> R
             files_skipped += 1;
             continue;
         }
-        match index_one_file(root, store, f) {
+        match index_one_file(root, store, f, registry.as_ref()) {
             Ok(n) => {
                 if n == usize::MAX {
                     files_skipped += 1;
@@ -220,12 +331,17 @@ fn index_files_blocking(root: &Path, store: &GraphStore, files: &[PathBuf]) -> R
 
 /// Returns the number of symbols indexed, or `usize::MAX` if the file was
 /// unchanged and therefore skipped.
-fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize> {
+fn index_one_file(
+    root: &Path,
+    store: &GraphStore,
+    path: &Path,
+    registry: Option<&HashRegistry>,
+) -> Result<usize> {
     let t_total = Instant::now();
 
-    // Fast mtime + hash check via shared registry (adds mtime fast-path that
-    // was missing before; also standardizes to SHA256 instead of blake3).
-    if let Ok(registry) = HashRegistry::open(root) {
+    // Fast mtime + hash check via the shared registry (opened once by the
+    // caller). mtime fast-path standardizes to SHA256 instead of blake3.
+    if let Some(registry) = registry {
         match registry.needs_reindex(path, "language-context") {
             Ok(false) => return Ok(usize::MAX),
             Ok(true) => {}
@@ -289,8 +405,8 @@ fn index_one_file(root: &Path, store: &GraphStore, path: &Path) -> Result<usize>
     }
     let edges_db_ms = t_edges_db.elapsed().as_millis() as u64;
 
-    // Update shared hash registry so the daemon can skip future spawns.
-    if let Ok(registry) = HashRegistry::open(root) {
+    // Update shared hash registry so future syncs can skip this file.
+    if let Some(registry) = registry {
         let mtime_u64 = mtime.max(0) as u64;
         let _ = registry.set_indexed(path, "language-context", &hash, mtime_u64);
     }
@@ -438,5 +554,43 @@ mod tests {
         assert_eq!(stats.files_indexed, 0);
         assert_eq!(stats.files_skipped, 0);
         assert_eq!(stats.symbols_found, 0);
+    }
+
+    // ── incremental sync ──────────────────────────────────────────────────────
+
+    /// `sync_blocking` must (a) re-index changed files only — skipping unchanged
+    /// ones via the hash registry — and (b) prune files deleted from disk. This
+    /// is the regression test for "sync re-parses everything / takes longer than
+    /// index": a no-op sync must index zero files.
+    #[test]
+    fn test_sync_blocking_skips_unchanged_and_prunes_deleted() {
+        let dir = tempdir().unwrap();
+        let store = GraphStore::open(dir.path()).unwrap();
+
+        let a = dir.path().join("a.rs");
+        let b = dir.path().join("b.rs");
+        std::fs::write(&a, b"pub fn alpha() {}\n").unwrap();
+        std::fs::write(&b, b"pub fn beta() {}\n").unwrap();
+
+        // First sync indexes both files.
+        let s1 = sync_blocking(dir.path(), &store).unwrap();
+        assert_eq!(s1.files_indexed, 2, "first sync indexes both files");
+        assert_eq!(store.file_count().unwrap(), 2);
+
+        // Second sync, nothing changed → everything skipped via the hash registry.
+        let s2 = sync_blocking(dir.path(), &store).unwrap();
+        assert_eq!(s2.files_indexed, 0, "unchanged files must be skipped");
+        assert_eq!(s2.files_skipped, 2, "both unchanged files counted as skipped");
+
+        // Delete b.rs and add a brand-new c.rs → sync indexes only the new file
+        // (a.rs unchanged → skipped) and prunes the deleted b.rs.
+        std::fs::remove_file(&b).unwrap();
+        let c = dir.path().join("c.rs");
+        std::fs::write(&c, b"pub fn gamma() {}\n").unwrap();
+        let s3 = sync_blocking(dir.path(), &store).unwrap();
+        assert_eq!(s3.files_indexed, 1, "only the new file is indexed");
+        assert_eq!(store.file_count().unwrap(), 2, "a.rs + c.rs remain; b.rs pruned");
+        assert!(store.get_file_hash("b.rs").unwrap().is_none(), "deleted b.rs row must be gone");
+        assert!(store.get_file_hash("c.rs").unwrap().is_some(), "new c.rs must be recorded");
     }
 }

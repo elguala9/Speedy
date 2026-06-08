@@ -5,7 +5,7 @@ use speedy_core::workspace;
 use speedy_ai_context::cli::{Cli, Commands, WorkspaceAction};
 use speedy_ai_context::hooks;
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::info;
 
 #[cfg(test)]
 fn resolve_path(path: &Option<String>) -> Result<std::path::PathBuf> {
@@ -85,6 +85,9 @@ async fn ensure_daemon(cli: &Cli) -> Result<()> {
     let socket = resolve_socket_name(cli);
     let client = DaemonClient::new(&socket);
 
+    // The daemon is opt-in and never auto-started. If one happens to be
+    // running we register this workspace with it; if not, we simply proceed —
+    // the command runs in-process (standalone) without spawning a daemon.
     if client.is_alive().await {
         let workspaces = client.get_all_workspaces().await?;
         if workspaces.iter().any(|w| {
@@ -98,22 +101,8 @@ async fn ensure_daemon(cli: &Cli) -> Result<()> {
         }
         client.add_workspace(&cwd_str).await?;
         info!("Workspace aggiunto al daemon: {cwd_str}");
-        return Ok(());
     }
 
-    warn!("Daemon non risponde. Avvio...");
-    let daemon_dir = daemon_util::daemon_dir_path()?;
-    daemon_util::kill_existing_daemon(&daemon_dir);
-    daemon_util::spawn_daemon_process(&socket)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    if !workspace::is_registered(&cwd_str) {
-        workspace::add(&cwd_str)?;
-    }
-
-    let client = DaemonClient::new(&socket);
-    client.add_workspace(&cwd_str).await?;
-    info!("Daemon avviato, workspace monitorato e indicizzato: {cwd_str}");
     Ok(())
 }
 
@@ -125,14 +114,14 @@ struct WorkspaceFeatures {
 }
 
 fn load_workspace_features(root: &std::path::Path) -> WorkspaceFeatures {
-    let path = root.join(".speedy").join("config.toml");
+    let path = daemon_util::speedy_subdir(root).join("config.toml");
     if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(doc) = toml::from_str::<toml::Value>(&raw) {
             let get = |key: &str| {
                 doc.get("features")
                     .and_then(|f| f.get(key))
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(true)
+                    .unwrap_or(false)
             };
             return WorkspaceFeatures {
                 speedy_indexer: get("speedy_indexer"),
@@ -140,11 +129,12 @@ fn load_workspace_features(root: &std::path::Path) -> WorkspaceFeatures {
             };
         }
     }
-    WorkspaceFeatures { speedy_indexer: true, language_context: true }
+    // Opt-in by default: nothing runs until the user enables a feature.
+    WorkspaceFeatures { speedy_indexer: false, language_context: false }
 }
 
 fn save_workspace_features(root: &std::path::Path, f: &WorkspaceFeatures) -> anyhow::Result<()> {
-    let dir = root.join(".speedy");
+    let dir = daemon_util::speedy_subdir(root);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("config.toml");
     let mut doc: toml::Value = if path.exists() {
@@ -177,6 +167,59 @@ fn set_feature_value(f: &mut WorkspaceFeatures, key: &str, value: bool) {
         "speedy_indexer" => f.speedy_indexer = value,
         "language_context" => f.language_context = value,
         _ => {}
+    }
+}
+
+/// Whether the file indexer is enabled for the current workspace.
+/// Reads `[features].speedy_indexer` from `.speedy/config.toml`; defaults to
+/// `false` (opt-in). The index/sync/reembed write paths no-op when disabled so
+/// that a fresh workspace — or a git hook firing on a workspace where the user
+/// has not opted in — does no work.
+fn speedy_indexer_enabled() -> bool {
+    // An explicit user action (CLI command / GUI button) sets SPEEDY_FORCE to
+    // bypass the opt-in gate — pressing a button must always do the work.
+    if env_flag("SPEEDY_FORCE") {
+        return true;
+    }
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    load_workspace_features(&root).speedy_indexer
+}
+
+/// Path to this workspace's AI-context SQLite DB (the file `Indexer::new`
+/// would create when it opens the store).
+fn ai_db_path() -> std::path::PathBuf {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    daemon_util::workspace_data_dir(&root).join("sac.sqlite")
+}
+
+/// Whether a read-only command (query / context / --read) may open the store.
+/// Opening it *creates* `sac.sqlite`, so when the indexer is disabled we only
+/// allow it if the DB already exists — otherwise a status/query on a workspace
+/// the user never opted into would leave a ghost database behind.
+fn ai_read_allowed() -> bool {
+    speedy_indexer_enabled() || ai_db_path().exists()
+}
+
+/// True when an env var is set to a truthy value (`1`/`true`, case-insensitive).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
+/// Print the "feature disabled" notice and signal the caller to stop.
+fn report_indexer_disabled(command: &str, json: bool) {
+    info!(target: "ai-context", command, "skipped (speedy_indexer disabled)");
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "skipped": true, "reason": "speedy_indexer disabled" })
+        );
+    } else {
+        println!("speedy_indexer disabled — skipping {command}. Enable with: speedy enable speedy");
     }
 }
 
@@ -255,6 +298,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     if let Some(prompt) = cli.read {
+        if !ai_read_allowed() {
+            report_indexer_disabled("read", cli.json);
+            return Ok(());
+        }
         let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
         let results = indexer.query(&prompt, 5).await?;
         if cli.json {
@@ -270,6 +317,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     if let Some(content) = cli.modify {
+        if !speedy_indexer_enabled() {
+            report_indexer_disabled("modify", cli.json);
+            return Ok(());
+        }
         if let Some(file) = cli.file {
             tokio::fs::write(&file, &content).await?;
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
@@ -289,6 +340,10 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Some(Commands::Index { subdir, clear }) => {
+            if !speedy_indexer_enabled() {
+                report_indexer_disabled("index", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             if *clear {
@@ -312,6 +367,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Query { query, top_k }) => {
+            if !ai_read_allowed() {
+                report_indexer_disabled("query", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let k = top_k.unwrap_or(5);
@@ -337,6 +396,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Context) => {
+            if !ai_read_allowed() {
+                report_indexer_disabled("context", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let ctx = indexer.project_context().await?;
@@ -359,6 +422,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Sync) => {
+            if !speedy_indexer_enabled() {
+                report_indexer_disabled("sync", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.sync_all().await?;
@@ -382,6 +449,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Reembed) => {
+            if !speedy_indexer_enabled() {
+                report_indexer_disabled("reembed", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let stats = indexer.reembed().await?;
@@ -509,6 +580,12 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::ClearIndex) => {
+            // Nothing to clear (and no DB to create) when the indexer is off and
+            // no index exists yet.
+            if !ai_read_allowed() {
+                report_indexer_disabled("clear-index", cli.json);
+                return Ok(());
+            }
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             indexer.db.clear_all_chunks().await?;
             if cli.json {

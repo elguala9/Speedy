@@ -1,10 +1,27 @@
-# Speedy — Piano Ibrido: Daemon + Git Hooks
+# Speedy — Hybrid Plan: Daemon + Git Hooks
 
-**Obiettivo**: i git hooks coprono il caso "daemon spento" e accelerano la sincronizzazione post-commit anche quando il daemon è attivo, senza duplicare lavoro.
+> **⚠️ Superseded — see [`diagram-flow.md`](./diagram-flow.md) for the shipped flow.**
+> The embedded scripts below (with the "daemon up? → IPC / daemon down? →
+> standalone" branch, and one block per worker) are **historical**. As shipped,
+> the templates in `scripts/git-hooks/*.tpl`:
+> - **route through `speedy-cli`** (one orchestration point) with
+>   `SPEEDY_NO_DAEMON=1`, never the individual workers;
+> - fan out to **all enabled contexts** (ai-context, language-context,
+>   text-context) — contexts are opt-in, so each is a no-op when off;
+> - `post-commit` runs `speedy-cli update <changed files>` (per-file);
+>   `post-checkout` / `post-merge` / `post-rewrite` run `speedy-cli sync`
+>   (incremental, mtime+hash skip, prunes deletions);
+> - are **installed automatically by `speedy-cli workspace add`** and removed by
+>   `workspace remove` (still also available via `speedy install-hooks` /
+>   `uninstall-hooks`).
+>
+> This document remains as a reference for the original hybrid design.
+
+**Goal (historical)**: the git hooks cover the "daemon off" case and speed up post-commit synchronization even when the daemon is active, without duplicating work.
 
 ---
 
-## Architettura
+## Architecture
 
 ```
  git commit / checkout / merge
@@ -13,23 +30,23 @@
     hook script (sh/ps1)
           │
           ├─── daemon UP? ──YES──► speedy-ai-context daemon exec index <file> (IPC)
-          │                         (daemon già osserva il FS, ma il hook
-          │                          forza l'index immediato senza attendere
-          │                          il debounce da 500 ms)
+          │                         (the daemon already watches the FS, but the
+          │                          hook forces the immediate index without
+          │                          waiting for the 500 ms debounce)
           │
-          └─── daemon DOWN? ────► speedy-ai-context index <file>  (processo diretto)
-                                   (fallback senza IPC, nessun daemon richiesto)
+          └─── daemon DOWN? ────► speedy-ai-context index <file>  (direct process)
+                                   (fallback without IPC, no daemon required)
 ```
 
-Il daemon rimane il percorso principale per modifiche non committate (salvataggi continui, refactor live). I hook sono l'acceleratore e il safety-net.
+The daemon remains the main path for uncommitted changes (continuous saves, live refactors). The hooks are the accelerator and the safety net.
 
 ---
 
-## File da creare
+## Files to create
 
 ### 1. Hook scripts — `scripts/git-hooks/`
 
-**`post-commit`** (template sh — `{{SPEEDY_WORKER_EXE}}` e `{{SPEEDY_CLI_EXE}}` sostituiti da `install-hooks`)
+**`post-commit`** (sh template — `{{SPEEDY_WORKER_EXE}}` and `{{SPEEDY_CLI_EXE}}` replaced by `install-hooks`)
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
@@ -49,7 +66,7 @@ if "$SPEEDY_CLI" daemon ping 2>/dev/null | grep -q "pong"; then
         [ -f "$ROOT/$f" ] && "$SPEEDY_CLI" -p "$ROOT" index "$f"
     done
 else
-    # Daemon down: index direttamente con il worker
+    # Daemon down: index directly with the worker
     for f in $CHANGED; do
         [ -f "$ROOT/$f" ] && SPEEDY_NO_DAEMON=1 "$SPEEDY_WORKER" -p "$ROOT" index "$f"
     done
@@ -57,13 +74,13 @@ fi
 exit 0
 ```
 
-**`post-checkout`** (template sh)
+**`post-checkout`** (sh template)
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
 SPEEDY_WORKER="{{SPEEDY_WORKER_EXE}}"
 SPEEDY_CLI="{{SPEEDY_CLI_EXE}}"
-# $3 = 1 se branch switch, 0 se file checkout
+# $3 = 1 if branch switch, 0 if file checkout
 [ "$3" = "0" ] && exit 0
 
 ROOT=$(git rev-parse --show-toplevel)
@@ -76,7 +93,7 @@ fi
 exit 0
 ```
 
-**`post-merge`** (template sh)
+**`post-merge`** (sh template)
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
@@ -92,13 +109,13 @@ fi
 exit 0
 ```
 
-**`post-rewrite`** (template sh — copre rebase e amend)
+**`post-rewrite`** (sh template — covers rebase and amend)
 ```sh
 #!/bin/sh
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
 SPEEDY_WORKER="{{SPEEDY_WORKER_EXE}}"
 SPEEDY_CLI="{{SPEEDY_CLI_EXE}}"
-# $1 = "rebase" o "amend"
+# $1 = "rebase" or "amend"
 ROOT=$(git rev-parse --show-toplevel)
 
 if "$SPEEDY_CLI" daemon ping 2>/dev/null | grep -q "pong"; then
@@ -109,7 +126,7 @@ fi
 exit 0
 ```
 
-**`post-commit.ps1`** (template PowerShell — alternativa Windows nativa)
+**`post-commit.ps1`** (PowerShell template — native Windows alternative)
 ```powershell
 # Speedy — managed hook (do not edit — reinstall with: speedy-ai-context install-hooks)
 $SPEEDY_WORKER = "{{SPEEDY_WORKER_EXE}}"   # speedy-ai-context (standalone fallback)
@@ -138,27 +155,27 @@ exit 0
 
 ---
 
-### 2. Nuovo comando CLI — `speedy-ai-context install-hooks` / `speedy-ai-context uninstall-hooks`
+### 2. New CLI command — `speedy-ai-context install-hooks` / `speedy-ai-context uninstall-hooks`
 
-**`packages/speedy-ai-context/src/hooks.rs`** (nuovo file)
+**`packages/speedy-ai-context/src/hooks.rs`** (new file)
 
-Responsabilità:
-- Risolve la cartella `.git/hooks/` del repo corrente (o via `git rev-parse --git-path hooks`)
-- Ottiene il path assoluto del proprio eseguibile via `std::env::current_exe()` e lo **interpola nei template degli hook** — gli script non chiamano `speedy-ai-context` nudo ma il path esatto del binario che ha eseguito `install-hooks`
-- Rende gli script eseguibili (`chmod +x` su Unix, noop su Windows)
-- `uninstall-hooks`: rimuove solo i file che hanno il marker `# Speedy — managed hook` in cima
-- Stampa un report: quali hook installati, dove, se ne ha trovati di preesistenti
+Responsibilities:
+- Resolves the `.git/hooks/` folder of the current repo (or via `git rev-parse --git-path hooks`)
+- Gets the absolute path of its own executable via `std::env::current_exe()` and **interpolates it into the hook templates** — the scripts do not call bare `speedy-ai-context` but the exact path of the binary that ran `install-hooks`
+- Makes the scripts executable (`chmod +x` on Unix, noop on Windows)
+- `uninstall-hooks`: removes only the files that have the `# Speedy — managed hook` marker at the top
+- Prints a report: which hooks installed, where, whether any pre-existing ones were found
 
-**Perché non `include_str!` verbatim**: i template hanno due placeholder che vengono sostituiti a runtime:
-- `{{SPEEDY_WORKER_EXE}}` → path assoluto di `speedy-ai-context` (risolto da `current_exe()`)
-- `{{SPEEDY_CLI_EXE}}` → path assoluto di `speedy-cli` (cercato nella stessa directory del worker)
+**Why not `include_str!` verbatim**: the templates have two placeholders that are replaced at runtime:
+- `{{SPEEDY_WORKER_EXE}}` → absolute path of `speedy-ai-context` (resolved by `current_exe()`)
+- `{{SPEEDY_CLI_EXE}}` → absolute path of `speedy-cli` (looked up in the same directory as the worker)
 
-Questo garantisce che i hook funzionino anche se i binari non sono in `PATH`.
+This ensures the hooks work even if the binaries are not in `PATH`.
 
 ```rust
-// hooks.rs — logica centrale
+// hooks.rs — core logic
 let worker = std::env::current_exe()?.canonicalize()?;
-// Cerca speedy-cli accanto al worker (stessa cartella di installazione)
+// Look for speedy-cli next to the worker (same installation folder)
 let cli = worker.with_file_name(format!("speedy-cli{}", std::env::consts::EXE_SUFFIX));
 let script = HOOK_POST_COMMIT_TEMPLATE
     .replace("{{SPEEDY_WORKER_EXE}}", &worker.to_string_lossy())
@@ -171,13 +188,13 @@ std::fs::write(&hook_path, script)?;
 }
 ```
 
-**Modifica `packages/speedy-ai-context/src/cli.rs`**:
+**Modify `packages/speedy-ai-context/src/cli.rs`**:
 ```rust
 InstallHooks {
-    /// Path del repo (default: CWD)
+    /// Repo path (default: CWD)
     #[arg(long)]
     path: Option<PathBuf>,
-    /// Usa symlink invece di copia (più comodo per sviluppo)
+    /// Use a symlink instead of a copy (more convenient for development)
     #[arg(long)]
     symlink: bool,
 },
@@ -189,42 +206,42 @@ UninstallHooks {
 
 ---
 
-## File da modificare
+## Files to modify
 
 ### `packages/speedy-core/src/config.rs`
 
-Aggiungere campo opzionale (default `true`):
+Add an optional field (default `true`):
 ```rust
 pub hooks_enabled: bool,   // default: true
 ```
 
-Usato da `install-hooks` per decidere se fare skip e da eventuali warning.
+Used by `install-hooks` to decide whether to skip and by any warnings.
 
 ---
 
 ### `packages/speedy-daemon/src/main.rs`
 
-**IPC command `ping`** — già esiste (`ping` → `pong`). Gli hook lo invocano tramite `speedy-cli daemon ping`. **Nessuna modifica necessaria** al daemon.
+**IPC command `ping`** — already exists (`ping` → `pong`). The hooks invoke it through `speedy-cli daemon ping`. **No changes needed** to the daemon.
 
-**Nuovo IPC command: `notify-commit\t<path>\t<file1>\t<file2>...`** (opzionale, fase 2):
-- Più efficiente di mandare N richieste `speedy-cli index <file>` separate
-- Riceve una lista di file, li accoda all'indexer del workspace senza passare per subprocess
-- Handler in `dispatch_command()`, circa riga 887
+**New IPC command: `notify-commit\t<path>\t<file1>\t<file2>...`** (optional, phase 2):
+- More efficient than sending N separate `speedy-cli index <file>` requests
+- Receives a list of files and queues them to the workspace indexer without going through a subprocess
+- Handler in `dispatch_command()`, around line 887
 
-Per la fase 1 basta usare `speedy-cli -p <ROOT> index <file>` che già instrada via daemon (IPC `exec index <file>`).
+For phase 1 it is enough to use `speedy-cli -p <ROOT> index <file>`, which already routes via the daemon (IPC `exec index <file>`).
 
 ---
 
-## Flusso di installazione utente
+## User installation flow
 
 ```
-# 1. Registra il workspace (già esistente)
+# 1. Register the workspace (already exists)
 speedy-cli workspace add .
 
-# 2. Installa gli hook nel repo corrente
+# 2. Install the hooks in the current repo
 speedy-ai-context install-hooks
 
-# Output atteso:
+# Expected output:
 # ✓ Installed post-commit    → .git/hooks/post-commit
 # ✓ Installed post-checkout  → .git/hooks/post-checkout
 # ✓ Installed post-merge     → .git/hooks/post-merge
@@ -234,9 +251,9 @@ speedy-ai-context install-hooks
 
 ---
 
-## Embedding dei template nel binario
+## Embedding the templates in the binary
 
-I template vengono embeddati in `speedy-ai-context` con `include_str!` a compile time. Hanno il placeholder `{{SPEEDY_EXE}}` che viene sostituito con il path assoluto a runtime:
+The templates are embedded into `speedy-ai-context` with `include_str!` at compile time. They have the `{{SPEEDY_EXE}}` placeholder that is replaced with the absolute path at runtime:
 
 ```rust
 // packages/speedy-ai-context/src/hooks.rs
@@ -248,11 +265,11 @@ const HOOK_POST_REWRITE_TPL:  &str = include_str!("../../scripts/git-hooks/post-
 const HOOK_POST_COMMIT_PS1_TPL: &str = include_str!("../../scripts/git-hooks/post-commit.ps1.tpl");
 ```
 
-Scrittura a disco (due placeholder separati per i due binari):
+Writing to disk (two separate placeholders for the two binaries):
 ```rust
 let worker = std::env::current_exe()?.canonicalize()?;
 let cli = worker.with_file_name(format!("speedy-cli{}", std::env::consts::EXE_SUFFIX));
-// su Windows Git-Bash il path deve essere in formato POSIX: /c/Users/...
+// on Windows Git-Bash the path must be in POSIX format: /c/Users/...
 let worker_str = normalize_for_sh(&worker);
 let cli_str    = normalize_for_sh(&cli);
 let script = TPL
@@ -260,48 +277,48 @@ let script = TPL
     .replace("{{SPEEDY_CLI_EXE}}",    &cli_str);
 ```
 
-Su Windows si scrive sia lo script `.sh` (usato da Git-Bash) sia un `.bat` wrapper che invoca PowerShell per chi usa CMD.
+On Windows you write both the `.sh` script (used by Git-Bash) and a `.bat` wrapper that invokes PowerShell for those who use CMD.
 
 ---
 
-## Edge cases da gestire
+## Edge cases to handle
 
-| Caso | Comportamento |
+| Case | Behavior |
 |---|---|
-| Hook preesistente (non-Speedy) | `install-hooks` stampa warning e chiede conferma prima di sovrascrivere |
-| `core.hooksPath` globale | Rispettato: `git rev-parse --git-path hooks` restituisce il path corretto |
-| Repo senza `.speedy/` | Gli hook si installano lo stesso; al run faranno `speedy-ai-context index` che crea `.speedy/` |
-| `--no-verify` | Bypassa i hook: documentare come limitazione nota |
-| Submoduli | Gli hook vanno installati per-submodulo; `install-hooks --recursive` come flag fase 2 |
-| CI/CD (GitHub Actions, ecc.) | `SPEEDY_SKIP_HOOKS=1` env var fa exit 0 immediato in tutti gli hook |
+| Pre-existing (non-Speedy) hook | `install-hooks` prints a warning and asks for confirmation before overwriting |
+| Global `core.hooksPath` | Respected: `git rev-parse --git-path hooks` returns the correct path |
+| Repo without `.speedy/` | The hooks install anyway; on run they will execute `speedy-ai-context index`, which creates `.speedy/` |
+| `--no-verify` | Bypasses the hooks: document as a known limitation |
+| Submodules | The hooks must be installed per-submodule; `install-hooks --recursive` as a phase 2 flag |
+| CI/CD (GitHub Actions, etc.) | The `SPEEDY_SKIP_HOOKS=1` env var causes an immediate exit 0 in all hooks |
 
 ---
 
-## Fasi di sviluppo
+## Development phases
 
-### Fase 1 — MVP (priorità alta)
-1. Creare `scripts/git-hooks/post-commit`, `post-checkout`, `post-merge`, `post-rewrite`
-2. Creare `packages/speedy-ai-context/src/hooks.rs` con install/uninstall logic
-3. Aggiungere `InstallHooks` / `UninstallHooks` a `packages/speedy-ai-context/src/cli.rs` e `main.rs`
-4. Test manuale su Windows (Git-Bash) e Linux
+### Phase 1 — MVP (high priority)
+1. Create `scripts/git-hooks/post-commit`, `post-checkout`, `post-merge`, `post-rewrite`
+2. Create `packages/speedy-ai-context/src/hooks.rs` with install/uninstall logic
+3. Add `InstallHooks` / `UninstallHooks` to `packages/speedy-ai-context/src/cli.rs` and `main.rs`
+4. Manual test on Windows (Git-Bash) and Linux
 
-### Fase 2 — Ottimizzazioni
-5. IPC command `notify-commit` per batch di file (evita N subprocess)
-6. Flag `--recursive` per submoduli
+### Phase 2 — Optimizations
+5. IPC command `notify-commit` for batches of files (avoids N subprocesses)
+6. `--recursive` flag for submodules
 7. `SPEEDY_SKIP_HOOKS` env var
-8. Hook per PowerShell nativo (`.ps1`) con `.bat` wrapper su Windows
+8. Native PowerShell hook (`.ps1`) with a `.bat` wrapper on Windows
 
-### Fase 3 — UX
-9. `speedy-cli workspace add .` (o `speedy-ai-context install-hooks` esplicito) installa gli hook automaticamente se `hooks_enabled = true`
-10. `speedy-ai-context install-hooks --check` (o `status`) mostra se gli hook sono installati per il repo corrente
+### Phase 3 — UX
+9. `speedy-cli workspace add .` (or explicit `speedy-ai-context install-hooks`) installs the hooks automatically if `hooks_enabled = true`
+10. `speedy-ai-context install-hooks --check` (or `status`) shows whether the hooks are installed for the current repo
 
 ---
 
-## Dipendenze nuove
+## New dependencies
 
-Nessuna. Tutto il codice necessario è già disponibile lato IPC daemon:
-- `ping` → `pong` — già esiste; gli hook lo invocano via `speedy-cli daemon ping`
-- IPC `exec <args>` — già esiste (riga 1022-1026 daemon/main.rs); `speedy-cli index` lo usa automaticamente
-- IPC `sync <path>` — già esiste (riga 979-986); `speedy-cli sync` lo usa automaticamente
-- IPC `reindex <path>` — già esiste (riga 988-995)
-- `speedy-ai-context -p <ROOT> index <file>` (standalone) — già esiste, usato nel fallback daemon-down
+None. All the necessary code is already available on the daemon IPC side:
+- `ping` → `pong` — already exists; the hooks invoke it via `speedy-cli daemon ping`
+- IPC `exec <args>` — already exists (line 1022-1026 daemon/main.rs); `speedy-cli index` uses it automatically
+- IPC `sync <path>` — already exists (line 979-986); `speedy-cli sync` uses it automatically
+- IPC `reindex <path>` — already exists (line 988-995)
+- `speedy-ai-context -p <ROOT> index <file>` (standalone) — already exists, used in the daemon-down fallback
