@@ -114,7 +114,7 @@ struct WorkspaceFeatures {
 }
 
 fn load_workspace_features(root: &std::path::Path) -> WorkspaceFeatures {
-    let path = root.join(".speedy").join("config.toml");
+    let path = daemon_util::speedy_subdir(root).join("config.toml");
     if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(doc) = toml::from_str::<toml::Value>(&raw) {
             let get = |key: &str| {
@@ -134,7 +134,7 @@ fn load_workspace_features(root: &std::path::Path) -> WorkspaceFeatures {
 }
 
 fn save_workspace_features(root: &std::path::Path, f: &WorkspaceFeatures) -> anyhow::Result<()> {
-    let dir = root.join(".speedy");
+    let dir = daemon_util::speedy_subdir(root);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("config.toml");
     let mut doc: toml::Value = if path.exists() {
@@ -183,6 +183,21 @@ fn speedy_indexer_enabled() -> bool {
     }
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     load_workspace_features(&root).speedy_indexer
+}
+
+/// Path to this workspace's AI-context SQLite DB (the file `Indexer::new`
+/// would create when it opens the store).
+fn ai_db_path() -> std::path::PathBuf {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    daemon_util::workspace_data_dir(&root).join("sac.sqlite")
+}
+
+/// Whether a read-only command (query / context / --read) may open the store.
+/// Opening it *creates* `sac.sqlite`, so when the indexer is disabled we only
+/// allow it if the DB already exists — otherwise a status/query on a workspace
+/// the user never opted into would leave a ghost database behind.
+fn ai_read_allowed() -> bool {
+    speedy_indexer_enabled() || ai_db_path().exists()
 }
 
 /// True when an env var is set to a truthy value (`1`/`true`, case-insensitive).
@@ -283,6 +298,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     if let Some(prompt) = cli.read {
+        if !ai_read_allowed() {
+            report_indexer_disabled("read", cli.json);
+            return Ok(());
+        }
         let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
         let results = indexer.query(&prompt, 5).await?;
         if cli.json {
@@ -298,6 +317,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     if let Some(content) = cli.modify {
+        if !speedy_indexer_enabled() {
+            report_indexer_disabled("modify", cli.json);
+            return Ok(());
+        }
         if let Some(file) = cli.file {
             tokio::fs::write(&file, &content).await?;
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
@@ -344,6 +367,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Query { query, top_k }) => {
+            if !ai_read_allowed() {
+                report_indexer_disabled("query", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let k = top_k.unwrap_or(5);
@@ -369,6 +396,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Context) => {
+            if !ai_read_allowed() {
+                report_indexer_disabled("context", cli.json);
+                return Ok(());
+            }
             let started = std::time::Instant::now();
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             let ctx = indexer.project_context().await?;
@@ -549,6 +580,12 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::ClearIndex) => {
+            // Nothing to clear (and no DB to create) when the indexer is off and
+            // no index exists yet.
+            if !ai_read_allowed() {
+                report_indexer_disabled("clear-index", cli.json);
+                return Ok(());
+            }
             let indexer = speedy_ai_context::indexer::Indexer::new(&config).await?;
             indexer.db.clear_all_chunks().await?;
             if cli.json {
