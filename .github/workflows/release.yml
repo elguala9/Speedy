@@ -62,6 +62,8 @@ jobs:
           cp installer/README.txt target/${{ matrix.target }}/release/README.txt
           cp installer/INSTALLATION.md target/${{ matrix.target }}/release/INSTALLATION.md
           cp installer/FOR-IA.md target/${{ matrix.target }}/release/FOR-IA.md
+          cp installer/SETTINGS_MCP.md target/${{ matrix.target }}/release/SETTINGS_MCP.md
+          cp -r installer/mcp-guides target/${{ matrix.target }}/release/mcp-guides
           cd target/${{ matrix.target }}/release
           # Build the file list; speedy-gui is excluded from the macOS build
           # until eframe/winit CI validation passes.
@@ -75,6 +77,8 @@ jobs:
             README.txt
             INSTALLATION.md
             FOR-IA.md
+            SETTINGS_MCP.md
+            mcp-guides
           )
           if [ -f "speedy-gui${{ matrix.suffix }}" ]; then
             FILES+=(speedy-gui${{ matrix.suffix }})
