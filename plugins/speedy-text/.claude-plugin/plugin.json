@@ -1,0 +1,15 @@
+{
+  "name": "speedy-text",
+  "displayName": "Speedy Text Context",
+  "version": "0.2.2",
+  "description": "Text-symbol search and project-wide rename across docs/config files. Single static binary, zero external dependencies.",
+  "author": {
+    "name": "Luca Gualandi"
+  },
+  "homepage": "https://github.com/elguala9/Speedy",
+  "repository": "https://github.com/elguala9/Speedy",
+  "license": "MIT",
+  "keywords": ["mcp", "symbol-search", "text-index", "rename"],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/"
+}
