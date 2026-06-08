@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "speedy-text": {
+      "command": "speedy-text-context-mcp",
+      "args": ["-w", "${CLAUDE_PROJECT_DIR}"]
+    }
+  }
+}
