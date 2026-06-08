@@ -405,13 +405,14 @@ $ speedy-ai-context index .
 | `index [<subdir>]`              | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context index` |
 | `query <q>`                     | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context query` |
 | `context`                       | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context context` |
-| `sync`                          | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context sync`  |
+| `sync`                          | runs inline (ai-context only) | daemon alive → `sync` IPC; absent → `contexts::sync_workspace` (**incremental fan-out over the 3**, mtime+hash skip) |
+| `update <files…>`               | n/a                    | always in-process → `contexts::update_files` (**per-file fan-out over the 3**; used by the post-commit hook) |
 | `reembed`                       | runs inline            | daemon alive → exec; absent → spawns `speedy-ai-context reembed` |
-| `reindex [-p <path>]`           | n/a                    | daemon alive → `reindex` IPC; absent → `contexts::reindex_workspace` (fan-out over the 3) |
-| `force [-p <path>]`             | n/a (removed)          | daemon alive → sync; absent → spawns `speedy-ai-context sync` |
+| `reindex [-p <path>]`           | n/a                    | daemon alive → `reindex` IPC; absent → `contexts::reindex_workspace` (**full rebuild**, fan-out over the 3) |
+| `force [-p <path>]`             | n/a                    | same incremental fan-out sync, explicit path |
 | `daemon status/ping/stop/list`  | n/a                    | requires daemon alive (error if down) |
 | `daemon` (no action)            | starts the central daemon | n/a                              |
-| `workspace add/remove`          | n/a (worker: only `list`) | daemon alive → IPC; absent → `speedy_core::workspace` in-process |
+| `workspace add/remove`          | n/a (worker: only `list`) | daemon alive → IPC; absent → `speedy_core::workspace`; **+ install/remove the git hooks** (best-effort, git repos) |
 | `workspace list`                | n/a (worker: only `list`) | `speedy_core::workspace::list()` in-process |
 
 ---
