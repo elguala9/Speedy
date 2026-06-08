@@ -69,7 +69,8 @@ impl GraphStore {
         let conn = Connection::open(&db_path)
             .with_context(|| format!("opening {}", db_path.display()))?;
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;",
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; \
+             PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;",
         )?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self {
@@ -239,6 +240,27 @@ impl GraphStore {
             )
             .optional()?;
         Ok(res)
+    }
+
+    /// All file paths currently recorded in the graph (stored relative, with
+    /// forward slashes — see `index_one_file`). Used by the incremental sync to
+    /// detect files deleted from disk.
+    pub fn all_file_paths(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT path FROM slc_files")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for r in rows {
+            paths.push(r?);
+        }
+        Ok(paths)
+    }
+
+    /// Remove a file and (via `ON DELETE CASCADE`) all its symbols and edges.
+    pub fn delete_file(&self, path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM slc_files WHERE path = ?1", params![path])?;
+        Ok(())
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
