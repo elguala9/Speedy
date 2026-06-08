@@ -50,11 +50,11 @@ jobs:
 
       - name: Build all binaries (Linux/Windows — includes GUI)
         if: matrix.os != 'macos-latest'
-        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-gui -p speedy-language-context --target ${{ matrix.target }}
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-gui -p speedy-language-context -p speedy-text --target ${{ matrix.target }}
 
       - name: Build all binaries (macOS — GUI excluded pending eframe/winit CI validation)
         if: matrix.os == 'macos-latest'
-        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-language-context --target ${{ matrix.target }}
+        run: cargo build --release -p speedy-ai-context -p speedy-daemon -p speedy-cli -p speedy-ai-context-mcp -p speedy-language-context -p speedy-text --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -74,6 +74,8 @@ jobs:
             speedy-ai-context-mcp${{ matrix.suffix }}
             speedy-language-context${{ matrix.suffix }}
             speedy-language-context-mcp${{ matrix.suffix }}
+            speedy-text-context${{ matrix.suffix }}
+            speedy-text-context-mcp${{ matrix.suffix }}
             README.txt
             INSTALLATION.md
             FOR-IA.md
