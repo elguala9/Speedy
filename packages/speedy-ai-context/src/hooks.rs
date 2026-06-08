@@ -35,16 +35,17 @@ pub fn resolve_speedy_exe() -> Result<PathBuf> {
     )
 }
 
-/// Resolve the `speedy-language-context` executable. Returns `None` if not found;
-/// the hook template already handles the missing-binary case gracefully.
-pub fn resolve_slc_exe() -> Option<PathBuf> {
-    // Same dir as the currently running speedy binary
+/// Resolve the `speedy-cli` executable — the single entry point the hooks call,
+/// so one binary orchestrates every enabled context. Looks next to the running
+/// binary first (CLI, GUI and workers are installed together), then on `PATH`.
+/// Returns `None` if not found; the hook template falls back to a `PATH` lookup.
+pub fn resolve_speedy_cli_exe() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let name = if cfg!(windows) {
-                "speedy-language-context.exe"
+                "speedy-cli.exe"
             } else {
-                "speedy-language-context"
+                "speedy-cli"
             };
             let candidate = dir.join(name);
             if candidate.is_file() {
@@ -52,7 +53,7 @@ pub fn resolve_slc_exe() -> Option<PathBuf> {
             }
         }
     }
-    search_path("speedy-language-context")
+    search_path("speedy-cli")
 }
 
 fn search_path(bin: &str) -> Option<PathBuf> {
@@ -122,11 +123,11 @@ pub fn resolve_hooks_dir(repo_root: &Path) -> Result<PathBuf> {
 /// Install Speedy-managed git hooks into the repo at `repo_root`.
 /// Set `force = true` to overwrite non-Speedy hooks without prompting.
 pub fn install_hooks(repo_root: &Path, force: bool) -> Result<InstallReport> {
-    let exe = resolve_speedy_exe()?;
-    let exe_str = normalize_for_sh(&exe);
-
-    // SLC is optional — empty string → the hook's PATH fallback handles it.
-    let slc_str = resolve_slc_exe()
+    // The hooks call speedy-cli, which orchestrates every enabled context. Fall
+    // back to the running binary's own path if speedy-cli can't be located up
+    // front (empty string → the hook's `command -v speedy-cli` lookup handles it).
+    let cli_str = resolve_speedy_cli_exe()
+        .or_else(|| resolve_speedy_exe().ok())
         .as_deref()
         .map(normalize_for_sh)
         .unwrap_or_default();
@@ -154,9 +155,7 @@ pub fn install_hooks(repo_root: &Path, force: bool) -> Result<InstallReport> {
             }
         }
 
-        let script = template
-            .replace("{{SPEEDY_EXE}}", &exe_str)
-            .replace("{{SLC_EXE}}", &slc_str);
+        let script = template.replace("{{SPEEDY_CLI_EXE}}", &cli_str);
         std::fs::write(&hook_path, &script)
             .with_context(|| format!("writing {}", hook_path.display()))?;
 
@@ -273,10 +272,10 @@ mod tests {
 
     #[test]
     fn test_placeholder_replaced() {
-        let tpl = "SPEEDY=\"{{SPEEDY_EXE}}\"\n";
+        let tpl = "SPEEDY=\"{{SPEEDY_CLI_EXE}}\"\n";
         assert_eq!(
-            tpl.replace("{{SPEEDY_EXE}}", "/c/bin/speedy"),
-            "SPEEDY=\"/c/bin/speedy\"\n"
+            tpl.replace("{{SPEEDY_CLI_EXE}}", "/c/bin/speedy-cli"),
+            "SPEEDY=\"/c/bin/speedy-cli\"\n"
         );
     }
 
@@ -294,18 +293,8 @@ mod tests {
     fn test_all_templates_have_placeholder() {
         for (name, tpl) in TEMPLATES {
             assert!(
-                tpl.contains("{{SPEEDY_EXE}}"),
-                "template {name} is missing the {{SPEEDY_EXE}} placeholder"
-            );
-        }
-    }
-
-    #[test]
-    fn test_all_templates_have_slc_placeholder() {
-        for (name, tpl) in TEMPLATES {
-            assert!(
-                tpl.contains("{{SLC_EXE}}"),
-                "template {name} is missing the {{SLC_EXE}} placeholder"
+                tpl.contains("{{SPEEDY_CLI_EXE}}"),
+                "template {name} is missing the {{SPEEDY_CLI_EXE}} placeholder"
             );
         }
     }
@@ -314,9 +303,20 @@ mod tests {
     fn test_all_templates_have_fallback_to_path() {
         for (name, tpl) in TEMPLATES {
             assert!(
-                tpl.contains("command -v speedy"),
-                "template {name} is missing the PATH fallback"
+                tpl.contains("command -v speedy-cli"),
+                "template {name} is missing the speedy-cli PATH fallback"
             );
+        }
+    }
+
+    #[test]
+    fn test_no_template_references_worker_binaries_directly() {
+        // (b): hooks must route through speedy-cli, the single orchestration
+        // point — never spawn the individual workers themselves.
+        for (name, tpl) in TEMPLATES {
+            assert!(!tpl.contains("speedy-ai-context"), "{name}: must not call ai-context directly");
+            assert!(!tpl.contains("speedy-language-context"), "{name}: must not call language-context directly");
+            assert!(!tpl.contains("speedy-text"), "{name}: must not call text-context directly");
         }
     }
 
@@ -386,7 +386,7 @@ mod tests {
         for name in HOOK_NAMES {
             let content = fs::read_to_string(hooks_dir(&repo).join(name)).unwrap();
             assert!(
-                !content.contains("{{SPEEDY_EXE}}"),
+                !content.contains("{{SPEEDY_CLI_EXE}}"),
                 "{name}: placeholder not replaced"
             );
         }
@@ -569,18 +569,19 @@ mod tests {
     }
 
     #[test]
-    fn test_post_commit_runs_standalone_index() {
-        // No daemon by default: post-commit indexes changed files via the
-        // standalone worker (SPEEDY_NO_DAEMON=1 ... index).
+    fn test_post_commit_runs_standalone_update() {
+        // No daemon by default: post-commit forwards the changed files to
+        // `speedy-cli update`, which fans out to every enabled context.
         let t = tpl("post-commit");
         assert!(t.contains("SPEEDY_NO_DAEMON=1"));
-        assert!(t.contains("index"));
+        assert!(t.contains("update"));
     }
 
     #[test]
     fn test_no_template_routes_through_daemon() {
         // The daemon is opt-in and never auto-started; hooks must not ping it
-        // or route work through it.
+        // or route work through it (and they set SPEEDY_NO_DAEMON to force the
+        // standalone path in speedy-cli).
         for (name, t) in TEMPLATES {
             assert!(!t.contains("ping"), "{name}: must not ping the daemon");
             assert!(!t.contains("daemon "), "{name}: must not route through the daemon");
@@ -608,12 +609,13 @@ mod tests {
     }
 
     #[test]
-    fn test_post_rewrite_runs_standalone_full_index() {
-        // rebase/amend touch many files; must do a full `index .`, not a sync.
+    fn test_post_rewrite_runs_standalone_sync() {
+        // rebase/amend rewrite history; an incremental sync re-indexes changed
+        // files and prunes deleted ones across all contexts — far cheaper than a
+        // clear-and-rebuild thanks to the per-file hash check.
         let t = tpl("post-rewrite");
         assert!(t.contains("SPEEDY_NO_DAEMON=1"));
-        assert!(t.contains("index ."));
-        assert!(!t.contains(" sync"));
+        assert!(t.contains("sync"));
     }
 
     // ── search_in_paths ───────────────────────────────────────────────────────
@@ -868,10 +870,7 @@ mod tests {
                 }
             }
 
-            // Replace both placeholders; SLC_EXE is optional so we use empty string.
-            let script = template
-                .replace("{{SPEEDY_EXE}}", &exe_str)
-                .replace("{{SLC_EXE}}", "");
+            let script = template.replace("{{SPEEDY_CLI_EXE}}", &exe_str);
             fs::write(&hook_path, &script)?;
 
             #[cfg(unix)]
