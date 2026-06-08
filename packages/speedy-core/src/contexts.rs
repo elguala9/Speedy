@@ -73,7 +73,9 @@ fn global_config_path() -> PathBuf {
 }
 
 fn workspace_config_path(workspace: &str) -> PathBuf {
-    PathBuf::from(workspace).join(".speedy").join("config.toml")
+    // `speedy_subdir` is idempotent, so a workspace path that already ends in
+    // `.speedy` resolves to `<ws>/.speedy/config.toml`, not a nested one.
+    crate::daemon_util::speedy_subdir(&PathBuf::from(workspace)).join("config.toml")
 }
 
 /// Load features: workspace config (under `[features]`) if available, else global.
@@ -201,57 +203,210 @@ pub fn find_sibling_exe(stem: &str) -> Option<PathBuf> {
 
 // ── Orchestration ─────────────────────────────────────────────────────────────
 
-/// Incremental sync of a workspace (ai-context only — the SLC and text indexes
-/// keep themselves current via per-file updates). No-op when `speedy_indexer`
-/// is disabled. Returns `true` when the worker ran and succeeded.
+/// Incremental sync of a workspace across **all enabled contexts**. Each worker
+/// runs its own incremental `sync` command, which uses the shared hash registry
+/// (mtime + content hash) to re-process only the files that actually changed and
+/// to prune files deleted from disk — so an unchanged workspace is a near-instant
+/// no-op and sync is never slower than a full index.
+///
+/// Which contexts run is decided exactly like [`reindex_workspace`] — the ones
+/// the user enabled (see [`contexts_to_run`]). `force` marks an explicit user
+/// action (the GUI/CLI "Sync" button): it sets `SPEEDY_FORCE` so each worker
+/// bypasses its own opt-in gate. Automatic syncs (daemon initial sync / watcher)
+/// pass `force = false`. Returns `true` when at least one context ran and
+/// succeeded.
 pub async fn sync_workspace(raw_path: &str, force: bool) -> Result<bool> {
     let canonical = std::path::Path::new(raw_path).canonicalize()?;
     let path_str = canonical.to_string_lossy().to_string();
 
-    // `force` marks an explicit user action (the GUI/CLI "Sync" command), which
-    // must run regardless of the opt-in flag. Automatic syncs (daemon initial
-    // sync / watcher) pass `force = false` so they still respect the flag.
     let features = load_features(Some(&path_str));
-    if !features.speedy_indexer && !force {
-        info!(target: "sync", workspace = %path_str, "Sync skipped (speedy_indexer disabled)");
+    let (run_ai, run_slc, run_text) = contexts_to_run(&features);
+
+    if !run_ai && !run_slc && !run_text {
+        info!(target: "sync", workspace = %path_str, "Sync skipped (no context enabled)");
         return Ok(false);
     }
 
     let started = Instant::now();
-    let exe = find_ai_context_exe();
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.args(["-p", &path_str, "sync"]).env("SPEEDY_NO_DAEMON", "1");
-    if force {
-        // Bypass the worker's own opt-in gate for an explicit sync.
-        cmd.env("SPEEDY_FORCE", "1");
-    }
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd.output().await?;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let mut any_ok = false;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        error!(target: "sync", workspace = %path_str, ms = elapsed_ms, stderr = %stderr.trim(), "Sync failed");
-        Ok(false)
-    } else {
-        info!(target: "sync", workspace = %path_str, ms = elapsed_ms, stdout = %stdout.trim(), "Sync done");
-        Ok(true)
+    // ── AI-context (semantic / vector) ──────────────────────────────────────
+    if run_ai {
+        let exe = find_ai_context_exe();
+        let mut cmd = tokio::process::Command::new(&exe);
+        cmd.args(["-p", &path_str, "sync"]).env("SPEEDY_NO_DAEMON", "1");
+        if force {
+            cmd.env("SPEEDY_FORCE", "1");
+        }
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        match cmd.output().await {
+            Ok(o) if o.status.success() => {
+                any_ok = true;
+                info!(target: "sync", workspace = %path_str, stdout = %String::from_utf8_lossy(&o.stdout).trim(), "AI-context sync done");
+            }
+            Ok(o) => error!(target: "sync", workspace = %path_str, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "AI-context sync failed"),
+            Err(e) => error!(target: "sync", workspace = %path_str, error = %e, "failed to spawn AI-context sync"),
+        }
     }
+
+    // ── Language context (symbol graph) ─────────────────────────────────────
+    if run_slc {
+        match find_language_context_exe() {
+            Some(exe) => {
+                let mut cmd = tokio::process::Command::new(&exe);
+                cmd.arg("--path").arg(&path_str).arg("sync").env("SPEEDY_NO_DAEMON", "1");
+                if force {
+                    cmd.env("SPEEDY_FORCE", "1");
+                }
+                #[cfg(windows)]
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                match cmd.output().await {
+                    Ok(o) if o.status.success() => {
+                        any_ok = true;
+                        info!(target: "sync", workspace = %path_str, stdout = %String::from_utf8_lossy(&o.stdout).trim(), "SLC sync done");
+                    }
+                    Ok(o) => error!(target: "sync", workspace = %path_str, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "SLC sync failed"),
+                    Err(e) => error!(target: "sync", workspace = %path_str, error = %e, "failed to spawn SLC sync"),
+                }
+            }
+            None => warn!(target: "sync", workspace = %path_str, "speedy-language-context not found — skipping SLC sync"),
+        }
+    }
+
+    // ── Text-symbol index ───────────────────────────────────────────────────
+    if run_text {
+        match find_text_context_exe() {
+            Some(exe) => {
+                let mut cmd = tokio::process::Command::new(&exe);
+                cmd.arg("sync").arg(&path_str).env("SPEEDY_NO_DAEMON", "1");
+                if force {
+                    cmd.env("SPEEDY_FORCE", "1");
+                }
+                #[cfg(windows)]
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                match cmd.output().await {
+                    Ok(o) if o.status.success() => {
+                        any_ok = true;
+                        info!(target: "sync", workspace = %path_str, stdout = %String::from_utf8_lossy(&o.stdout).trim(), "text sync done");
+                    }
+                    Ok(o) => error!(target: "sync", workspace = %path_str, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "text sync failed"),
+                    Err(e) => error!(target: "sync", workspace = %path_str, error = %e, "failed to spawn text sync"),
+                }
+            }
+            None => warn!(target: "sync", workspace = %path_str, "speedy-text-context not found — skipping text sync"),
+        }
+    }
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    info!(target: "sync", workspace = %path_str, ms = elapsed_ms, run_ai, run_slc, run_text, any_ok, "Sync complete");
+    Ok(any_ok)
 }
 
-/// Decide which contexts a manual reindex runs. The enabled ones run; if the
-/// user has enabled *nothing* (the default opt-in state), all three run so the
-/// explicit "Index" action is never a silent no-op. Returns
-/// `(run_ai, run_slc, run_text)`.
+/// Incremental **per-file** update across all enabled contexts. Unlike
+/// [`sync_workspace`] (which walks the whole tree) this touches only the files
+/// it's handed — the cheap path for the git `post-commit` hook, which already
+/// knows exactly which files the commit changed. Each worker's own hash check
+/// still skips a file whose content is unchanged.
+///
+/// `files` may be absolute or relative to the workspace root; entries that no
+/// longer exist on disk are dropped (a delete is handled by the per-context
+/// `update`, which removes stale entries). Which contexts run is decided by
+/// [`contexts_to_run`]; `force` sets `SPEEDY_FORCE` so workers bypass their
+/// opt-in gate. Returns `true` if at least one context ran successfully.
+pub async fn update_files(raw_path: &str, files: &[String], force: bool) -> Result<bool> {
+    let canonical = std::path::Path::new(raw_path).canonicalize()?;
+    let root = canonical.to_string_lossy().to_string();
+
+    let features = load_features(Some(&root));
+    let (run_ai, run_slc, run_text) = contexts_to_run(&features);
+    if !run_ai && !run_slc && !run_text {
+        info!(target: "update", workspace = %root, "Update skipped (no context enabled)");
+        return Ok(false);
+    }
+
+    // Resolve every input to an absolute path. Keep deletions (path no longer a
+    // file) too — the per-context `update` prunes those from each index.
+    let resolved: Vec<String> = files
+        .iter()
+        .map(|f| {
+            let p = std::path::Path::new(f);
+            let abs = if p.is_absolute() { p.to_path_buf() } else { canonical.join(p) };
+            abs.to_string_lossy().to_string()
+        })
+        .collect();
+    if resolved.is_empty() {
+        return Ok(false);
+    }
+
+    let ai_exe = run_ai.then(find_ai_context_exe);
+    let slc_exe = if run_slc { find_language_context_exe() } else { None };
+    let text_exe = if run_text { find_text_context_exe() } else { None };
+
+    let started = Instant::now();
+    let mut any_ok = false;
+
+    for file in &resolved {
+        // ── AI-context: incremental single-file (re)index ──
+        if let Some(ref exe) = ai_exe {
+            let mut cmd = tokio::process::Command::new(exe);
+            cmd.args(["-p", &root, "index", file]).env("SPEEDY_NO_DAEMON", "1");
+            if force {
+                cmd.env("SPEEDY_FORCE", "1");
+            }
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            match cmd.output().await {
+                Ok(o) if o.status.success() => any_ok = true,
+                Ok(o) => error!(target: "update", workspace = %root, file = %file, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "AI-context update failed"),
+                Err(e) => error!(target: "update", workspace = %root, file = %file, error = %e, "failed to spawn AI-context update"),
+            }
+        }
+        // ── Language context: symbol-graph update ──
+        if let Some(ref exe) = slc_exe {
+            let mut cmd = tokio::process::Command::new(exe);
+            cmd.arg("--path").arg(&root).arg("update").arg(file).env("SPEEDY_NO_DAEMON", "1");
+            if force {
+                cmd.env("SPEEDY_FORCE", "1");
+            }
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            match cmd.output().await {
+                Ok(o) if o.status.success() => any_ok = true,
+                Ok(o) => error!(target: "update", workspace = %root, file = %file, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "SLC update failed"),
+                Err(e) => error!(target: "update", workspace = %root, file = %file, error = %e, "failed to spawn SLC update"),
+            }
+        }
+        // ── Text-symbol index update ──
+        if let Some(ref exe) = text_exe {
+            let mut cmd = tokio::process::Command::new(exe);
+            cmd.arg("update").arg(&root).arg(file).env("SPEEDY_NO_DAEMON", "1");
+            if force {
+                cmd.env("SPEEDY_FORCE", "1");
+            }
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            match cmd.output().await {
+                Ok(o) if o.status.success() => any_ok = true,
+                Ok(o) => error!(target: "update", workspace = %root, file = %file, stderr = %String::from_utf8_lossy(&o.stderr).trim(), "text update failed"),
+                Err(e) => error!(target: "update", workspace = %root, file = %file, error = %e, "failed to spawn text update"),
+            }
+        }
+    }
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    info!(target: "update", workspace = %root, ms = elapsed_ms, files = resolved.len(), run_ai, run_slc, run_text, any_ok, "Per-file update complete");
+    Ok(any_ok)
+}
+
+/// Decide which contexts a manual reindex runs: exactly the ones the user
+/// enabled. An explicit "Index" must respect the checkboxes, so nothing extra
+/// runs. When the user has enabled *nothing*, the caller
+/// ([`reindex_workspace`]) surfaces a warning instead of indexing everything —
+/// that way the action never silently creates databases for contexts the user
+/// did not opt into. Returns `(run_ai, run_slc, run_text)`.
 fn contexts_to_run(f: &Features) -> (bool, bool, bool) {
-    let any = f.speedy_indexer || f.language_context || f.text_context;
-    (
-        f.speedy_indexer || !any,
-        f.language_context || !any,
-        f.text_context || !any,
-    )
+    (f.speedy_indexer, f.language_context, f.text_context)
 }
 
 /// Full reindex of a workspace: fans out to all three context workers in
@@ -271,13 +426,21 @@ pub async fn reindex_workspace(raw_path: &str) -> Result<String> {
     const AI_CONTEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
     const AI_CONTEXT_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
 
-    // A manual reindex is an explicit user action, so it must never be a silent
-    // no-op: run whichever contexts the user enabled, and if NONE are enabled
-    // run all of them (see `contexts_to_run`). Automatic indexing — daemon
-    // initial-sync and the watcher — still respects the opt-in flags via their
-    // own paths.
+    // A manual reindex runs exactly the contexts the user enabled (see
+    // `contexts_to_run`). Automatic indexing — daemon initial-sync and the
+    // watcher — also respects the opt-in flags via their own paths.
     let features = load_features(Some(&path_str));
     let (run_ai, run_slc, run_text) = contexts_to_run(&features);
+
+    // With nothing enabled there is nothing to do. Bail with a clear message so
+    // the GUI/CLI tells the user to pick a feature instead of silently creating
+    // databases for contexts they never opted into.
+    if !run_ai && !run_slc && !run_text {
+        anyhow::bail!(
+            "No context enabled for this workspace — enable AI Context, \
+             Language Context or Text Context first."
+        );
+    }
 
     let started = Instant::now();
 
@@ -594,11 +757,12 @@ mod tests {
     }
 
     #[test]
-    fn unconfigured_reindex_runs_all_contexts() {
-        // The whole point of the manual "Index" action: with nothing enabled
-        // (the default), an explicit reindex must run every context, not no-op.
+    fn unconfigured_reindex_runs_nothing() {
+        // An explicit "Index" must respect the checkboxes: with nothing enabled
+        // (the default) no context runs. `reindex_workspace` turns this into a
+        // warning rather than indexing everything.
         let (run_ai, run_slc, run_text) = contexts_to_run(&Features::defaults());
-        assert!(run_ai && run_slc && run_text);
+        assert!(!run_ai && !run_slc && !run_text);
     }
 
     #[test]

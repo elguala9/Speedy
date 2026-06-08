@@ -196,8 +196,8 @@ impl WorkspacesView {
             if ui
                 .add_enabled(!is_indexing, egui::Button::new("Index"))
                 .on_hover_text(
-                    "Re-index this workspace now (runs the enabled contexts; \
-                     if none are enabled it indexes all of them).",
+                    "Re-index this workspace now (runs only the enabled \
+                     contexts; enable at least one feature below first).",
                 )
                 .clicked()
             {
@@ -229,8 +229,8 @@ impl WorkspacesView {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Features:").weak());
             if ui
-                .checkbox(&mut features.speedy_indexer, "Speedy Indexer")
-                .on_hover_text("File indexer (speedy-ai-context)")
+                .checkbox(&mut features.speedy_indexer, "AI Context")
+                .on_hover_text("AI semantic / vector index (speedy-ai-context)")
                 .changed()
             {
                 features_changed = true;

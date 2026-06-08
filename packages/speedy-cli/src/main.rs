@@ -42,6 +42,11 @@ enum Commands {
     Context,
     #[command(about = "Sync filesystem changes to the database incrementally")]
     Sync,
+    #[command(about = "Incrementally update specific changed files across all enabled contexts")]
+    Update {
+        #[arg(required = true, help = "Files to update (absolute, or relative to the workspace root)")]
+        files: Vec<String>,
+    },
     #[command(about = "Drop and rebuild every chunk's embedding (use after changing SPEEDY_MODEL)")]
     Reembed,
     #[command(about = "Force reindex of a workspace")]
@@ -494,8 +499,15 @@ async fn async_main(cli: Cli) -> Result<()> {
     // Probe the daemon once. When it is up we route through it (it orchestrates
     // the three context workers); when it is down we run standalone, driving the
     // workers in-process via `speedy_core::contexts`. The daemon is opt-in and
-    // is never auto-started.
-    let alive = client.is_alive().await;
+    // is never auto-started. `SPEEDY_NO_DAEMON` forces the standalone path — git
+    // hooks set it so they never depend on (or block on) the daemon.
+    let no_daemon = std::env::var("SPEEDY_NO_DAEMON")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false);
+    let alive = !no_daemon && client.is_alive().await;
 
     let cwd = std::env::current_dir()?;
     let cwd_str = cwd.to_string_lossy().to_string();
@@ -570,11 +582,33 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
         }
         Some(Commands::Sync) => {
+            // Incremental sync across all enabled contexts (ai-context, SLC,
+            // text). Daemon when up, else the same fan-out in-process.
             if alive {
                 let resp = send_raw_cmd(&socket, &exec_cmd(&["sync"])).await?;
                 println!("{resp}");
             } else {
-                run_ai_context_standalone(&cwd_str, json, &["sync"]).await?;
+                let ran = speedy_core::contexts::sync_workspace(&cwd_str, true).await?;
+                if json {
+                    println!("{}", serde_json::json!({ "synced": ran }));
+                } else if ran {
+                    println!("Sync complete");
+                } else {
+                    println!("Nothing to sync — enable AI Context, Language Context or Text Context first.");
+                }
+            }
+        }
+        Some(Commands::Update { files }) => {
+            // Per-file incremental update across all enabled contexts. Always
+            // runs in-process (it drives the workers directly), so it is daemon
+            // independent — the git post-commit hook relies on this.
+            let ran = speedy_core::contexts::update_files(&cwd_str, files, true).await?;
+            if json {
+                println!("{}", serde_json::json!({ "updated": ran, "files": files.len() }));
+            } else if ran {
+                println!("Updated {} file(s)", files.len());
+            } else {
+                println!("Nothing updated — enable a context, or the files no longer exist.");
             }
         }
         Some(Commands::Reembed) => {
@@ -591,7 +625,14 @@ async fn async_main(cli: Cli) -> Result<()> {
                 let resp = send_raw_cmd(&socket, &format!("sync {target}")).await?;
                 println!("{resp}");
             } else {
-                run_ai_context_standalone(&target, json, &["sync"]).await?;
+                let ran = speedy_core::contexts::sync_workspace(&target, true).await?;
+                if json {
+                    println!("{}", serde_json::json!({ "synced": ran }));
+                } else if ran {
+                    println!("Sync complete");
+                } else {
+                    println!("Nothing to sync — enable AI Context, Language Context or Text Context first.");
+                }
             }
         }
         Some(Commands::Reindex { path }) => {
@@ -676,10 +717,20 @@ async fn async_main(cli: Cli) -> Result<()> {
                     // later reloads workspaces.json from disk.
                     speedy_core::workspace::add(path)?;
                 }
+                // Best-effort: wire up the Speedy git hooks so commits keep the
+                // index fresh without a daemon. Silently skipped when the path
+                // isn't a git repo (`force=false` never clobbers foreign hooks).
+                let hooks_note = match speedy_ai_context::hooks::install_hooks(std::path::Path::new(path), false) {
+                    Ok(r) if !r.installed.is_empty() => {
+                        format!(" (git hooks installed: {})", r.installed.join(", "))
+                    }
+                    Ok(_) => " (git hooks already present)".to_string(),
+                    Err(_) => " (not a git repo — git hooks skipped)".to_string(),
+                };
                 if cli.json {
                     println!("{}", serde_json::json!({ "added": true, "path": path }));
                 } else {
-                    println!("Workspace added: {path}");
+                    println!("Workspace added: {path}{hooks_note}");
                 }
             }
             WorkspaceAction::Remove { path } => {
@@ -688,14 +739,35 @@ async fn async_main(cli: Cli) -> Result<()> {
                 } else {
                     speedy_core::workspace::remove(path)?;
                 }
+                // Symmetric with add: pull out the Speedy-managed git hooks too
+                // (foreign hooks are left untouched). Best-effort.
+                let removed = speedy_ai_context::hooks::uninstall_hooks(std::path::Path::new(path))
+                    .unwrap_or_default();
+                let hooks_note = if removed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (git hooks removed: {})", removed.join(", "))
+                };
                 if cli.json {
                     println!("{}", serde_json::json!({ "removed": true, "path": path }));
                 } else {
-                    println!("Workspace removed: {path}");
+                    println!("Workspace removed: {path}{hooks_note}");
                 }
             }
         },
         Some(Commands::Grep { pattern, top_k }) => {
+            // Don't let a read-only grep CREATE an empty `sac.sqlite` in a
+            // workspace that was never indexed: bail early when the DB is
+            // absent instead of opening (and thus creating) it.
+            let db_path = daemon_util::workspace_data_dir(&cwd).join("sac.sqlite");
+            if !db_path.exists() {
+                if cli.json {
+                    println!("[]");
+                } else {
+                    println!("No local index — run 'speedy-cli index' first.");
+                }
+                return Ok(());
+            }
             let db = speedy_ai_context::db::SqliteVectorStore::new(&cwd_str)
                 .await
                 .context("cannot open local index — run 'speedy-cli index' first")?;
