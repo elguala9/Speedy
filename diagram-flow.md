@@ -36,19 +36,26 @@ speedy-text-context        worker: text index     (feature text_context)
 
 ```
 speedy-cli <cmd>
-  │ probe is_alive() once
+  │ probe is_alive() once   (SPEEDY_NO_DAEMON=1 forces standalone)
   │
-  ├─ index/query/context/sync/reembed
+  ├─ index/query/context/reembed   (ai-context only)
   │     daemon → exec → speedy-ai-context
   │     standalone → spawn speedy-ai-context <cmd>
   │
-  ├─ reindex            (fan-out over the 3)
+  ├─ sync / force        (fan-out over the 3, INCREMENTAL)
+  │     daemon → IPC sync
+  │     standalone → contexts::sync_workspace
+  │
+  ├─ update <files...>   (fan-out over the 3, PER-FILE — used by post-commit)
+  │     always in-process → contexts::update_files
+  │
+  ├─ reindex            (fan-out over the 3, FULL rebuild)
   │     daemon → IPC reindex
   │     standalone → contexts::reindex_workspace
   │
   ├─ workspace add/remove
-  │     daemon → IPC
-  │     standalone → speedy_core::workspace
+  │     daemon → IPC ;  standalone → speedy_core::workspace
+  │     + best-effort install/uninstall of the Speedy git hooks (if a git repo)
   │
   ├─ workspace list → speedy_core::workspace::list()  (always in-process)
   │
@@ -75,7 +82,7 @@ speedy-gui
                    • actions still operational via speedy-cli
 ```
 
-## reindex — fan-out over the 3 contexts
+## reindex — full rebuild, fan-out over the 3 contexts
 
 ```
 reindex_workspace(path)               [speedy_core::contexts]
@@ -85,6 +92,43 @@ reindex_workspace(path)               [speedy_core::contexts]
   └─ text_context?    → speedy-text-context index <path>
   → summary: "ai-context: .. | slc: .. | text: .."
   (feature off = skip; each worker independent, one failure does not block the others)
+```
+
+## sync — incremental, fan-out over the 3 contexts
+
+```
+sync_workspace(path, force)           [speedy_core::contexts]
+  load_features(path)
+  ├─ speedy_indexer?  → speedy-ai-context sync          (mtime+hash skip; prunes deletions)
+  ├─ language_context? → speedy-language-context sync   (mtime+hash skip; prunes deletions)
+  └─ text_context?    → speedy-text-context sync <path> (mtime+hash skip; prunes deletions)
+  (NEVER slower than a full index: unchanged files are skipped by content hash)
+```
+
+## update — incremental, PER-FILE, fan-out over the 3 contexts
+
+```
+update_files(path, files, force)      [speedy_core::contexts]
+  load_features(path)            for each given file (no whole-tree walk):
+  ├─ speedy_indexer?  → speedy-ai-context -p <path> index <file>
+  ├─ language_context? → speedy-language-context --path <path> update <file>
+  └─ text_context?    → speedy-text-context update <path> <file>
+  (the cheap path for the post-commit hook, which already knows the changed files)
+```
+
+## git hooks (default sync mechanism — no daemon)
+
+```
+installed by `speedy-cli workspace add` (best-effort) or `speedy install-hooks`
+removed   by `speedy-cli workspace remove`            or `speedy uninstall-hooks`
+all 4 hooks call speedy-cli with SPEEDY_NO_DAEMON=1 (→ standalone fan-out):
+
+  post-commit   → speedy-cli update <changed files>   (per-file, all contexts)
+  post-checkout → speedy-cli sync                      (branch switch only; $3≠0)
+  post-merge    → speedy-cli sync
+  post-rewrite  → speedy-cli sync                      (rebase / amend)
+
+  (each context still no-ops unless enabled; SPEEDY_SKIP_HOOKS disables all)
 ```
 
 ## Watcher (daemon only)

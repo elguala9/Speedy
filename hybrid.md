@@ -1,13 +1,21 @@
 # Speedy — Hybrid Plan: Daemon + Git Hooks
 
-> **⚠️ Superseded by the "no-daemon" default.** By default the daemon is no
-> longer started and the hooks **always run standalone** (`SPEEDY_NO_DAEMON=1`),
-> without the `daemon ping` branch. The scripts described below with the
-> "daemon up? → IPC / daemon down? → standalone" logic are **historical**: the
-> current templates in `scripts/git-hooks/*.tpl` invoke the worker directly. In
-> addition the contexts are opt-in (disabled by default); the worker is a no-op
-> when the feature is off. This document remains as a reference for the original
-> hybrid model.
+> **⚠️ Superseded — see [`diagram-flow.md`](./diagram-flow.md) for the shipped flow.**
+> The embedded scripts below (with the "daemon up? → IPC / daemon down? →
+> standalone" branch, and one block per worker) are **historical**. As shipped,
+> the templates in `scripts/git-hooks/*.tpl`:
+> - **route through `speedy-cli`** (one orchestration point) with
+>   `SPEEDY_NO_DAEMON=1`, never the individual workers;
+> - fan out to **all enabled contexts** (ai-context, language-context,
+>   text-context) — contexts are opt-in, so each is a no-op when off;
+> - `post-commit` runs `speedy-cli update <changed files>` (per-file);
+>   `post-checkout` / `post-merge` / `post-rewrite` run `speedy-cli sync`
+>   (incremental, mtime+hash skip, prunes deletions);
+> - are **installed automatically by `speedy-cli workspace add`** and removed by
+>   `workspace remove` (still also available via `speedy install-hooks` /
+>   `uninstall-hooks`).
+>
+> This document remains as a reference for the original hybrid design.
 
 **Goal (historical)**: the git hooks cover the "daemon off" case and speed up post-commit synchronization even when the daemon is active, without duplicating work.
 

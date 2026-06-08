@@ -5,11 +5,15 @@ Local Semantic File System — bridges your local filesystem with AI models.
 Speedy indexes your codebase into a SQLite vector database and exposes semantic search over your code through a CLI and an MCP server for AI agents (Claude Code, Cursor, opencode, Windsurf, …).
 
 > **Default behavior (no daemon).** Out of the box Speedy does **not** run the
-> background daemon. Synchronization happens **only through git hooks**
-> (`speedy install-hooks`), which run the worker standalone on each
-> commit/checkout/merge/rebase. The daemon is still available for live
-> file-watching but is **never auto-started** — launch it explicitly with
-> `speedy daemon` or the GUI's "Start daemon" button.
+> background daemon. Synchronization happens **only through git hooks**, which
+> run standalone (no daemon) on each commit/checkout/merge/rebase. The hooks are
+> installed automatically when you register a repo with
+> `speedy-cli workspace add` (and removed by `workspace remove`); you can also
+> manage them by hand with `speedy install-hooks` / `uninstall-hooks`. Every
+> hook routes through `speedy-cli`, which fans the work out to **all enabled
+> contexts** (ai-context, language-context, text-context). The daemon is still
+> available for live file-watching but is **never auto-started** — launch it
+> explicitly with `speedy daemon` or the GUI's "Start daemon" button.
 >
 > **All contexts are opt-in.** `speedy_indexer` (semantic index),
 > `language_context` (code intelligence) and `text_context` are **disabled by
@@ -188,8 +192,11 @@ SPEEDY_NO_DAEMON=1 speedy-ai-context index .
 SPEEDY_NO_DAEMON=1 speedy-ai-context query "find auth"
 ```
 
-You lose live re-indexing on file changes — every query reflects only what
-the last manual `index` / `sync` captured.
+Without the daemon there is no live re-indexing on *every* save — but if the
+workspace was added with `speedy-cli workspace add` (or you ran
+`speedy install-hooks`), the git hooks keep the index fresh on every
+commit/checkout/merge/rebase. Between commits, a query reflects what the last
+hook run (or manual `index` / `sync` / `update`) captured.
 
 ## Prerequisites
 
@@ -225,10 +232,12 @@ Global flags: `-p/--path`, `--daemon-socket`, `--json`.
 | `query <q> [-k <N>]`             | Send `exec ... query <q> -k <N>` — semantic search (requires embedding model) |
 | `grep <pattern> [-k <N>]`        | FTS5 keyword search directly on the local index (no embedding, no daemon) |
 | `context`                        | Send `exec ... context`                                             |
-| `sync`                           | Send `exec ... sync`                                                |
-| `force [-p <path>]`              | Send `sync <path>` directly (daemon-driven incremental sync)        |
+| `sync`                           | **Incremental** sync across **all enabled contexts** (mtime+hash skip; prunes deletions) |
+| `update <files…>`                | **Per-file** incremental update across all enabled contexts (used by the `post-commit` hook) |
+| `force [-p <path>]`              | Same fan-out incremental sync, targeting an explicit path           |
+| `reindex [-p <path>]`            | **Full** rebuild across all enabled contexts                        |
 | `daemon {status,list,stop,ping}` | Talk to the daemon directly (no `speedy-ai-context.exe` involved)              |
-| `workspace {list,add,remove}`    | Register/unregister workspaces (note: path is **positional** here)  |
+| `workspace {list,add,remove}`    | Register/unregister workspaces (path is **positional**); `add`/`remove` also install/remove the git hooks |
 
 ### `speedy-daemon.exe` — the central daemon
 
