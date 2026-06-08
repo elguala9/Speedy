@@ -35,7 +35,8 @@ impl Features {
     /// missing section → returns `Default::default()` rather than erroring;
     /// the user might just not have configured anything yet.
     pub fn load(workspace_root: &Path) -> Self {
-        let path = workspace_root.join(".speedy").join("config.toml");
+        let path =
+            speedy_core::daemon_util::speedy_subdir(workspace_root).join("config.toml");
         if !path.exists() {
             return Features::default();
         }
@@ -60,7 +61,7 @@ impl Features {
     /// Persist this struct into `.speedy/config.toml`'s `[features]` section,
     /// preserving any other top-level tables that were already there.
     pub fn save(&self, workspace_root: &Path) -> Result<()> {
-        let dir = workspace_root.join(".speedy");
+        let dir = speedy_core::daemon_util::speedy_subdir(workspace_root);
         std::fs::create_dir_all(&dir).context("creating .speedy/")?;
         let path = dir.join("config.toml");
 
