@@ -793,34 +793,31 @@ impl Indexer {
     pub async fn sync_all(&self) -> Result<IndexStats> {
         let start = Instant::now();
 
+        // Add/update pass: reuse `index_directory`, the same efficient path the
+        // full "Index" command uses. It loads all stored file-meta in a single
+        // query, skips unchanged files via the mtime+hash fast-path, and embeds
+        // changed files in concurrent batches. The previous per-file loop here
+        // issued one `get_file_meta` round-trip *and* one embed call per file,
+        // serially — which made an incremental sync slower than a full index.
+        let stats = self.index_directory(&self.root).await?;
 
-        let filter = FileFilter::new(&self.root);
+        // Removal pass: drop chunks for files that have been deleted from disk
+        // since the last index. (`index_directory` never removes; it only
+        // adds/updates the files it walks.)
         let current_files: std::collections::HashSet<String> =
-            filter.filtered_files().into_iter().collect();
-
-        let db_files: std::collections::HashSet<String> =
-            self.db.get_all_file_paths().await?.into_iter().collect();
-
-        let mut added = 0;
+            FileFilter::new(&self.root).filtered_files().into_iter().collect();
+        let db_files = self.db.get_all_file_paths().await?;
         let mut removed = 0;
-
-        for file in &current_files {
-            let p = Path::new(file);
-            if FileFilter::is_binary(p) {
-                continue;
+        for file in &db_files {
+            if !current_files.contains(file) {
+                self.db.remove_chunks_for_file(file).await?;
+                removed += 1;
             }
-            let chunks = self.index_file(file).await?;
-            added += chunks;
-        }
-
-        for file in db_files.difference(&current_files) {
-            self.db.remove_chunks_for_file(file).await?;
-            removed += 1;
         }
 
         Ok(IndexStats {
-            files: added,
-            chunks: added,
+            files: stats.files,
+            chunks: stats.chunks,
             removed,
             duration_ms: start.elapsed().as_millis() as u64,
         })
