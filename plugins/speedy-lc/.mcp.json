@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "speedy-lc": {
+      "command": "speedy-language-context-mcp",
+      "args": ["-w", "${CLAUDE_PROJECT_DIR}"]
+    }
+  }
+}

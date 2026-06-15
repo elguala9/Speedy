@@ -1,0 +1,21 @@
+{
+  "name": "speedy",
+  "owner": {
+    "name": "Luca Gualandi"
+  },
+  "metadata": {
+    "description": "Local, dependency-free code-intelligence MCP servers from the Speedy project."
+  },
+  "plugins": [
+    {
+      "name": "speedy-lc",
+      "source": "./plugins/speedy-lc",
+      "description": "Code graph intelligence — file/symbol skeletons and impact analysis. No Ollama, no daemon."
+    },
+    {
+      "name": "speedy-text",
+      "source": "./plugins/speedy-text",
+      "description": "Text-symbol search and project-wide rename across docs/config files."
+    }
+  ]
+}
