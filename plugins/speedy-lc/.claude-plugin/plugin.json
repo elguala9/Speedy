@@ -1,0 +1,15 @@
+{
+  "name": "speedy-lc",
+  "displayName": "Speedy Language Context",
+  "version": "0.2.2",
+  "description": "Code graph intelligence — file/symbol skeletons and impact analysis over a local symbol index. No Ollama, no daemon.",
+  "author": {
+    "name": "Luca Gualandi"
+  },
+  "homepage": "https://github.com/elguala9/Speedy",
+  "repository": "https://github.com/elguala9/Speedy",
+  "license": "MIT",
+  "keywords": ["mcp", "code-intelligence", "tree-sitter", "symbol-graph", "impact-analysis"],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/"
+}

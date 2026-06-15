@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "speedy-lc": {
+      "type": "local",
+      "command": ["speedy-language-context-mcp"],
+      "enabled": true
+    },
+    "speedy-text": {
+      "type": "local",
+      "command": ["speedy-text-context-mcp"],
+      "enabled": true
+    }
+  }
+}
